@@ -3,6 +3,7 @@
 // a screen), block syntax and newlines survive verbatim, and no input can
 // yield a blank or thrown result.
 import XCTest
+
 @testable import AstralCore
 
 final class InlineMarkdownTests: XCTestCase {

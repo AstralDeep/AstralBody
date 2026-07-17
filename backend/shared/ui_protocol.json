@@ -1,9 +1,41 @@
 {
   "version": 1,
   "description": "Committed UI-protocol manifest (feature 044). Single source for the server->client WS frame vocabulary, the ui_event action vocabulary, and the component vocabulary. Backend, Windows, and Android test suites all assert against this file; adding a frame type, action, or component type REQUIRES editing it in the same PR (guards fail otherwise). See specs/044-native-client-parity/contracts/ui-protocol.md.",
+  "frame_contracts": {
+    "admission_refusal": {
+      "type": "error",
+      "exact_fields": [
+        "type",
+        "submission_id",
+        "accepted",
+        "code",
+        "message",
+        "retryable",
+        "retry_after_ms"
+      ],
+      "submission_id": "canonical_lowercase_uuid4",
+      "accepted": false,
+      "additional_fields": false,
+      "codes": [
+        "capacity_exceeded",
+        "registration_required",
+        "registration_timeout",
+        "idempotency_conflict",
+        "connection_closing",
+        "service_draining",
+        "invalid_input",
+        "registration_queue_full",
+        "operation_failed"
+      ]
+    }
+  },
   "push_types": [
     {"name": "agent_bundle_deliver", "category": "agents"},
     {"name": "agent_creation_progress", "category": "creation"},
+    {"name": "agent_host_inventory_reconciled", "category": "agents"},
+    {"name": "agent_host_registered", "category": "agents"},
+    {"name": "agent_host_registration_refused", "category": "agents"},
+    {"name": "agent_lifecycle", "category": "agents"},
     {"name": "agent_list", "category": "bootstrap"},
     {"name": "agent_offline", "category": "agents"},
     {"name": "agent_permissions", "category": "permissions"},
@@ -28,12 +60,15 @@
     {"name": "component_saved", "category": "component_verbs"},
     {"name": "components_combined", "category": "component_verbs"},
     {"name": "components_condensed", "category": "component_verbs"},
+    {"name": "conversation_commit_ready", "category": "chat"},
+    {"name": "conversation_snapshot", "category": "chat"},
     {"name": "error", "category": "error", "shapes": ["code+message", "payload.message", "message"]},
     {"name": "heartbeat", "category": "chat"},
     {"name": "history_list", "category": "chat"},
     {"name": "llm_config_ack", "category": "llm"},
     {"name": "llm_usage_report", "category": "llm"},
     {"name": "notification", "category": "notification"},
+    {"name": "operation_status", "category": "operations"},
     {"name": "rote_config", "category": "bootstrap"},
     {"name": "saved_components_list", "category": "component_verbs"},
     {"name": "stream_data", "category": "streaming"},
@@ -99,6 +134,84 @@
       "scope": "present when the stream is bridged to a workspace component identity; absent on legacy/narrative streams",
       "introduced_by": "055-uniform-artifacts (FR-010)",
       "contract": "specs/055-uniform-artifacts/contracts/wire-contract.md"
+    },
+    {
+      "field": "agent_host",
+      "shape": {
+        "host_id": "uuid4",
+        "supported_runtime_contract_versions": ["positive integer"],
+        "runtime_lock_sha256": "64 lowercase hex",
+        "platform": "windows | macos",
+        "client_version": "strict SemVer"
+      },
+      "carried_on": ["register_ui"],
+      "scope": "authenticated desktop host advertisement; the client never supplies host_session_id",
+      "introduced_by": "060-runtime-reliability-hardening (FR-019)",
+      "contract": "specs/060-runtime-reliability-hardening/contracts/personal-agent-runtime.md"
+    },
+    {
+      "field": "connection_generation",
+      "shape": "uuid4",
+      "carried_on": ["register_ui", "conversation_commit_ready", "conversation_snapshot", "operation_status", "ui_render", "ui_update", "ui_upsert", "ui_append", "ui_stream_data"],
+      "scope": "fresh equality fence for one WebSocket connection attempt",
+      "introduced_by": "060-runtime-reliability-hardening (FR-029, FR-032)",
+      "contract": "specs/060-runtime-reliability-hardening/contracts/conversation-continuity.md"
+    },
+    {
+      "field": "request_generation",
+      "shape": "uuid4",
+      "carried_on": ["conversation_commit_ready", "conversation_snapshot", "operation_status", "ui_render", "ui_update", "ui_upsert", "ui_append", "ui_stream_data"],
+      "scope": "fresh equality fence for one hydration or commit request",
+      "introduced_by": "060-runtime-reliability-hardening (FR-029, FR-032)",
+      "contract": "specs/060-runtime-reliability-hardening/contracts/conversation-continuity.md"
+    },
+    {
+      "field": "chat_id",
+      "shape": "uuid4",
+      "carried_on": ["conversation_commit_ready", "conversation_snapshot", "operation_status", "ui_render", "ui_update", "ui_upsert", "ui_append", "ui_stream_data"],
+      "scope": "owner-validated active chat; operation_status uses explicit null for surface-only work",
+      "introduced_by": "060-runtime-reliability-hardening (FR-029, FR-032)",
+      "contract": "specs/060-runtime-reliability-hardening/contracts/conversation-continuity.md"
+    },
+    {
+      "field": "base_render_revision",
+      "shape": "unsigned 64-bit integer",
+      "carried_on": ["ui_render", "ui_update", "ui_upsert", "ui_append", "ui_stream_data"],
+      "scope": "disposable preview overlay; must equal the current committed revision",
+      "introduced_by": "060-runtime-reliability-hardening (FR-029)",
+      "contract": "specs/060-runtime-reliability-hardening/contracts/conversation-continuity.md"
+    },
+    {
+      "field": "frame_sequence",
+      "shape": "unsigned 64-bit integer",
+      "carried_on": ["ui_render", "ui_update", "ui_upsert", "ui_append", "ui_stream_data"],
+      "scope": "strictly increasing within a chat/connection/request overlay generation",
+      "introduced_by": "060-runtime-reliability-hardening (FR-029)",
+      "contract": "specs/060-runtime-reliability-hardening/contracts/conversation-continuity.md"
+    },
+    {
+      "field": "resume",
+      "shape": {
+        "schema_version": 1,
+        "active_chat_id": "uuid4",
+        "request_generation": "uuid4"
+      },
+      "carried_on": ["register_ui"],
+      "scope": "optional account-scoped active-chat hydration request",
+      "introduced_by": "060-runtime-reliability-hardening (FR-027, FR-029)",
+      "contract": "specs/060-runtime-reliability-hardening/contracts/conversation-continuity.md"
+    },
+    {
+      "field": "capabilities.personal_agent_host.macos",
+      "shape": {
+        "supported": "boolean",
+        "runtime_contract_versions": ["positive integer"],
+        "source_feature": "059 | null"
+      },
+      "carried_on": ["system_config", "GET /api/dashboard"],
+      "scope": "immutable candidate-owned applicability; missing or malformed is blocking",
+      "introduced_by": "060-runtime-reliability-hardening (FR-050)",
+      "contract": "specs/060-runtime-reliability-hardening/contracts/personal-agent-runtime.md"
     }
   ],
   "component_types": [

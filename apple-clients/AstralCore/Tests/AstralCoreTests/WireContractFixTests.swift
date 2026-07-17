@@ -4,6 +4,7 @@
 // codes map to human text (and terminal codes CLEAR the line), and the block
 // markdown segmenter handles the shapes the backend actually produces.
 import XCTest
+
 @testable import AstralCore
 
 final class WireContractFixTests: XCTestCase {
@@ -16,7 +17,8 @@ final class WireContractFixTests: XCTestCase {
     // MARK: keyvalue
 
     func testKeyValueReadsWireItemsShape() {
-        let c = component(#"{"type":"keyvalue","items":[{"label":"Region","value":"US"},{"label":"Tier","value":"Pro"}]}"#)
+        let c = component(
+            #"{"type":"keyvalue","items":[{"label":"Region","value":"US"},{"label":"Tier","value":"Pro"}]}"#)
         XCTAssertEqual(c.keyValuePairs.map(\.0), ["Region", "Tier"])
         XCTAssertEqual(c.keyValuePairs.map(\.1), ["US", "Pro"])
     }
@@ -30,7 +32,9 @@ final class WireContractFixTests: XCTestCase {
     // MARK: detailed list items
 
     func testDetailedListItemsComposeTitleAndSubtitle() {
-        let c = component(#"{"type":"list","variant":"detailed","items":[{"title":"Result","url":"https://x","subtitle":"A snippet"}]}"#)
+        let c = component(
+            #"{"type":"list","variant":"detailed","items":[{"title":"Result","url":"https://x","subtitle":"A snippet"}]}"#
+        )
         XCTAssertEqual(c.listItems, ["Result — A snippet"])
     }
 
@@ -76,31 +80,39 @@ final class WireContractFixTests: XCTestCase {
 
     func testBlocksSplitHeadingParagraphAndFence() {
         let blocks = MarkdownBlocks.parse("## Findings\n\nBody text here.\n\n```\nlet x = 1\n```")
-        XCTAssertEqual(blocks, [
-            .heading(level: 2, text: "Findings"),
-            .paragraph("Body text here."),
-            .code("let x = 1"),
-        ])
+        XCTAssertEqual(
+            blocks,
+            [
+                .heading(level: 2, text: "Findings"),
+                .paragraph("Body text here."),
+                .code("let x = 1"),
+            ])
     }
 
     func testBlocksParseBulletsAndOrderedLists() {
         let blocks = MarkdownBlocks.parse("- one\n- two\n\n1. first\n2. second")
-        XCTAssertEqual(blocks, [
-            .bullets(items: ["one", "two"], ordered: false, start: 1),
-            .bullets(items: ["first", "second"], ordered: true, start: 1),
-        ])
+        XCTAssertEqual(
+            blocks,
+            [
+                .bullets(items: ["one", "two"], ordered: false, start: 1),
+                .bullets(items: ["first", "second"], ordered: true, start: 1),
+            ])
     }
 
     func testOrderedListKeepsAuthoredNumbering() {
-        XCTAssertEqual(MarkdownBlocks.parse("3. third\n4. fourth"),
-                       [.bullets(items: ["third", "fourth"], ordered: true, start: 3)])
+        XCTAssertEqual(
+            MarkdownBlocks.parse("3. third\n4. fourth"),
+            [.bullets(items: ["third", "fourth"], ordered: true, start: 3)])
     }
 
     func testIndentedContinuationStaysInsideItsListItem() {
         XCTAssertEqual(
             MarkdownBlocks.parse("- item one\n  continues here\n- item two"),
-            [.bullets(items: ["item one continues here", "item two"],
-                      ordered: false, start: 1)])
+            [
+                .bullets(
+                    items: ["item one continues here", "item two"],
+                    ordered: false, start: 1)
+            ])
     }
 
     func testNestedBulletDoesNotSplitAnOrderedList() {
@@ -114,9 +126,11 @@ final class WireContractFixTests: XCTestCase {
 
     func testBlocksParsePipeTableWithHeader() {
         let blocks = MarkdownBlocks.parse("| City | Temp |\n|---|---|\n| Lexington | 88 |")
-        XCTAssertEqual(blocks, [
-            .table(rows: [["City", "Temp"], ["Lexington", "88"]], hasHeader: true),
-        ])
+        XCTAssertEqual(
+            blocks,
+            [
+                .table(rows: [["City", "Temp"], ["Lexington", "88"]], hasHeader: true)
+            ])
     }
 
     func testUnterminatedFenceStillRendersAsCode() {
@@ -129,8 +143,9 @@ final class WireContractFixTests: XCTestCase {
 
     func testPipePrefixedProseIsNotATable() {
         // Not pipe-wrapped → prose, verbatim (never restructure prose).
-        XCTAssertEqual(MarkdownBlocks.parse("|x - 3| < 5 holds"),
-                       [.paragraph("|x - 3| < 5 holds")])
+        XCTAssertEqual(
+            MarkdownBlocks.parse("|x - 3| < 5 holds"),
+            [.paragraph("|x - 3| < 5 holds")])
     }
 
     func testLonePipeWrappedLineWithoutSeparatorStaysProse() {
@@ -138,20 +153,23 @@ final class WireContractFixTests: XCTestCase {
     }
 
     func testQuotedFenceRendersAsCode() {
-        XCTAssertEqual(MarkdownBlocks.parse("> ```\n> pip install foo\n> ```"),
-                       [.code("pip install foo")])
+        XCTAssertEqual(
+            MarkdownBlocks.parse("> ```\n> pip install foo\n> ```"),
+            [.code("pip install foo")])
     }
 
     func testLiteralQuoteLinesInsideUnquotedFenceSurvive() {
-        XCTAssertEqual(MarkdownBlocks.parse("```\n> not a quote\n```"),
-                       [.code("> not a quote")])
+        XCTAssertEqual(
+            MarkdownBlocks.parse("```\n> not a quote\n```"),
+            [.code("> not a quote")])
     }
 
     func testPlainTextFlattensStructureForTheWatch() {
         XCTAssertEqual(
             MarkdownBlocks.plainText("## Findings\n- **a**\n- b"),
             "Findings\n• **a**\n• b")
-        XCTAssertEqual(MarkdownBlocks.plainText("no markdown at all"),
-                       "no markdown at all")
+        XCTAssertEqual(
+            MarkdownBlocks.plainText("no markdown at all"),
+            "no markdown at all")
     }
 }

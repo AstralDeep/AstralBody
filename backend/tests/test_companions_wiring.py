@@ -5,6 +5,7 @@
 """
 from __future__ import annotations
 
+import asyncio
 import os
 import sys
 from unittest.mock import AsyncMock, MagicMock
@@ -84,7 +85,7 @@ async def test_model_router_ondevice_surfaced(monkeypatch):
     from orchestrator.orchestrator import Orchestrator
     from orchestrator import model_router
 
-    o = Orchestrator()
+    o = await asyncio.to_thread(Orchestrator)
     o._record_llm_call = AsyncMock()
     o._record_llm_unconfigured = AsyncMock()
     # Feature 054: _call_llm resolves the socket user's PERSISTED config

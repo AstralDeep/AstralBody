@@ -63,7 +63,7 @@ def _parse_skill_token(token: str) -> Optional[Tuple[str, str]]:
 
 
 async def handle_submit(orch, websocket, user_id: str, message: str,
-                        chat_id: Optional[str]) -> bool:
+                        chat_id: Optional[str], result_sink=None) -> bool:
     """Persist an onboarding submit. Returns True if handled (caller then stops).
 
     Never raises — onboarding must not break the chat path; failures surface a
@@ -74,6 +74,8 @@ async def handle_submit(orch, websocket, user_id: str, message: str,
     m = (message or "").strip()
 
     async def _say(text: str, variant: str = "success"):
+        if result_sink is not None:
+            result_sink(text, variant)
         try:
             await orch.send_ui_render(
                 websocket, [Alert(message=text, variant=variant).to_dict()], target="chat")

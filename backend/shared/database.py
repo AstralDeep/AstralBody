@@ -3,11 +3,19 @@ import psycopg2.pool
 from psycopg2.extras import RealDictCursor
 import asyncio
 import atexit
+import hashlib
 import logging
 import os
 import json
 import threading
+import uuid
+from pathlib import Path
 from typing import List, Dict, Optional, Tuple
+
+from orchestrator.agent_constitution import (
+    USER_AGENT_POLICY_REVISION,
+    UserAgentPolicyOutcome,
+)
 
 logger = logging.getLogger('Database')
 
@@ -17,7 +25,15 @@ logger = logging.getLogger('Database')
 #          are off (FF_COMPONENT_REFINE / FF_ARTIFACT_SHARING)
 # 055.002: + background_task (durable cross-device task records) — additive,
 #          inert while FF_BG_CONTINUITY is off
-SCHEMA_REVISION = '057.001'
+# 060.004: + durable operation/admission, occurrence/effect, personal-agent
+#          runtime, draft publication, maintenance, conversation-commit
+#          coordination, and owner-scoped Run-now reconciliation. Additive and
+#          guarded by fixed PostgreSQL advisory transaction identities.
+SCHEMA_REVISION = '060.004'
+
+_SCHEMA_ADVISORY_LOCK = (1095980114, 60001)
+_USER_AGENT_POLICY_ADVISORY_LOCK = (1095980114, 60002)
+_LEGACY_AGENT_REVISION_NAMESPACE = uuid.UUID('f5f7b28d-9a9c-4c51-a3be-47e832627060')
 
 _POOLS: Dict[str, dict] = {}
 _POOLS_LOCK = threading.Lock()
@@ -109,7 +125,17 @@ def _build_database_url() -> str:
 class Database:
     def __init__(self, database_url: str = None):
         self.database_url = database_url or os.getenv("DATABASE_URL") or _build_database_url()
+        self._user_agent_policy_sweep_count = None
         self._init_db()
+        sweep_count = self._user_agent_policy_sweep_count
+        self.user_agent_policy_outcome = UserAgentPolicyOutcome(
+            policy_revision=USER_AGENT_POLICY_REVISION,
+            marker_changed=sweep_count is not None,
+            agents_marked_for_revalidation=(
+                0 if sweep_count is None else sweep_count
+            ),
+        )
+        del self._user_agent_policy_sweep_count
 
     @classmethod
     def close(cls) -> None:
@@ -240,33 +266,68 @@ class Database:
     def _init_db(self):
         """Ensure the database schema is current.
 
-        Fast path: when the stored ``schema_meta`` revision marker equals
-        ``SCHEMA_REVISION`` the full idempotent DDL/migration run is
-        skipped. A missing or mismatched marker triggers the full run,
-        then upserts the marker. Rollback: ``DELETE FROM schema_meta WHERE
-        key='revision'`` forces a full run on the next boot.
+        Schema and user-agent-policy revisions have independent fixed
+        PostgreSQL advisory transaction owners. Each marker is re-read only
+        after its lock is acquired, so concurrent starters observe the
+        winning transaction rather than repeating its work. Rollback:
+        ``DELETE FROM schema_meta WHERE key='revision'`` forces a full schema
+        run on the next boot.
         """
         from shared.perf import perf_span
         with perf_span('boot.init_db'):
             conn, pooled = self._borrow()
             try:
                 cursor = conn.cursor()
+                # This minimal bootstrap is committed before either advisory
+                # transaction. It is the only schema statement outside the
+                # fixed schema owner.
                 cursor.execute(
                     'CREATE TABLE IF NOT EXISTS schema_meta ('
                     'key TEXT PRIMARY KEY, value TEXT NOT NULL)'
                 )
                 conn.commit()
+
+                cursor.execute(
+                    'SELECT pg_advisory_xact_lock(%s, %s)',
+                    _SCHEMA_ADVISORY_LOCK,
+                )
                 cursor.execute("SELECT value FROM schema_meta WHERE key = 'revision'")
                 row = cursor.fetchone()
-                if row is not None and row['value'] == SCHEMA_REVISION:
-                    return
-                self._apply_full_schema(conn, cursor)
-                cursor.execute(
-                    "INSERT INTO schema_meta (key, value) VALUES ('revision', %s) "
-                    'ON CONFLICT (key) DO UPDATE SET value = EXCLUDED.value',
-                    (SCHEMA_REVISION,),
-                )
+                if row is None or row['value'] != SCHEMA_REVISION:
+                    self._apply_full_schema(conn, cursor)
+                    cursor.execute(
+                        "INSERT INTO schema_meta (key, value) VALUES ('revision', %s) "
+                        'ON CONFLICT (key) DO UPDATE SET value = EXCLUDED.value',
+                        (SCHEMA_REVISION,),
+                    )
                 conn.commit()
+
+                cursor.execute(
+                    'SELECT pg_advisory_xact_lock(%s, %s)',
+                    _USER_AGENT_POLICY_ADVISORY_LOCK,
+                )
+                cursor.execute(
+                    "SELECT value FROM schema_meta "
+                    "WHERE key = 'user_agent_policy_revision'"
+                )
+                row = cursor.fetchone()
+                if row is None or row['value'] != USER_AGENT_POLICY_REVISION:
+                    self._sweep_user_agent_policy_060(cursor)
+                    cursor.execute(
+                        "INSERT INTO schema_meta (key, value) VALUES ("
+                        "'user_agent_policy_revision', %s) "
+                        'ON CONFLICT (key) DO UPDATE SET value = EXCLUDED.value',
+                        (USER_AGENT_POLICY_REVISION,),
+                    )
+                conn.commit()
+            except Exception:
+                try:
+                    conn.rollback()
+                except Exception:
+                    # A killed/crashed migration owner can lose its backend
+                    # before local cleanup; preserve the original failure.
+                    pass
+                raise
             finally:
                 self._release(conn, pooled)
 
@@ -1379,6 +1440,1366 @@ class Database:
         # ── Feature 057: re-validate user agents against a bumped constitution ─
         self._migrate_revalidate_on_constitution_change_057(cursor)
 
+        # ── Feature 060: runtime reliability coordination schema ───────────
+        self._migrate_runtime_reliability_060(cursor)
+
+    def _migrate_runtime_reliability_060(self, cursor):
+        """Install the additive, repeat-safe feature-060 coordination schema."""
+        self._migrate_operation_coordination_060(cursor)
+        self._migrate_personal_agent_runtime_060(cursor)
+        self._migrate_draft_publication_060(cursor)
+        self._migrate_maintenance_coordination_060(cursor)
+        self._migrate_conversation_commit_060(cursor)
+        self._migrate_legacy_runtime_truth_060(cursor)
+
+    def _migrate_operation_coordination_060(self, cursor):
+        """Create operation, admission, occurrence, and effect authorities."""
+        cursor.execute('''
+            CREATE TABLE IF NOT EXISTS operation_admission_class (
+                class_name TEXT PRIMARY KEY,
+                parent_class_name TEXT REFERENCES operation_admission_class(class_name)
+                    ON DELETE RESTRICT,
+                active_limit INTEGER NOT NULL CHECK (active_limit > 0),
+                queue_limit INTEGER NOT NULL CHECK (queue_limit >= 0),
+                max_wait_ms INTEGER NOT NULL CHECK (
+                    max_wait_ms >= 0 AND (queue_limit = 0 OR max_wait_ms > 0)
+                ),
+                config_revision TEXT NOT NULL CHECK (length(config_revision) BETWEEN 1 AND 128),
+                updated_at TIMESTAMPTZ NOT NULL DEFAULT now(),
+                CONSTRAINT operation_admission_class_name_check CHECK (
+                    class_name IN (
+                        'global', 'interactive', 'background', 'scheduled',
+                        'maintenance', 'system'
+                    )
+                ),
+                CONSTRAINT operation_admission_parent_check CHECK (
+                    parent_class_name IS NULL OR parent_class_name <> class_name
+                )
+            )
+        ''')
+        cursor.execute('''
+            INSERT INTO operation_admission_class (
+                class_name, parent_class_name, active_limit, queue_limit,
+                max_wait_ms, config_revision
+            ) VALUES
+                ('global', NULL, 20, 0, 0, '060-defaults'),
+                ('interactive', 'global', 20, 100, 5000, '060-defaults'),
+                ('background', 'global', 5, 100, 30000, '060-defaults'),
+                ('scheduled', 'global', 5, 100, 30000, '060-defaults'),
+                ('maintenance', 'global', 2, 100, 30000, '060-defaults'),
+                ('system', 'global', 5, 100, 30000, '060-defaults')
+            ON CONFLICT (class_name) DO NOTHING
+        ''')
+
+        cursor.execute('''
+            CREATE TABLE IF NOT EXISTS operation_record (
+                operation_id UUID PRIMARY KEY,
+                operation_kind TEXT NOT NULL
+                    CHECK (operation_kind ~ '^[a-z][a-z0-9_]{0,63}$'),
+                admission_class TEXT NOT NULL REFERENCES operation_admission_class(class_name)
+                    ON DELETE RESTRICT CHECK (admission_class <> 'global'),
+                owner_scope TEXT NOT NULL CHECK (
+                    owner_scope IN ('connection', 'user', 'schedule', 'maintenance', 'system')
+                ),
+                owner_user_id TEXT,
+                connection_scope_id UUID,
+                idempotency_namespace TEXT,
+                idempotency_key TEXT,
+                normalized_input_digest CHAR(64),
+                chat_id TEXT,
+                parent_operation_id UUID REFERENCES operation_record(operation_id)
+                    ON DELETE SET NULL,
+                connection_generation UUID,
+                request_generation UUID,
+                state TEXT NOT NULL CHECK (
+                    state IN ('queued', 'running', 'completed', 'failed', 'cancelled', 'retryable')
+                ),
+                phase_code TEXT CHECK (
+                    phase_code IS NULL OR phase_code ~ '^[a-z][a-z0-9_]{0,127}$'
+                ),
+                terminal_code TEXT
+                    CHECK (
+                        terminal_code IS NULL
+                        OR terminal_code ~ '^[a-z][a-z0-9_]{0,127}$'
+                    ),
+                safe_summary TEXT
+                    CHECK (safe_summary IS NULL OR length(safe_summary) <= 512),
+                retry_after_ms INTEGER CHECK (retry_after_ms IS NULL OR retry_after_ms >= 0),
+                execution_generation BIGINT NOT NULL DEFAULT 0
+                    CHECK (execution_generation >= 0),
+                execution_lease_token UUID,
+                state_revision BIGINT NOT NULL DEFAULT 0 CHECK (state_revision >= 0),
+                accepted_at TIMESTAMPTZ NOT NULL DEFAULT now(),
+                updated_at TIMESTAMPTZ NOT NULL DEFAULT now(),
+                queue_deadline_at TIMESTAMPTZ,
+                started_at TIMESTAMPTZ,
+                terminal_at TIMESTAMPTZ,
+                cancel_requested_at TIMESTAMPTZ,
+                purge_after TIMESTAMPTZ,
+                CONSTRAINT operation_owner_partition_check CHECK (
+                    (owner_scope IN ('user', 'schedule') AND owner_user_id IS NOT NULL)
+                    OR (owner_scope = 'connection' AND owner_user_id IS NULL
+                        AND connection_scope_id IS NOT NULL)
+                    OR (owner_scope IN ('maintenance', 'system') AND owner_user_id IS NULL)
+                ),
+                CONSTRAINT operation_idempotency_tuple_check CHECK (
+                    (idempotency_namespace IS NULL AND idempotency_key IS NULL
+                        AND normalized_input_digest IS NULL)
+                    OR (idempotency_namespace IS NOT NULL AND idempotency_key IS NOT NULL
+                        AND normalized_input_digest ~ '^[0-9a-f]{64}$'
+                        AND length(idempotency_namespace) BETWEEN 1 AND 128
+                        AND length(idempotency_key) BETWEEN 1 AND 256)
+                ),
+                CONSTRAINT operation_state_times_check CHECK (
+                    (state IN ('completed', 'failed', 'cancelled', 'retryable')
+                        AND terminal_at IS NOT NULL AND purge_after IS NOT NULL
+                        AND (state = 'completed' OR terminal_code IS NOT NULL))
+                    OR (state IN ('queued', 'running')
+                        AND terminal_at IS NULL AND purge_after IS NULL)
+                ),
+                CONSTRAINT operation_start_time_check CHECK (
+                    (state = 'queued' AND started_at IS NULL)
+                    OR (state = 'running' AND started_at IS NOT NULL)
+                    OR (state IN ('completed', 'failed', 'cancelled', 'retryable')
+                        AND (
+                            (execution_generation = 0 AND started_at IS NULL)
+                            OR (execution_generation > 0 AND started_at IS NOT NULL)
+                        ))
+                ),
+                CONSTRAINT operation_terminal_payload_check CHECK (
+                    (state IN ('queued', 'running')
+                        AND terminal_code IS NULL
+                        AND safe_summary IS NULL
+                        AND retry_after_ms IS NULL)
+                    OR (state = 'completed' AND retry_after_ms IS NULL)
+                    OR (state IN ('failed', 'cancelled') AND retry_after_ms IS NULL)
+                    OR state = 'retryable'
+                ),
+                CONSTRAINT operation_queue_deadline_check CHECK (
+                    state <> 'queued' OR queue_deadline_at IS NOT NULL
+                ),
+                CONSTRAINT operation_retry_delay_check CHECK (
+                    retry_after_ms IS NULL OR state = 'retryable'
+                ),
+                CONSTRAINT operation_parent_check CHECK (
+                    parent_operation_id IS NULL OR parent_operation_id <> operation_id
+                ),
+                CONSTRAINT operation_execution_fence_check CHECK (
+                    (state = 'queued' AND execution_generation = 0
+                        AND execution_lease_token IS NULL)
+                    OR (state = 'running' AND execution_generation > 0
+                        AND execution_lease_token IS NOT NULL)
+                    OR (state IN ('completed', 'failed', 'cancelled', 'retryable')
+                        AND execution_lease_token IS NULL)
+                )
+            )
+        ''')
+        cursor.execute('''
+            CREATE UNIQUE INDEX IF NOT EXISTS ux_operation_idempotency_owner
+            ON operation_record (
+                owner_scope,
+                (CASE
+                    WHEN owner_scope = 'connection' THEN connection_scope_id::text
+                    WHEN owner_scope IN ('user', 'schedule') THEN owner_user_id
+                    ELSE ''
+                END),
+                idempotency_namespace,
+                idempotency_key
+            )
+            WHERE idempotency_namespace IS NOT NULL
+        ''')
+        cursor.execute('''
+            CREATE INDEX IF NOT EXISTS idx_operation_state_fifo
+            ON operation_record (state, accepted_at, operation_id)
+        ''')
+        cursor.execute('''
+            CREATE INDEX IF NOT EXISTS idx_operation_owner_recent
+            ON operation_record (owner_scope, owner_user_id, accepted_at DESC)
+        ''')
+        cursor.execute('''
+            CREATE INDEX IF NOT EXISTS idx_operation_connection_state
+            ON operation_record (connection_scope_id, state)
+        ''')
+        cursor.execute('''
+            CREATE INDEX IF NOT EXISTS idx_operation_terminal_purge
+            ON operation_record (purge_after) WHERE purge_after IS NOT NULL
+        ''')
+
+        cursor.execute('''
+            CREATE TABLE IF NOT EXISTS operation_admission_slot (
+                class_name TEXT NOT NULL REFERENCES operation_admission_class(class_name)
+                    ON DELETE CASCADE,
+                slot_number INTEGER NOT NULL CHECK (slot_number > 0),
+                operation_id UUID REFERENCES operation_record(operation_id)
+                    ON DELETE SET NULL,
+                lease_token UUID,
+                claim_generation BIGINT NOT NULL DEFAULT 0 CHECK (claim_generation >= 0),
+                lease_expires_at TIMESTAMPTZ,
+                PRIMARY KEY (class_name, slot_number),
+                CONSTRAINT operation_slot_occupancy_check CHECK (
+                    (operation_id IS NULL AND lease_token IS NULL
+                        AND lease_expires_at IS NULL)
+                    OR (operation_id IS NOT NULL AND lease_token IS NOT NULL
+                        AND lease_expires_at IS NOT NULL)
+                )
+            )
+        ''')
+        cursor.execute('''
+            CREATE UNIQUE INDEX IF NOT EXISTS ux_operation_slot_class_operation
+            ON operation_admission_slot (class_name, operation_id)
+            WHERE operation_id IS NOT NULL
+        ''')
+        cursor.execute('''
+            INSERT INTO operation_admission_slot (class_name, slot_number)
+            SELECT c.class_name, series.slot_number
+            FROM operation_admission_class AS c
+            CROSS JOIN LATERAL generate_series(1, c.active_limit) AS series(slot_number)
+            ON CONFLICT (class_name, slot_number) DO NOTHING
+        ''')
+
+        cursor.execute('''
+            CREATE TABLE IF NOT EXISTS operation_submission_result (
+                submission_result_id UUID PRIMARY KEY,
+                submission_id UUID NOT NULL,
+                owner_scope TEXT NOT NULL CHECK (
+                    owner_scope IN ('connection', 'user', 'schedule', 'maintenance', 'system')
+                ),
+                owner_user_id TEXT,
+                connection_scope_id UUID,
+                accepted BOOLEAN NOT NULL,
+                operation_id UUID REFERENCES operation_record(operation_id)
+                    ON DELETE SET NULL,
+                refusal_code TEXT CHECK (
+                    refusal_code IS NULL
+                    OR refusal_code ~ '^[a-z][a-z0-9_]{0,127}$'
+                ),
+                retryable BOOLEAN NOT NULL DEFAULT FALSE,
+                retry_after_ms INTEGER CHECK (retry_after_ms IS NULL OR retry_after_ms >= 0),
+                observed_at TIMESTAMPTZ NOT NULL DEFAULT now(),
+                purge_after TIMESTAMPTZ NOT NULL,
+                CONSTRAINT operation_submission_owner_check CHECK (
+                    (owner_scope IN ('user', 'schedule') AND owner_user_id IS NOT NULL)
+                    OR (owner_scope = 'connection' AND owner_user_id IS NULL
+                        AND connection_scope_id IS NOT NULL)
+                    OR (owner_scope IN ('maintenance', 'system') AND owner_user_id IS NULL)
+                ),
+                CONSTRAINT operation_submission_outcome_check CHECK (
+                    (accepted AND refusal_code IS NULL
+                        AND retryable = FALSE AND retry_after_ms IS NULL)
+                    OR (NOT accepted AND operation_id IS NULL AND refusal_code IS NOT NULL
+                        AND (retry_after_ms IS NULL OR retryable))
+                )
+            )
+        ''')
+        cursor.execute('''
+            CREATE UNIQUE INDEX IF NOT EXISTS ux_operation_submission_owner
+            ON operation_submission_result (
+                submission_id,
+                owner_scope,
+                (CASE
+                    WHEN owner_scope = 'connection' THEN connection_scope_id::text
+                    WHEN owner_scope IN ('user', 'schedule') THEN owner_user_id
+                    ELSE ''
+                END)
+            )
+        ''')
+        cursor.execute('''
+            CREATE INDEX IF NOT EXISTS idx_operation_submission_purge
+            ON operation_submission_result (purge_after)
+        ''')
+
+        cursor.execute('''
+            CREATE TABLE IF NOT EXISTS scheduled_occurrence (
+                occurrence_id UUID PRIMARY KEY,
+                job_id UUID NOT NULL REFERENCES scheduled_job(id) ON DELETE RESTRICT,
+                owner_user_id TEXT NOT NULL,
+                scheduled_for TIMESTAMPTZ NOT NULL,
+                run_now_submission_id UUID,
+                state TEXT NOT NULL CHECK (
+                    state IN ('pending', 'claimed', 'running', 'completed', 'failed',
+                              'retryable', 'cancelled')
+                ),
+                lease_token UUID,
+                claim_generation BIGINT NOT NULL DEFAULT 0 CHECK (claim_generation >= 0),
+                lease_owner TEXT,
+                lease_expires_at TIMESTAMPTZ,
+                attempt_count INTEGER NOT NULL DEFAULT 0 CHECK (attempt_count >= 0),
+                current_operation_id UUID REFERENCES operation_record(operation_id)
+                    ON DELETE SET NULL,
+                operation_execution_generation BIGINT
+                    CHECK (operation_execution_generation IS NULL
+                           OR operation_execution_generation > 0),
+                first_eligible_at TIMESTAMPTZ NOT NULL,
+                started_at TIMESTAMPTZ,
+                terminal_at TIMESTAMPTZ,
+                next_attempt_at TIMESTAMPTZ,
+                result_code TEXT,
+                last_error_code TEXT,
+                created_at TIMESTAMPTZ NOT NULL DEFAULT now(),
+                updated_at TIMESTAMPTZ NOT NULL DEFAULT now(),
+                UNIQUE (job_id, scheduled_for),
+                CONSTRAINT scheduled_occurrence_lease_check CHECK (
+                    (state IN ('claimed', 'running') AND lease_token IS NOT NULL
+                        AND lease_owner IS NOT NULL AND lease_expires_at IS NOT NULL)
+                    OR (state NOT IN ('claimed', 'running'))
+                ),
+                CONSTRAINT scheduled_occurrence_terminal_check CHECK (
+                    (state IN ('completed', 'failed', 'cancelled') AND terminal_at IS NOT NULL)
+                    OR (state NOT IN ('completed', 'failed', 'cancelled'))
+                )
+            )
+        ''')
+        cursor.execute('''
+            ALTER TABLE scheduled_occurrence
+            ADD COLUMN IF NOT EXISTS run_now_submission_id UUID
+        ''')
+        cursor.execute('''
+            CREATE UNIQUE INDEX IF NOT EXISTS ux_scheduled_occurrence_run_now_submission
+            ON scheduled_occurrence (owner_user_id, run_now_submission_id)
+            WHERE run_now_submission_id IS NOT NULL
+        ''')
+        cursor.execute('''
+            CREATE INDEX IF NOT EXISTS idx_scheduled_occurrence_state_due
+            ON scheduled_occurrence (state, scheduled_for)
+        ''')
+        cursor.execute('''
+            CREATE INDEX IF NOT EXISTS idx_scheduled_occurrence_lease
+            ON scheduled_occurrence (state, lease_expires_at)
+        ''')
+
+        cursor.execute('''
+            CREATE TABLE IF NOT EXISTS effect_ledger (
+                occurrence_id UUID NOT NULL REFERENCES scheduled_occurrence(occurrence_id)
+                    ON DELETE RESTRICT,
+                effect_kind TEXT NOT NULL CHECK (effect_kind ~ '^[a-z][a-z0-9_]{0,63}$'),
+                effect_key TEXT NOT NULL CHECK (length(effect_key) BETWEEN 1 AND 256),
+                payload_digest CHAR(64) NOT NULL
+                    CHECK (payload_digest ~ '^[0-9a-f]{64}$'),
+                state TEXT NOT NULL CHECK (state IN ('reserved', 'published', 'failed')),
+                operation_id UUID REFERENCES operation_record(operation_id)
+                    ON DELETE SET NULL,
+                operation_execution_generation BIGINT NOT NULL
+                    CHECK (operation_execution_generation > 0),
+                occurrence_claim_generation BIGINT NOT NULL
+                    CHECK (occurrence_claim_generation > 0),
+                reserved_at TIMESTAMPTZ NOT NULL DEFAULT now(),
+                published_at TIMESTAMPTZ,
+                failed_at TIMESTAMPTZ,
+                failure_code TEXT,
+                downstream_receipt_digest CHAR(64)
+                    CHECK (downstream_receipt_digest IS NULL
+                           OR downstream_receipt_digest ~ '^[0-9a-f]{64}$'),
+                PRIMARY KEY (occurrence_id, effect_kind, effect_key),
+                CONSTRAINT effect_ledger_terminal_check CHECK (
+                    (state = 'reserved' AND published_at IS NULL AND failed_at IS NULL)
+                    OR (state = 'published' AND published_at IS NOT NULL AND failed_at IS NULL)
+                    OR (state = 'failed' AND published_at IS NULL AND failed_at IS NOT NULL)
+                )
+            )
+        ''')
+
+        cursor.execute(
+            "ALTER TABLE background_task "
+            "ADD COLUMN IF NOT EXISTS operation_id UUID"
+        )
+        cursor.execute(
+            "ALTER TABLE background_task ADD COLUMN IF NOT EXISTS "
+            "operation_execution_generation BIGINT"
+        )
+        cursor.execute('''
+            ALTER TABLE job_run ADD COLUMN IF NOT EXISTS occurrence_id UUID
+        ''')
+        cursor.execute('''
+            ALTER TABLE job_run ADD COLUMN IF NOT EXISTS attempt_number INTEGER
+        ''')
+        cursor.execute('''
+            ALTER TABLE job_run ADD COLUMN IF NOT EXISTS operation_id UUID
+        ''')
+        cursor.execute('''
+            ALTER TABLE job_run ADD COLUMN IF NOT EXISTS operation_execution_generation BIGINT
+        ''')
+        cursor.execute('''
+            ALTER TABLE job_run ADD COLUMN IF NOT EXISTS occurrence_claim_generation BIGINT
+        ''')
+        cursor.execute('''
+            DO $migration$
+            BEGIN
+                IF NOT EXISTS (
+                    SELECT 1 FROM pg_constraint
+                    WHERE conname = 'background_task_operation_060_fk'
+                      AND conrelid = 'background_task'::regclass
+                ) THEN
+                    ALTER TABLE background_task
+                    ADD CONSTRAINT background_task_operation_060_fk
+                    FOREIGN KEY (operation_id) REFERENCES operation_record(operation_id)
+                    ON DELETE SET NULL;
+                END IF;
+                IF NOT EXISTS (
+                    SELECT 1 FROM pg_constraint
+                    WHERE conname = 'job_run_occurrence_060_fk'
+                      AND conrelid = 'job_run'::regclass
+                ) THEN
+                    ALTER TABLE job_run
+                    ADD CONSTRAINT job_run_occurrence_060_fk
+                    FOREIGN KEY (occurrence_id) REFERENCES scheduled_occurrence(occurrence_id)
+                    ON DELETE RESTRICT;
+                END IF;
+                IF NOT EXISTS (
+                    SELECT 1 FROM pg_constraint
+                    WHERE conname = 'job_run_operation_060_fk'
+                      AND conrelid = 'job_run'::regclass
+                ) THEN
+                    ALTER TABLE job_run
+                    ADD CONSTRAINT job_run_operation_060_fk
+                    FOREIGN KEY (operation_id) REFERENCES operation_record(operation_id)
+                    ON DELETE SET NULL;
+                END IF;
+            END
+            $migration$;
+        ''')
+        cursor.execute('''
+            CREATE UNIQUE INDEX IF NOT EXISTS ux_job_run_occurrence_attempt
+            ON job_run (occurrence_id, attempt_number)
+            WHERE occurrence_id IS NOT NULL
+        ''')
+
+    def _migrate_personal_agent_runtime_060(self, cursor):
+        """Create immutable agent revision, host, runtime, and request fences."""
+        cursor.execute('''
+            CREATE OR REPLACE FUNCTION astraldeep_positive_unique_int_array(
+                input_values INTEGER[]
+            ) RETURNS BOOLEAN
+            LANGUAGE SQL IMMUTABLE STRICT
+            AS $function$
+                SELECT cardinality(input_values) > 0
+                   AND NOT EXISTS (
+                       SELECT 1 FROM unnest(input_values) AS item(value)
+                       WHERE value <= 0
+                   )
+                   AND cardinality(input_values) = (
+                       SELECT count(DISTINCT value) FROM unnest(input_values) AS item(value)
+                   )
+            $function$
+        ''')
+
+        cursor.execute(
+            "ALTER TABLE user_agent ADD COLUMN IF NOT EXISTS active_revision_id UUID"
+        )
+        cursor.execute(
+            "ALTER TABLE user_agent ADD COLUMN IF NOT EXISTS last_known_good_revision_id UUID"
+        )
+        cursor.execute(
+            "ALTER TABLE user_agent ADD COLUMN IF NOT EXISTS selected_host_session_id UUID"
+        )
+        cursor.execute(
+            "ALTER TABLE user_agent ADD COLUMN IF NOT EXISTS authoritative_instance_id UUID"
+        )
+        cursor.execute(
+            "ALTER TABLE user_agent ADD COLUMN IF NOT EXISTS "
+            "lifecycle_generation BIGINT NOT NULL DEFAULT 0"
+        )
+        cursor.execute(
+            "ALTER TABLE user_agent ADD COLUMN IF NOT EXISTS "
+            "generation_counter BIGINT NOT NULL DEFAULT 0"
+        )
+        cursor.execute(
+            "ALTER TABLE user_agent ADD COLUMN IF NOT EXISTS "
+            "state_revision BIGINT NOT NULL DEFAULT 0"
+        )
+        cursor.execute(
+            "ALTER TABLE user_agent ADD COLUMN IF NOT EXISTS validated_policy_revision TEXT"
+        )
+        cursor.execute('''
+            CREATE UNIQUE INDEX IF NOT EXISTS ux_user_agent_agent_owner
+            ON user_agent (agent_id, owner_user_id)
+        ''')
+
+        cursor.execute('''
+            CREATE TABLE IF NOT EXISTS user_agent_revision (
+                revision_id UUID PRIMARY KEY,
+                agent_id TEXT NOT NULL,
+                owner_user_id TEXT NOT NULL,
+                revision_number BIGINT NOT NULL CHECK (revision_number >= 0),
+                parent_revision_id UUID,
+                previous_good_revision_id UUID,
+                artifact_digest CHAR(64)
+                    CHECK (artifact_digest IS NULL OR artifact_digest ~ '^[0-9a-f]{64}$'),
+                manifest_json JSONB,
+                artifact_relative_path TEXT,
+                runtime_contract_version INTEGER
+                    CHECK (runtime_contract_version IS NULL OR runtime_contract_version > 0),
+                release_lock_digest CHAR(64)
+                    CHECK (release_lock_digest IS NULL OR release_lock_digest ~ '^[0-9a-f]{64}$'),
+                compatibility_state TEXT NOT NULL CHECK (
+                    compatibility_state IN ('compatible', 'incompatible', 'legacy_pending')
+                ),
+                state TEXT NOT NULL CHECK (
+                    state IN ('legacy_pending', 'prepared', 'starting', 'ready',
+                              'active', 'retired', 'failed')
+                ),
+                promotion_token UUID,
+                state_revision BIGINT NOT NULL DEFAULT 0 CHECK (state_revision >= 0),
+                created_at TIMESTAMPTZ NOT NULL DEFAULT now(),
+                confirmed_at TIMESTAMPTZ,
+                promoted_at TIMESTAMPTZ,
+                failed_at TIMESTAMPTZ,
+                failure_code TEXT,
+                UNIQUE (agent_id, revision_number),
+                UNIQUE (revision_id, agent_id, owner_user_id),
+                FOREIGN KEY (agent_id, owner_user_id)
+                    REFERENCES user_agent(agent_id, owner_user_id) ON DELETE RESTRICT,
+                FOREIGN KEY (parent_revision_id, agent_id, owner_user_id)
+                    REFERENCES user_agent_revision(revision_id, agent_id, owner_user_id)
+                    ON DELETE SET NULL (parent_revision_id),
+                FOREIGN KEY (previous_good_revision_id, agent_id, owner_user_id)
+                    REFERENCES user_agent_revision(revision_id, agent_id, owner_user_id)
+                    ON DELETE SET NULL (previous_good_revision_id),
+                CONSTRAINT user_agent_revision_artifact_check CHECK (
+                    (compatibility_state = 'legacy_pending' AND state = 'legacy_pending')
+                    OR (compatibility_state <> 'legacy_pending'
+                        AND artifact_digest IS NOT NULL
+                        AND manifest_json IS NOT NULL
+                        AND artifact_relative_path IS NOT NULL
+                        AND runtime_contract_version IS NOT NULL
+                        AND release_lock_digest IS NOT NULL
+                        AND promotion_token IS NOT NULL)
+                ),
+                CONSTRAINT user_agent_revision_relative_path_check CHECK (
+                    artifact_relative_path IS NULL
+                    OR (artifact_relative_path !~ '^/'
+                        AND artifact_relative_path !~ '(^|/)\\.\\.(/|$)')
+                )
+            )
+        ''')
+        cursor.execute('''
+            CREATE UNIQUE INDEX IF NOT EXISTS ux_user_agent_revision_artifact
+            ON user_agent_revision (agent_id, artifact_digest)
+            WHERE artifact_digest IS NOT NULL
+        ''')
+
+        cursor.execute('''
+            CREATE TABLE IF NOT EXISTS agent_host_session (
+                host_session_id UUID PRIMARY KEY,
+                host_id UUID NOT NULL,
+                owner_user_id TEXT NOT NULL,
+                connection_scope_id UUID NOT NULL,
+                platform TEXT NOT NULL CHECK (platform IN ('windows', 'macos')),
+                client_version TEXT NOT NULL CHECK (
+                    client_version ~ '^(0|[1-9][0-9]*)\\.(0|[1-9][0-9]*)\\.(0|[1-9][0-9]*)(-(0|[1-9][0-9]*|[0-9]*[A-Za-z-][0-9A-Za-z-]*)(\\.(0|[1-9][0-9]*|[0-9]*[A-Za-z-][0-9A-Za-z-]*))*)?(\\+[0-9A-Za-z-]+(\\.[0-9A-Za-z-]+)*)?$'
+                ),
+                host_generation BIGINT NOT NULL CHECK (host_generation > 0),
+                supersedes_session_id UUID REFERENCES agent_host_session(host_session_id)
+                    ON DELETE SET NULL,
+                supported_runtime_contract_versions INTEGER[] NOT NULL CHECK (
+                    astraldeep_positive_unique_int_array(supported_runtime_contract_versions)
+                ),
+                runtime_contract_version INTEGER NOT NULL CHECK (
+                    runtime_contract_version = 2
+                    AND runtime_contract_version = ANY(supported_runtime_contract_versions)
+                ),
+                release_lock_digest CHAR(64) NOT NULL
+                    CHECK (release_lock_digest ~ '^[0-9a-f]{64}$'),
+                state TEXT NOT NULL CHECK (
+                    state IN ('connected', 'disconnected', 'incompatible')
+                ),
+                inventory_state TEXT NOT NULL CHECK (
+                    inventory_state IN ('pending', 'reconciled', 'failed')
+                ),
+                eligible_since TIMESTAMPTZ NOT NULL,
+                accepted_at TIMESTAMPTZ NOT NULL,
+                last_seen_at TIMESTAMPTZ NOT NULL,
+                disconnected_at TIMESTAMPTZ,
+                inventory_reconciled_at TIMESTAMPTZ,
+                failure_code TEXT,
+                UNIQUE (owner_user_id, host_id, host_generation),
+                CONSTRAINT agent_host_session_connected_check CHECK (
+                    state <> 'connected' OR disconnected_at IS NULL
+                )
+            )
+        ''')
+        cursor.execute('''
+            CREATE INDEX IF NOT EXISTS idx_agent_host_owner_state
+            ON agent_host_session (owner_user_id, state, eligible_since)
+        ''')
+
+        cursor.execute('''
+            CREATE TABLE IF NOT EXISTS agent_runtime_instance (
+                runtime_instance_id UUID PRIMARY KEY,
+                agent_id TEXT NOT NULL,
+                owner_user_id TEXT NOT NULL,
+                host_id UUID NOT NULL,
+                host_session_id UUID NOT NULL REFERENCES agent_host_session(host_session_id)
+                    ON DELETE RESTRICT,
+                delivery_id UUID NOT NULL UNIQUE,
+                revision_id UUID NOT NULL,
+                process_id UUID,
+                lifecycle_generation BIGINT NOT NULL CHECK (lifecycle_generation > 0),
+                runtime_contract_version INTEGER NOT NULL
+                    CHECK (runtime_contract_version > 0),
+                operation_id UUID REFERENCES operation_record(operation_id)
+                    ON DELETE SET NULL,
+                operation_execution_generation BIGINT NOT NULL
+                    CHECK (operation_execution_generation > 0),
+                state TEXT NOT NULL CHECK (
+                    state IN ('delivering', 'starting', 'ready', 'online', 'updating',
+                              'stopping', 'stopped', 'failed', 'offline', 'superseded')
+                ),
+                is_authoritative BOOLEAN NOT NULL DEFAULT FALSE,
+                state_revision BIGINT NOT NULL DEFAULT 0 CHECK (state_revision >= 0),
+                created_at TIMESTAMPTZ NOT NULL DEFAULT now(),
+                started_at TIMESTAMPTZ,
+                registered_at TIMESTAMPTZ,
+                last_heartbeat_sequence BIGINT,
+                ready_at TIMESTAMPTZ,
+                last_liveness_at TIMESTAMPTZ,
+                terminal_at TIMESTAMPTZ,
+                failure_code TEXT,
+                UNIQUE (agent_id, lifecycle_generation),
+                UNIQUE (runtime_instance_id, agent_id, owner_user_id),
+                FOREIGN KEY (agent_id, owner_user_id)
+                    REFERENCES user_agent(agent_id, owner_user_id) ON DELETE RESTRICT,
+                FOREIGN KEY (revision_id, agent_id, owner_user_id)
+                    REFERENCES user_agent_revision(revision_id, agent_id, owner_user_id)
+                    ON DELETE RESTRICT,
+                CONSTRAINT agent_runtime_process_bind_check CHECK (
+                    (state = 'delivering' AND process_id IS NULL)
+                    OR state = 'failed'
+                    OR (state NOT IN ('delivering', 'failed') AND process_id IS NOT NULL)
+                ),
+                CONSTRAINT agent_runtime_registration_liveness_060_check CHECK (
+                    (registered_at IS NULL
+                        AND last_heartbeat_sequence IS NULL
+                        AND last_liveness_at IS NULL)
+                    OR (registered_at IS NOT NULL AND process_id IS NOT NULL
+                        AND (
+                            (last_heartbeat_sequence IS NULL
+                                AND last_liveness_at IS NULL)
+                            OR (last_heartbeat_sequence IS NOT NULL
+                                AND last_heartbeat_sequence > 0
+                                AND last_liveness_at IS NOT NULL)
+                        ))
+                )
+            )
+        ''')
+        # ``CREATE TABLE IF NOT EXISTS`` does not add columns to a database that
+        # already created an earlier feature-060 draft of this table. Keep these
+        # ALTERs repeat-safe so every pre-release feature-060 database converges.
+        cursor.execute(
+            "ALTER TABLE agent_runtime_instance "
+            "ADD COLUMN IF NOT EXISTS registered_at TIMESTAMPTZ"
+        )
+        cursor.execute(
+            "ALTER TABLE agent_runtime_instance "
+            "ADD COLUMN IF NOT EXISTS last_heartbeat_sequence BIGINT"
+        )
+        cursor.execute(
+            "ALTER TABLE agent_runtime_instance DROP CONSTRAINT IF EXISTS "
+            "agent_runtime_heartbeat_sequence_060_check"
+        )
+        cursor.execute('''
+            DO $migration$
+            BEGIN
+                IF NOT EXISTS (
+                    SELECT 1 FROM pg_constraint
+                    WHERE conname = 'agent_runtime_registration_liveness_060_check'
+                      AND conrelid = 'agent_runtime_instance'::regclass
+                ) THEN
+                    ALTER TABLE agent_runtime_instance
+                    ADD CONSTRAINT agent_runtime_registration_liveness_060_check CHECK (
+                        (registered_at IS NULL
+                            AND last_heartbeat_sequence IS NULL
+                            AND last_liveness_at IS NULL)
+                        OR (registered_at IS NOT NULL AND process_id IS NOT NULL
+                            AND (
+                                (last_heartbeat_sequence IS NULL
+                                    AND last_liveness_at IS NULL)
+                                OR (last_heartbeat_sequence IS NOT NULL
+                                    AND last_heartbeat_sequence > 0
+                                    AND last_liveness_at IS NOT NULL)
+                            ))
+                    );
+                END IF;
+            END
+            $migration$;
+        ''')
+        cursor.execute('''
+            CREATE UNIQUE INDEX IF NOT EXISTS ux_agent_runtime_authoritative
+            ON agent_runtime_instance (agent_id) WHERE is_authoritative
+        ''')
+        cursor.execute('''
+            CREATE UNIQUE INDEX IF NOT EXISTS ux_agent_runtime_host_process
+            ON agent_runtime_instance (host_id, process_id) WHERE process_id IS NOT NULL
+        ''')
+        cursor.execute('''
+            CREATE INDEX IF NOT EXISTS idx_agent_runtime_host_state
+            ON agent_runtime_instance (host_session_id, state)
+        ''')
+
+        cursor.execute('''
+            CREATE TABLE IF NOT EXISTS agent_runtime_request (
+                request_id UUID PRIMARY KEY,
+                request_generation UUID NOT NULL,
+                operation_id UUID REFERENCES operation_record(operation_id)
+                    ON DELETE SET NULL,
+                operation_execution_generation BIGINT NOT NULL
+                    CHECK (operation_execution_generation > 0),
+                runtime_instance_id UUID NOT NULL,
+                agent_id TEXT NOT NULL,
+                owner_user_id TEXT NOT NULL,
+                state TEXT NOT NULL CHECK (
+                    state IN ('assigned', 'running', 'completed', 'failed',
+                              'cancelled', 'retryable')
+                ),
+                state_revision BIGINT NOT NULL DEFAULT 0 CHECK (state_revision >= 0),
+                assigned_at TIMESTAMPTZ NOT NULL DEFAULT now(),
+                terminal_at TIMESTAMPTZ,
+                terminal_code TEXT,
+                result_digest CHAR(64)
+                    CHECK (result_digest IS NULL OR result_digest ~ '^[0-9a-f]{64}$'),
+                UNIQUE (runtime_instance_id, request_generation),
+                FOREIGN KEY (runtime_instance_id, agent_id, owner_user_id)
+                    REFERENCES agent_runtime_instance(
+                        runtime_instance_id, agent_id, owner_user_id
+                    ) ON DELETE RESTRICT,
+                CONSTRAINT agent_runtime_request_terminal_check CHECK (
+                    (state IN ('completed', 'failed', 'cancelled', 'retryable')
+                        AND terminal_at IS NOT NULL)
+                    OR (state IN ('assigned', 'running') AND terminal_at IS NULL)
+                )
+            )
+        ''')
+        cursor.execute('''
+            CREATE INDEX IF NOT EXISTS idx_agent_runtime_request_instance_state
+            ON agent_runtime_request (runtime_instance_id, state)
+        ''')
+
+        cursor.execute('''
+            DO $migration$
+            BEGIN
+                IF NOT EXISTS (
+                    SELECT 1 FROM pg_constraint
+                    WHERE conname = 'user_agent_active_revision_060_fk'
+                      AND conrelid = 'user_agent'::regclass
+                ) THEN
+                    ALTER TABLE user_agent
+                    ADD CONSTRAINT user_agent_active_revision_060_fk
+                    FOREIGN KEY (active_revision_id) REFERENCES user_agent_revision(revision_id)
+                    ON DELETE SET NULL;
+                END IF;
+                IF NOT EXISTS (
+                    SELECT 1 FROM pg_constraint
+                    WHERE conname = 'user_agent_last_good_revision_060_fk'
+                      AND conrelid = 'user_agent'::regclass
+                ) THEN
+                    ALTER TABLE user_agent
+                    ADD CONSTRAINT user_agent_last_good_revision_060_fk
+                    FOREIGN KEY (last_known_good_revision_id)
+                    REFERENCES user_agent_revision(revision_id) ON DELETE SET NULL;
+                END IF;
+                IF NOT EXISTS (
+                    SELECT 1 FROM pg_constraint
+                    WHERE conname = 'user_agent_selected_host_060_fk'
+                      AND conrelid = 'user_agent'::regclass
+                ) THEN
+                    ALTER TABLE user_agent
+                    ADD CONSTRAINT user_agent_selected_host_060_fk
+                    FOREIGN KEY (selected_host_session_id)
+                    REFERENCES agent_host_session(host_session_id) ON DELETE SET NULL;
+                END IF;
+                IF NOT EXISTS (
+                    SELECT 1 FROM pg_constraint
+                    WHERE conname = 'user_agent_authoritative_instance_060_fk'
+                      AND conrelid = 'user_agent'::regclass
+                ) THEN
+                    ALTER TABLE user_agent
+                    ADD CONSTRAINT user_agent_authoritative_instance_060_fk
+                    FOREIGN KEY (authoritative_instance_id)
+                    REFERENCES agent_runtime_instance(runtime_instance_id) ON DELETE SET NULL;
+                END IF;
+            END
+            $migration$;
+        ''')
+        cursor.execute('''
+            DO $migration$
+            BEGIN
+                IF NOT EXISTS (
+                    SELECT 1 FROM pg_constraint
+                    WHERE conname = 'user_agent_generation_060_check'
+                      AND conrelid = 'user_agent'::regclass
+                ) THEN
+                    ALTER TABLE user_agent
+                    ADD CONSTRAINT user_agent_generation_060_check CHECK (
+                        lifecycle_generation >= 0
+                        AND generation_counter >= lifecycle_generation
+                        AND state_revision >= 0
+                    );
+                END IF;
+            END
+            $migration$;
+        ''')
+
+    def _migrate_draft_publication_060(self, cursor):
+        """Add draft CAS identities and immutable publication records."""
+        cursor.execute(
+            "ALTER TABLE draft_agents ADD COLUMN IF NOT EXISTS draft_uuid UUID"
+        )
+        cursor.execute(
+            "ALTER TABLE draft_agents ADD COLUMN IF NOT EXISTS target_agent_id TEXT"
+        )
+        cursor.execute(
+            "ALTER TABLE draft_agents ADD COLUMN IF NOT EXISTS "
+            "state_revision BIGINT NOT NULL DEFAULT 0"
+        )
+        cursor.execute(
+            "ALTER TABLE draft_agents ADD COLUMN IF NOT EXISTS generation_claim_id UUID"
+        )
+        cursor.execute(
+            "ALTER TABLE draft_agents ADD COLUMN IF NOT EXISTS "
+            "generation_claim_expires_at TIMESTAMPTZ"
+        )
+        cursor.execute(
+            "ALTER TABLE draft_agents ADD COLUMN IF NOT EXISTS published_revision_id UUID"
+        )
+        cursor.execute('''
+            CREATE UNIQUE INDEX IF NOT EXISTS ux_draft_agents_draft_uuid
+            ON draft_agents (draft_uuid)
+        ''')
+        cursor.execute('''
+            CREATE UNIQUE INDEX IF NOT EXISTS ux_draft_agents_draft_owner
+            ON draft_agents (draft_uuid, user_id)
+        ''')
+
+        cursor.execute('''
+            CREATE TABLE IF NOT EXISTS draft_transition (
+                transition_id UUID PRIMARY KEY,
+                draft_uuid UUID NOT NULL,
+                owner_user_id TEXT NOT NULL,
+                operation_id UUID REFERENCES operation_record(operation_id)
+                    ON DELETE SET NULL,
+                operation_execution_generation BIGINT NOT NULL
+                    CHECK (operation_execution_generation > 0),
+                transition_kind TEXT NOT NULL
+                    CHECK (transition_kind ~ '^[a-z][a-z0-9_]{0,63}$'),
+                expected_revision BIGINT NOT NULL CHECK (expected_revision >= 0),
+                result_revision BIGINT NOT NULL CHECK (result_revision >= 0),
+                outcome TEXT NOT NULL CHECK (
+                    outcome IN ('applied', 'conflict', 'replayed', 'failed')
+                ),
+                safe_code TEXT,
+                created_at TIMESTAMPTZ NOT NULL DEFAULT now(),
+                FOREIGN KEY (draft_uuid, owner_user_id)
+                    REFERENCES draft_agents(draft_uuid, user_id) ON DELETE RESTRICT,
+                CONSTRAINT draft_transition_revision_check CHECK (
+                    (outcome IN ('applied', 'replayed')
+                        AND result_revision >= expected_revision)
+                    OR outcome IN ('conflict', 'failed')
+                )
+            )
+        ''')
+
+        cursor.execute('''
+            CREATE TABLE IF NOT EXISTS draft_artifact_publication (
+                publication_id UUID PRIMARY KEY,
+                draft_uuid UUID NOT NULL,
+                owner_user_id TEXT NOT NULL,
+                source_state_revision BIGINT NOT NULL CHECK (source_state_revision >= 0),
+                generation_claim_id UUID NOT NULL,
+                target_agent_id TEXT NOT NULL,
+                target_revision_id UUID NOT NULL,
+                operation_id UUID REFERENCES operation_record(operation_id)
+                    ON DELETE SET NULL,
+                operation_execution_generation BIGINT
+                    CHECK (operation_execution_generation IS NULL
+                           OR operation_execution_generation > 0),
+                staging_relative_path TEXT NOT NULL,
+                revision_relative_path TEXT NOT NULL,
+                artifact_digest CHAR(64)
+                    CHECK (artifact_digest IS NULL OR artifact_digest ~ '^[0-9a-f]{64}$'),
+                manifest_digest CHAR(64)
+                    CHECK (manifest_digest IS NULL OR manifest_digest ~ '^[0-9a-f]{64}$'),
+                state TEXT NOT NULL CHECK (
+                    state IN ('claimed', 'staged', 'validated', 'published', 'failed')
+                ),
+                state_revision BIGINT NOT NULL DEFAULT 0 CHECK (state_revision >= 0),
+                created_at TIMESTAMPTZ NOT NULL DEFAULT now(),
+                published_at TIMESTAMPTZ,
+                failed_at TIMESTAMPTZ,
+                failure_code TEXT,
+                UNIQUE (draft_uuid, source_state_revision),
+                UNIQUE (target_revision_id),
+                FOREIGN KEY (draft_uuid, owner_user_id)
+                    REFERENCES draft_agents(draft_uuid, user_id) ON DELETE RESTRICT,
+                FOREIGN KEY (target_revision_id, target_agent_id, owner_user_id)
+                    REFERENCES user_agent_revision(revision_id, agent_id, owner_user_id)
+                    ON DELETE RESTRICT,
+                CONSTRAINT draft_publication_paths_check CHECK (
+                    staging_relative_path !~ '^/'
+                    AND staging_relative_path !~ '(^|/)\\.\\.(/|$)'
+                    AND revision_relative_path !~ '^/'
+                    AND revision_relative_path !~ '(^|/)\\.\\.(/|$)'
+                ),
+                CONSTRAINT draft_publication_digest_check CHECK (
+                    (state IN ('claimed', 'staged')
+                        AND artifact_digest IS NULL AND manifest_digest IS NULL)
+                    OR (state IN ('validated', 'published')
+                        AND artifact_digest IS NOT NULL AND manifest_digest IS NOT NULL)
+                    OR state = 'failed'
+                ),
+                CONSTRAINT draft_publication_terminal_check CHECK (
+                    (state = 'published' AND published_at IS NOT NULL AND failed_at IS NULL)
+                    OR (state = 'failed' AND published_at IS NULL AND failed_at IS NOT NULL)
+                    OR (state NOT IN ('published', 'failed')
+                        AND published_at IS NULL AND failed_at IS NULL)
+                )
+            )
+        ''')
+        cursor.execute('''
+            CREATE INDEX IF NOT EXISTS idx_draft_publication_state
+            ON draft_artifact_publication (state, created_at)
+        ''')
+
+        cursor.execute('''
+            DO $migration$
+            BEGIN
+                IF NOT EXISTS (
+                    SELECT 1 FROM pg_constraint
+                    WHERE conname = 'draft_agents_published_revision_060_fk'
+                      AND conrelid = 'draft_agents'::regclass
+                ) THEN
+                    ALTER TABLE draft_agents
+                    ADD CONSTRAINT draft_agents_published_revision_060_fk
+                    FOREIGN KEY (published_revision_id, target_agent_id, user_id)
+                    REFERENCES user_agent_revision(revision_id, agent_id, owner_user_id)
+                    ON DELETE RESTRICT;
+                END IF;
+                IF NOT EXISTS (
+                    SELECT 1 FROM pg_constraint
+                    WHERE conname = 'draft_agents_state_revision_060_check'
+                      AND conrelid = 'draft_agents'::regclass
+                ) THEN
+                    ALTER TABLE draft_agents
+                    ADD CONSTRAINT draft_agents_state_revision_060_check
+                    CHECK (state_revision >= 0);
+                END IF;
+                IF NOT EXISTS (
+                    SELECT 1 FROM pg_constraint
+                    WHERE conname = 'draft_agents_generation_claim_060_check'
+                      AND conrelid = 'draft_agents'::regclass
+                ) THEN
+                    ALTER TABLE draft_agents
+                    ADD CONSTRAINT draft_agents_generation_claim_060_check CHECK (
+                        (generation_claim_id IS NULL
+                            AND generation_claim_expires_at IS NULL)
+                        OR (generation_claim_id IS NOT NULL
+                            AND generation_claim_expires_at IS NOT NULL)
+                    );
+                END IF;
+            END
+            $migration$;
+        ''')
+
+    def _migrate_maintenance_coordination_060(self, cursor):
+        """Create durable, retry-safe maintenance unit and membership rows."""
+        cursor.execute('''
+            CREATE TABLE IF NOT EXISTS maintenance_unit (
+                unit_id UUID PRIMARY KEY,
+                unit_kind TEXT NOT NULL CHECK (unit_kind ~ '^[a-z][a-z0-9_]{0,63}$'),
+                owner_user_id TEXT,
+                scope_key TEXT NOT NULL CHECK (length(scope_key) BETWEEN 1 AND 256),
+                idempotency_key TEXT NOT NULL CHECK (length(idempotency_key) BETWEEN 1 AND 256),
+                state TEXT NOT NULL CHECK (
+                    state IN ('pending', 'claimed', 'running', 'succeeded',
+                              'failed_retryable', 'failed_terminal', 'cancelled')
+                ),
+                lease_token UUID,
+                claim_generation BIGINT NOT NULL DEFAULT 0 CHECK (claim_generation >= 0),
+                claimed_by TEXT,
+                lease_expires_at TIMESTAMPTZ,
+                attempt_count INTEGER NOT NULL DEFAULT 0 CHECK (attempt_count >= 0),
+                max_attempts INTEGER NOT NULL CHECK (max_attempts > 0),
+                operation_id UUID REFERENCES operation_record(operation_id)
+                    ON DELETE SET NULL,
+                operation_execution_generation BIGINT
+                    CHECK (operation_execution_generation IS NULL
+                           OR operation_execution_generation > 0),
+                output_generation UUID,
+                output_relative_path TEXT,
+                output_digest CHAR(64)
+                    CHECK (output_digest IS NULL OR output_digest ~ '^[0-9a-f]{64}$'),
+                last_error_code TEXT,
+                state_revision BIGINT NOT NULL DEFAULT 0 CHECK (state_revision >= 0),
+                created_at TIMESTAMPTZ NOT NULL DEFAULT now(),
+                updated_at TIMESTAMPTZ NOT NULL DEFAULT now(),
+                terminal_at TIMESTAMPTZ,
+                next_attempt_at TIMESTAMPTZ,
+                UNIQUE (unit_kind, idempotency_key),
+                CONSTRAINT maintenance_unit_attempt_check CHECK (
+                    attempt_count <= max_attempts
+                ),
+                CONSTRAINT maintenance_unit_lease_check CHECK (
+                    (state IN ('claimed', 'running') AND lease_token IS NOT NULL
+                        AND claimed_by IS NOT NULL AND lease_expires_at IS NOT NULL)
+                    OR state NOT IN ('claimed', 'running')
+                ),
+                CONSTRAINT maintenance_unit_output_check CHECK (
+                    state <> 'succeeded'
+                    OR (output_generation IS NOT NULL
+                        AND output_relative_path IS NOT NULL
+                        AND output_digest IS NOT NULL
+                        AND terminal_at IS NOT NULL)
+                ),
+                CONSTRAINT maintenance_unit_relative_path_check CHECK (
+                    output_relative_path IS NULL
+                    OR (output_relative_path !~ '^/'
+                        AND output_relative_path !~ '(^|/)\\.\\.(/|$)')
+                )
+            )
+        ''')
+        cursor.execute('''
+            CREATE INDEX IF NOT EXISTS idx_maintenance_unit_claim
+            ON maintenance_unit (state, next_attempt_at, created_at)
+        ''')
+        cursor.execute('''
+            CREATE TABLE IF NOT EXISTS maintenance_unit_input (
+                unit_id UUID NOT NULL REFERENCES maintenance_unit(unit_id) ON DELETE CASCADE,
+                input_kind TEXT NOT NULL CHECK (input_kind ~ '^[a-z][a-z0-9_]{0,63}$'),
+                input_id TEXT NOT NULL CHECK (length(input_id) BETWEEN 1 AND 256),
+                input_digest CHAR(64)
+                    CHECK (input_digest IS NULL OR input_digest ~ '^[0-9a-f]{64}$'),
+                state TEXT NOT NULL CHECK (state IN ('pending', 'completed')),
+                operation_id UUID REFERENCES operation_record(operation_id)
+                    ON DELETE SET NULL,
+                operation_execution_generation BIGINT
+                    CHECK (operation_execution_generation IS NULL
+                           OR operation_execution_generation > 0),
+                completed_at TIMESTAMPTZ,
+                PRIMARY KEY (unit_id, input_kind, input_id),
+                CONSTRAINT maintenance_input_completion_check CHECK (
+                    (state = 'pending' AND operation_execution_generation IS NULL
+                        AND completed_at IS NULL)
+                    OR (state = 'completed' AND operation_execution_generation IS NOT NULL
+                        AND completed_at IS NOT NULL)
+                )
+            )
+        ''')
+
+    def _migrate_conversation_commit_060(self, cursor):
+        """Add one atomic logical-turn visibility boundary to legacy chats."""
+        cursor.execute(
+            "ALTER TABLE chats ADD COLUMN IF NOT EXISTS "
+            "render_revision BIGINT NOT NULL DEFAULT 0"
+        )
+        cursor.execute(
+            "ALTER TABLE chats ADD COLUMN IF NOT EXISTS snapshot_committed_at TIMESTAMPTZ"
+        )
+        cursor.execute(
+            "ALTER TABLE chats ADD COLUMN IF NOT EXISTS conversation_commit_id UUID"
+        )
+        cursor.execute(
+            "ALTER TABLE messages ADD COLUMN IF NOT EXISTS conversation_commit_id UUID"
+        )
+        cursor.execute(
+            "ALTER TABLE messages ADD COLUMN IF NOT EXISTS commit_position INTEGER"
+        )
+        cursor.execute(
+            "ALTER TABLE messages ADD COLUMN IF NOT EXISTS committed_render_revision BIGINT"
+        )
+        cursor.execute(
+            "ALTER TABLE saved_components ADD COLUMN IF NOT EXISTS conversation_commit_id UUID"
+        )
+        cursor.execute(
+            "ALTER TABLE saved_components ADD COLUMN IF NOT EXISTS "
+            "committed_render_revision BIGINT"
+        )
+
+        # Feature 060 stages a complete next canvas beside the current
+        # authoritative canvas. The pre-060 index keyed only by
+        # (chat_id, component_id) made that impossible whenever a stable
+        # component identity was carried into the next revision. Keep legacy
+        # NULL-commit rows unique through the impossible UUID4 sentinel while
+        # allowing one copy per durable conversation commit. Recovery to the
+        # former index first deletes/archives non-authoritative staged rows,
+        # then recreates the two-column definition.
+        cursor.execute("DROP INDEX IF EXISTS ux_saved_components_chat_component")
+        cursor.execute('''
+            CREATE UNIQUE INDEX ux_saved_components_chat_component
+            ON saved_components (
+                chat_id,
+                component_id,
+                COALESCE(
+                    conversation_commit_id,
+                    '00000000-0000-0000-0000-000000000000'::uuid
+                )
+            )
+            WHERE component_id IS NOT NULL
+        ''')
+
+        cursor.execute('''
+            CREATE TABLE IF NOT EXISTS conversation_commit (
+                commit_id UUID PRIMARY KEY,
+                chat_id TEXT NOT NULL REFERENCES chats(id) ON DELETE CASCADE,
+                owner_user_id TEXT NOT NULL,
+                request_generation UUID NOT NULL,
+                operation_id UUID REFERENCES operation_record(operation_id)
+                    ON DELETE SET NULL,
+                operation_execution_generation BIGINT
+                    CHECK (operation_execution_generation IS NULL
+                           OR operation_execution_generation > 0),
+                base_render_revision BIGINT NOT NULL CHECK (base_render_revision >= 0),
+                committed_render_revision BIGINT
+                    CHECK (committed_render_revision IS NULL
+                           OR committed_render_revision > 0),
+                state TEXT NOT NULL CHECK (state IN ('staged', 'committed', 'aborted')),
+                started_at TIMESTAMPTZ NOT NULL DEFAULT now(),
+                committed_at TIMESTAMPTZ,
+                aborted_at TIMESTAMPTZ,
+                UNIQUE (chat_id, request_generation),
+                CONSTRAINT conversation_commit_lifecycle_check CHECK (
+                    (state = 'staged' AND committed_render_revision IS NULL
+                        AND committed_at IS NULL AND aborted_at IS NULL)
+                    OR (state = 'committed'
+                        AND committed_render_revision = base_render_revision + 1
+                        AND committed_at IS NOT NULL AND aborted_at IS NULL)
+                    OR (state = 'aborted' AND committed_render_revision IS NULL
+                        AND committed_at IS NULL AND aborted_at IS NOT NULL)
+                )
+            )
+        ''')
+        cursor.execute('''
+            CREATE INDEX IF NOT EXISTS idx_conversation_commit_chat_revision
+            ON conversation_commit (chat_id, committed_render_revision DESC)
+        ''')
+        cursor.execute('''
+            CREATE UNIQUE INDEX IF NOT EXISTS ux_message_commit_position
+            ON messages (conversation_commit_id, commit_position)
+            WHERE conversation_commit_id IS NOT NULL
+        ''')
+
+        cursor.execute('''
+            DO $migration$
+            BEGIN
+                IF NOT EXISTS (
+                    SELECT 1 FROM pg_constraint
+                    WHERE conname = 'chats_conversation_commit_060_fk'
+                      AND conrelid = 'chats'::regclass
+                ) THEN
+                    ALTER TABLE chats
+                    ADD CONSTRAINT chats_conversation_commit_060_fk
+                    FOREIGN KEY (conversation_commit_id)
+                    REFERENCES conversation_commit(commit_id) ON DELETE SET NULL;
+                END IF;
+                IF NOT EXISTS (
+                    SELECT 1 FROM pg_constraint
+                    WHERE conname = 'messages_conversation_commit_060_fk'
+                      AND conrelid = 'messages'::regclass
+                ) THEN
+                    ALTER TABLE messages
+                    ADD CONSTRAINT messages_conversation_commit_060_fk
+                    FOREIGN KEY (conversation_commit_id)
+                    REFERENCES conversation_commit(commit_id) ON DELETE SET NULL;
+                END IF;
+                IF NOT EXISTS (
+                    SELECT 1 FROM pg_constraint
+                    WHERE conname = 'saved_components_conversation_commit_060_fk'
+                      AND conrelid = 'saved_components'::regclass
+                ) THEN
+                    ALTER TABLE saved_components
+                    ADD CONSTRAINT saved_components_conversation_commit_060_fk
+                    FOREIGN KEY (conversation_commit_id)
+                    REFERENCES conversation_commit(commit_id) ON DELETE SET NULL;
+                END IF;
+                IF NOT EXISTS (
+                    SELECT 1 FROM pg_constraint
+                    WHERE conname = 'chats_render_revision_060_check'
+                      AND conrelid = 'chats'::regclass
+                ) THEN
+                    ALTER TABLE chats
+                    ADD CONSTRAINT chats_render_revision_060_check
+                    CHECK (render_revision >= 0);
+                END IF;
+                IF NOT EXISTS (
+                    SELECT 1 FROM pg_constraint
+                    WHERE conname = 'messages_commit_metadata_060_check'
+                      AND conrelid = 'messages'::regclass
+                ) THEN
+                    ALTER TABLE messages
+                    ADD CONSTRAINT messages_commit_metadata_060_check CHECK (
+                        (conversation_commit_id IS NULL AND commit_position IS NULL
+                            AND committed_render_revision IS NULL)
+                        OR (conversation_commit_id IS NOT NULL AND commit_position >= 0
+                            AND committed_render_revision > 0)
+                    );
+                END IF;
+                IF NOT EXISTS (
+                    SELECT 1 FROM pg_constraint
+                    WHERE conname = 'saved_components_commit_metadata_060_check'
+                      AND conrelid = 'saved_components'::regclass
+                ) THEN
+                    ALTER TABLE saved_components
+                    ADD CONSTRAINT saved_components_commit_metadata_060_check CHECK (
+                        (conversation_commit_id IS NULL
+                            AND committed_render_revision IS NULL)
+                        OR (conversation_commit_id IS NOT NULL
+                            AND committed_render_revision > 0)
+                    );
+                END IF;
+            END
+            $migration$;
+        ''')
+
+    def _migrate_legacy_runtime_truth_060(self, cursor):
+        """Backfill only identities and artifact facts the 057 state proves."""
+        cursor.execute(
+            "SELECT id FROM draft_agents WHERE draft_uuid IS NULL ORDER BY id"
+        )
+        for row in cursor.fetchall():
+            legacy_id = str(row['id'])
+            try:
+                parsed_id = uuid.UUID(legacy_id)
+                draft_uuid = (
+                    parsed_id
+                    if str(parsed_id) == legacy_id.lower()
+                    else uuid.uuid4()
+                )
+            except (ValueError, AttributeError):
+                draft_uuid = uuid.uuid4()
+            cursor.execute(
+                "UPDATE draft_agents SET draft_uuid = %s "
+                "WHERE id = %s AND draft_uuid IS NULL",
+                (str(draft_uuid), legacy_id),
+            )
+
+        # A revising draft keeps the durable target it explicitly names. A
+        # legacy draft already linked to a live user_agent keeps that exact
+        # agent alias. Only genuinely new/unmatched drafts receive UUID4 text.
+        cursor.execute('''
+            UPDATE draft_agents
+            SET target_agent_id = revises_agent_id
+            WHERE target_agent_id IS NULL AND revises_agent_id IS NOT NULL
+        ''')
+        cursor.execute('''
+            UPDATE draft_agents AS draft
+            SET target_agent_id = agent.agent_id
+            FROM user_agent AS agent
+            WHERE draft.target_agent_id IS NULL
+              AND agent.draft_id = draft.id
+        ''')
+        cursor.execute(
+            "SELECT id FROM draft_agents WHERE target_agent_id IS NULL ORDER BY id"
+        )
+        for row in cursor.fetchall():
+            cursor.execute(
+                "UPDATE draft_agents SET target_agent_id = %s "
+                "WHERE id = %s AND target_agent_id IS NULL",
+                (str(uuid.uuid4()), row['id']),
+            )
+
+        cursor.execute('''
+            SELECT agent.agent_id, agent.owner_user_id, agent.draft_id,
+                   draft.agent_slug, draft.host_binding
+            FROM user_agent AS agent
+            LEFT JOIN draft_agents AS draft ON draft.id = agent.draft_id
+            WHERE agent.deleted_at IS NULL
+              AND agent.status IN ('validated', 'live')
+            ORDER BY agent.agent_id
+        ''')
+        for row in cursor.fetchall():
+            agent_id = str(row['agent_id'])
+            owner_user_id = str(row['owner_user_id'])
+            revision_id = uuid.uuid5(
+                _LEGACY_AGENT_REVISION_NAMESPACE,
+                f"{owner_user_id}\0{agent_id}",
+            )
+            artifact_digest = None
+            artifact_relative_path = None
+            slug = row.get('agent_slug')
+            host_binding = row.get('host_binding')
+            if slug and not host_binding:
+                root = Path(self._legacy_agent_root()).resolve()
+                candidate = (root / str(slug)).resolve()
+                try:
+                    relative = candidate.relative_to(root)
+                except ValueError:
+                    logger.warning(
+                        "Skipping unsafe legacy agent path for %s", agent_id
+                    )
+                else:
+                    if candidate.is_dir():
+                        artifact_digest = self._digest_legacy_agent_directory(candidate)
+                        artifact_relative_path = relative.as_posix()
+
+            cursor.execute('''
+                INSERT INTO user_agent_revision (
+                    revision_id, agent_id, owner_user_id, revision_number,
+                    artifact_digest, manifest_json, artifact_relative_path,
+                    runtime_contract_version, release_lock_digest,
+                    compatibility_state, state, promotion_token,
+                    state_revision, created_at
+                ) VALUES (
+                    %s, %s, %s, 0, %s, NULL, %s, NULL, NULL,
+                    'legacy_pending', 'legacy_pending', NULL, 0, now()
+                )
+                ON CONFLICT (agent_id, revision_number) DO NOTHING
+            ''', (
+                str(revision_id), agent_id, owner_user_id,
+                artifact_digest, artifact_relative_path,
+            ))
+            cursor.execute(
+                "SELECT revision_id FROM user_agent_revision "
+                "WHERE agent_id = %s AND revision_number = 0",
+                (agent_id,),
+            )
+            persisted_revision = cursor.fetchone()
+            if persisted_revision is not None:
+                cursor.execute(
+                    "UPDATE user_agent SET active_revision_id = %s "
+                    "WHERE agent_id = %s AND active_revision_id IS NULL",
+                    (persisted_revision['revision_id'], agent_id),
+                )
+
+    def _legacy_agent_root(self) -> Path:
+        """Return the configured legacy server-owned agent bundle root."""
+        return Path(__file__).resolve().parents[1] / 'agents'
+
+    @staticmethod
+    def _digest_legacy_agent_directory(directory: Path) -> str:
+        """Hash one legacy bundle as a framed, path-aware deterministic tree."""
+        root = Path(directory)
+        digest = hashlib.sha256(b'astraldeep-legacy-agent-tree-v1\0')
+        for entry in sorted(root.rglob('*'), key=lambda item: item.relative_to(root).as_posix()):
+            relative_bytes = entry.relative_to(root).as_posix().encode('utf-8')
+            digest.update(len(relative_bytes).to_bytes(4, 'big'))
+            digest.update(relative_bytes)
+            if entry.is_symlink():
+                target = os.readlink(entry).encode('utf-8')
+                digest.update(b'L')
+                digest.update(len(target).to_bytes(8, 'big'))
+                digest.update(target)
+            elif entry.is_dir():
+                digest.update(b'D')
+            elif entry.is_file():
+                digest.update(b'F')
+                digest.update(entry.stat().st_size.to_bytes(8, 'big'))
+                with entry.open('rb') as handle:
+                    for chunk in iter(lambda: handle.read(1024 * 1024), b''):
+                        digest.update(chunk)
+            else:
+                raise ValueError(f"unsupported legacy agent artifact: {entry}")
+        return digest.hexdigest()
+
+    def _sweep_user_agent_policy_060(self, cursor):
+        """Mark non-deleted agents stale under the exact combined policy."""
+        cursor.execute(
+            "UPDATE user_agent SET revalidation_required = TRUE "
+            "WHERE deleted_at IS NULL "
+            "AND validated_policy_revision IS DISTINCT FROM %s "
+            "AND revalidation_required = FALSE",
+            (USER_AGENT_POLICY_REVISION,),
+        )
+        count = max(0, int(cursor.rowcount))
+        self._user_agent_policy_sweep_count = count
+        return count
+
     def _migrate_revalidate_on_constitution_change_057(self, cursor):
         """Feature 057 (Constitution L / FR-028): when the agent constitution's
         MAJOR version advances beyond what a user agent was validated against,
@@ -2042,14 +3463,24 @@ class Database:
         """
         import time
         now = int(time.time() * 1000)
+        try:
+            draft_uuid = str(uuid.UUID(str(draft_id)))
+        except (TypeError, ValueError, AttributeError):
+            # Compatibility for exceptional pre-060/non-UUID callers. The
+            # public draft id remains untouched, while every new transition
+            # receives a canonical immutable UUID alias.
+            draft_uuid = str(uuid.uuid4())
+        target_agent_id = revises_agent_id or str(uuid.uuid4())
         self.execute(
             """INSERT INTO draft_agents (id, user_id, agent_name, agent_slug, description,
                tools_spec, skill_tags, packages, status, origin, source_chat_id,
-               gap_fingerprint, revises_agent_id, created_at, updated_at)
-               VALUES (?, ?, ?, ?, ?, ?, ?, ?, 'pending', ?, ?, ?, ?, ?, ?)""",
+               gap_fingerprint, revises_agent_id, draft_uuid, target_agent_id,
+               state_revision, created_at, updated_at)
+               VALUES (?, ?, ?, ?, ?, ?, ?, ?, 'pending', ?, ?, ?, ?, ?, ?, 0, ?, ?)""",
             (draft_id, user_id, agent_name, agent_slug, description,
              tools_spec, skill_tags, packages, origin, source_chat_id,
-             gap_fingerprint, revises_agent_id, now, now)
+             gap_fingerprint, revises_agent_id, draft_uuid, target_agent_id,
+             now, now)
         )
 
     def find_gap_draft(self, user_id: str, source_chat_id: str,
@@ -2104,6 +3535,134 @@ class Database:
             tuple(values)
         )
         return cursor.rowcount > 0
+
+    def claim_draft_generation(
+        self,
+        *,
+        draft_id: str,
+        owner_user_id: str,
+        expected_revision: int,
+        claim_id: str,
+        lease_seconds: int = 300,
+    ) -> Optional[Dict]:
+        """Claim one draft generation using database time and revision CAS."""
+
+        if type(expected_revision) is not int or expected_revision < 0:
+            raise ValueError("expected_revision must be non-negative")
+        if type(lease_seconds) is not int or not 1 <= lease_seconds <= 1800:
+            raise ValueError("lease_seconds must be between 1 and 1800")
+        parsed_claim_id = uuid.UUID(str(claim_id))
+        if parsed_claim_id.version != 4:
+            raise ValueError("claim_id must be a UUID4")
+        claim_id = str(parsed_claim_id)
+        connection = self._get_connection()
+        cursor = connection.cursor()
+        try:
+            cursor.execute(
+                """
+                UPDATE draft_agents
+                SET generation_claim_id = %s,
+                    generation_claim_expires_at =
+                        clock_timestamp() + (%s * interval '1 second'),
+                    status = 'generating',
+                    error_message = NULL,
+                    state_revision = state_revision + 1,
+                    updated_at =
+                        (extract(epoch from clock_timestamp()) * 1000)::bigint
+                WHERE id = %s AND user_id = %s AND state_revision = %s
+                  AND (
+                    generation_claim_id IS NULL
+                    OR generation_claim_expires_at <= clock_timestamp()
+                    OR generation_claim_id = %s
+                  )
+                RETURNING *
+                """,
+                (
+                    claim_id,
+                    lease_seconds,
+                    draft_id,
+                    owner_user_id,
+                    expected_revision,
+                    claim_id,
+                ),
+            )
+            row = cursor.fetchone()
+            connection.commit()
+            return dict(row) if row else None
+        except BaseException:
+            connection.rollback()
+            raise
+        finally:
+            try:
+                cursor.close()
+            finally:
+                connection.close()
+
+    def finish_draft_generation(
+        self,
+        *,
+        draft_id: str,
+        owner_user_id: str,
+        expected_revision: int,
+        claim_id: str,
+        status: str,
+        error_message: Optional[str] = None,
+        security_report: Optional[str] = None,
+        validation_report: Optional[str] = None,
+        required_credentials: Optional[str] = None,
+    ) -> Optional[Dict]:
+        """Release the exact live generation claim and publish its draft state."""
+
+        if status not in {"generated", "error"}:
+            raise ValueError("generation terminal status is invalid")
+        parsed_claim_id = uuid.UUID(str(claim_id))
+        if parsed_claim_id.version != 4:
+            raise ValueError("claim_id must be a UUID4")
+        claim_id = str(parsed_claim_id)
+        connection = self._get_connection()
+        cursor = connection.cursor()
+        try:
+            cursor.execute(
+                """
+                UPDATE draft_agents
+                SET generation_claim_id = NULL,
+                    generation_claim_expires_at = NULL,
+                    status = %s,
+                    error_message = %s,
+                    security_report = %s,
+                    validation_report = %s,
+                    required_credentials = %s,
+                    state_revision = state_revision + 1,
+                    updated_at =
+                        (extract(epoch from clock_timestamp()) * 1000)::bigint
+                WHERE id = %s AND user_id = %s AND state_revision = %s
+                  AND generation_claim_id = %s
+                  AND generation_claim_expires_at > clock_timestamp()
+                RETURNING *
+                """,
+                (
+                    status,
+                    error_message,
+                    security_report,
+                    validation_report,
+                    required_credentials,
+                    draft_id,
+                    owner_user_id,
+                    expected_revision,
+                    claim_id,
+                ),
+            )
+            row = cursor.fetchone()
+            connection.commit()
+            return dict(row) if row else None
+        except BaseException:
+            connection.rollback()
+            raise
+        finally:
+            try:
+                cursor.close()
+            finally:
+                connection.close()
 
     def delete_draft_agent(self, draft_id: str) -> bool:
         """Delete a draft agent record."""

@@ -20,6 +20,7 @@ import os
 import re
 import threading
 import time
+import uuid
 from dataclasses import dataclass
 from typing import List, Optional
 
@@ -87,6 +88,10 @@ class ArchivedDraft:
     code: str
     score: float
     created_at: int = 0
+    owner_user_id: str = ""
+    draft_uuid: str = ""
+    source_state_revision: int = 0
+    idempotency_key: str = ""
 
 
 # ───────────────────────────── tokenisation ──────────────────────────────────
@@ -389,11 +394,17 @@ def draft_fingerprint(draft: dict) -> str:
         return ""
 
 
-def get_archive() -> List[ArchivedDraft]:
-    """Return a snapshot copy of the current in-process archive (best→nothing
-    order is *not* guaranteed; callers rank via :func:`top_exemplars`)."""
+def get_archive(owner_user_id: str) -> List[ArchivedDraft]:
+    """Return only one owner's immutable archive snapshot."""
+
+    if not isinstance(owner_user_id, str) or not owner_user_id.strip():
+        raise ValueError("owner_user_id is required")
     with _ARCHIVE_LOCK:
-        return list(_ARCHIVE)
+        return [
+            record
+            for record in _ARCHIVE
+            if record.owner_user_id == owner_user_id
+        ]
 
 
 def reset_archive() -> None:
@@ -407,6 +418,10 @@ def record_archived_draft(
     code: str,
     score: float,
     *,
+    owner_user_id: str,
+    draft_uuid: str,
+    source_state_revision: int,
+    idempotency_key: str | None = None,
     created_at: Optional[int] = None,
 ) -> Optional[ArchivedDraft]:
     """Archive a draft outcome. No-op (returns ``None``) when the feature flag
@@ -421,19 +436,67 @@ def record_archived_draft(
     try:
         if not (code or "").strip() or score <= 0.0:
             return None
+        if not isinstance(owner_user_id, str) or not owner_user_id.strip():
+            return None
+        parsed_draft_uuid = uuid.UUID(str(draft_uuid))
+        if parsed_draft_uuid.version != 4:
+            return None
+        if (
+            type(source_state_revision) is not int
+            or source_state_revision < 0
+        ):
+            return None
+        stable_key = idempotency_key or (
+            f"draft-archive:{parsed_draft_uuid}:{source_state_revision}"
+        )
+        if (
+            not isinstance(stable_key, str)
+            or not stable_key.strip()
+            or len(stable_key) > 256
+        ):
+            return None
         rec = ArchivedDraft(
             fingerprint=fingerprint or "",
             code=code,
             score=_clamp01(score),
             created_at=int(created_at if created_at is not None else time.time()),
+            owner_user_id=owner_user_id,
+            draft_uuid=str(parsed_draft_uuid),
+            source_state_revision=source_state_revision,
+            idempotency_key=stable_key,
         )
         with _ARCHIVE_LOCK:
+            existing = next(
+                (
+                    record
+                    for record in _ARCHIVE
+                    if record.owner_user_id == owner_user_id
+                    and record.idempotency_key == stable_key
+                ),
+                None,
+            )
+            if existing is not None:
+                if (
+                    existing.draft_uuid == rec.draft_uuid
+                    and existing.source_state_revision
+                    == rec.source_state_revision
+                    and existing.fingerprint == rec.fingerprint
+                    and existing.code == rec.code
+                    and existing.score == rec.score
+                ):
+                    return existing
+                logger.warning(
+                    "draft-archive: refused conflicting idempotency replay"
+                )
+                return None
             _ARCHIVE.append(rec)
             if len(_ARCHIVE) > ARCHIVE_MAX:
                 del _ARCHIVE[: len(_ARCHIVE) - ARCHIVE_MAX]
         logger.info(
-            "draft-archive: recorded exemplar (fingerprint=%s, score=%.2f, size=%d)",
-            rec.fingerprint, rec.score, len(_ARCHIVE),
+            "draft-archive: recorded owner-scoped exemplar "
+            "(score=%.2f, size=%d)",
+            rec.score,
+            len(_ARCHIVE),
         )
         return rec
     except Exception:  # pragma: no cover — archiving must never break creation
@@ -445,6 +508,7 @@ def exemplar_prompt_for(
     base_prompt: str,
     fingerprint: str,
     *,
+    owner_user_id: str,
     k: int = 3,
     max_chars: int = 4000,
 ) -> str:
@@ -457,7 +521,9 @@ def exemplar_prompt_for(
     if not archive_enabled():
         return base_prompt
     try:
-        exemplars = top_exemplars(get_archive(), fingerprint, k=k)
+        exemplars = top_exemplars(
+            get_archive(owner_user_id), fingerprint, k=k
+        )
         return condition_prompt(base_prompt, exemplars, max_chars=max_chars)
     except Exception:  # pragma: no cover — conditioning is best-effort
         logger.debug("draft-archive: exemplar conditioning failed", exc_info=True)

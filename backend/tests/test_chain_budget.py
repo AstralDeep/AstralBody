@@ -143,8 +143,12 @@ def test_depth_bound_composes_with_the_048_bound():
 
 
 def test_turn_start_resets_budget_in_the_real_orchestrator():
-    """The reset is wired into handle_chat_message (not just testable in
-    isolation)."""
+    """The public turn wrapper delegates to the reset-bearing implementation."""
     import inspect
-    src = inspect.getsource(Orchestrator.handle_chat_message)
-    assert "_chain_budgets.pop(chat_id, None)" in src
+
+    wrapper = inspect.getsource(Orchestrator.handle_chat_message)
+    implementation = inspect.getsource(Orchestrator._handle_chat_message_impl)
+    assert "self._handle_chat_message_impl(" in wrapper
+    assert "_existing_budget = self._chain_budgets.get(chat_id)" in implementation
+    assert "_existing_budget.parent is None" in implementation
+    assert "self._chain_budgets.pop(chat_id, None)" in implementation

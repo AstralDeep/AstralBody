@@ -1,0 +1,714 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "https://astraldeep.local/specs/060/release-trust.schema.json",
+  "title": "AstralDeep Release Workflow Trust Manifests",
+  "description": "Shape contract for native protected-CI producer provenance, stage deployment, bounded exception approval plus debt registration, debt resolution, and the final release decision.",
+  "oneOf": [
+    { "$ref": "#/$defs/trusted_workflow_provenance" },
+    { "$ref": "#/$defs/trusted_stage_deploy" },
+    { "$ref": "#/$defs/trusted_exception_approval" },
+    { "$ref": "#/$defs/trusted_debt_resolution" },
+    { "$ref": "#/$defs/trusted_release_decision" }
+  ],
+  "$comment": "Schema validity is not a trust root. Evidence is parsed locally before push without authorization, then native protected CI reconstructs provider identities, verifies exact bytes, and executes pinned policy. Protected environment jobs own exception/debt transitions and publication with the built-in short-lived job token; no repository-scoped GitHub App, installation token, or custom token broker is used.",
+  "$defs": {
+    "uuid": {
+      "type": "string",
+      "format": "uuid"
+    },
+    "git_sha": {
+      "type": "string",
+      "pattern": "^[0-9a-f]{40}$"
+    },
+    "sha256": {
+      "type": "string",
+      "pattern": "^[0-9a-f]{64}$"
+    },
+    "timestamp": {
+      "type": "string",
+      "format": "date-time"
+    },
+    "release_tag": {
+      "type": "string",
+      "pattern": "^v(?![\\s\\S]*\\s)(0|[1-9][0-9]*)\\.(0|[1-9][0-9]*)\\.(0|[1-9][0-9]*)(?:-(?:(?:0|[1-9][0-9]*|[0-9]*[A-Za-z-][0-9A-Za-z-]*)(?:\\.(?:0|[1-9][0-9]*|[0-9]*[A-Za-z-][0-9A-Za-z-]*))*))?(?:\\+[0-9A-Za-z-]+(?:\\.[0-9A-Za-z-]+)*)?$"
+    },
+    "repository": {
+      "type": "string",
+      "pattern": "^[A-Za-z0-9_.-]+/[A-Za-z0-9_.-]+$"
+    },
+    "workflow": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["name", "run_id", "run_attempt", "job_id"],
+      "properties": {
+        "name": { "type": "string", "minLength": 1, "maxLength": 200 },
+        "run_id": { "type": "string", "pattern": "^[1-9][0-9]*$" },
+        "run_attempt": { "type": "integer", "minimum": 1 },
+        "job_id": { "type": "string", "pattern": "^[A-Za-z0-9_.-]{1,200}$" }
+      }
+    },
+    "runner": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["os", "architecture", "runner_image", "runner_name", "runner_environment"],
+      "properties": {
+        "os": { "type": "string", "enum": ["linux", "windows", "macos"] },
+        "architecture": { "type": "string", "enum": ["x86_64", "arm64"] },
+        "runner_image": { "type": "string", "minLength": 1, "maxLength": 200 },
+        "runner_name": { "type": "string", "minLength": 1, "maxLength": 200 },
+        "runner_environment": {
+          "type": "string",
+          "enum": ["github_hosted", "self_hosted"]
+        }
+      }
+    },
+    "protected_builder": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["repository", "workflow_path", "signer_digest", "certificate_identity"],
+      "properties": {
+        "repository": { "$ref": "#/$defs/repository" },
+        "workflow_path": {
+          "type": "string",
+          "pattern": "^\\.github/workflows/[A-Za-z0-9_.-]+$"
+        },
+        "signer_digest": { "$ref": "#/$defs/git_sha" },
+        "certificate_identity": { "type": "string", "minLength": 1, "maxLength": 500 }
+      },
+      "$comment": "Policy ignores these self-declared values as authority and requires byte-for-byte equality with independently supplied protected-environment/ruleset values before attestation verification."
+    },
+    "github_actions_artifact_member": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": [
+        "kind",
+        "repository",
+        "run_id",
+        "run_attempt",
+        "artifact_id",
+        "artifact_name",
+        "member",
+        "immutable_reference",
+        "sha256"
+      ],
+      "properties": {
+        "kind": { "const": "github_actions_artifact_member" },
+        "repository": { "$ref": "#/$defs/repository" },
+        "run_id": { "type": "string", "pattern": "^[1-9][0-9]*$" },
+        "run_attempt": { "type": "integer", "minimum": 1 },
+        "artifact_id": { "type": "string", "pattern": "^[1-9][0-9]*$" },
+        "artifact_name": { "type": "string", "minLength": 1, "maxLength": 200 },
+        "member": {
+          "type": "string",
+          "minLength": 1,
+          "maxLength": 1024,
+          "pattern": "^[A-Za-z0-9._~!$&'()*+,;=:@%/-]+$"
+        },
+        "immutable_reference": {
+          "type": "string",
+          "pattern": "^gh://[A-Za-z0-9_.-]+/[A-Za-z0-9_.-]+/runs/[1-9][0-9]*/attempts/[1-9][0-9]*/artifacts/[1-9][0-9]*/members/[A-Za-z0-9._~!$&'()*+,;=:@%/-]+$"
+        },
+        "sha256": { "$ref": "#/$defs/sha256" }
+      },
+      "$comment": "Policy derives immutable_reference from the other fields, percent-decodes and normalizes member, and rejects traversal, absolute paths, empty segments, and symlinks before hashing the member bytes."
+    },
+    "github_release_asset": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": [
+        "kind",
+        "repository",
+        "release_database_id",
+        "asset_database_id",
+        "asset_name",
+        "tag",
+        "target_commit_sha",
+        "immutable_reference",
+        "sha256"
+      ],
+      "properties": {
+        "kind": { "const": "github_release_asset" },
+        "repository": { "$ref": "#/$defs/repository" },
+        "release_database_id": { "type": "integer", "minimum": 1 },
+        "asset_database_id": { "type": "integer", "minimum": 1 },
+        "asset_name": {
+          "type": "string",
+          "minLength": 1,
+          "maxLength": 200,
+          "pattern": "^[^/\\\\]+$"
+        },
+        "tag": { "$ref": "#/$defs/release_tag" },
+        "target_commit_sha": { "$ref": "#/$defs/git_sha" },
+        "immutable_reference": {
+          "type": "string",
+          "pattern": "^gh://[A-Za-z0-9_.-]+/[A-Za-z0-9_.-]+/releases/[1-9][0-9]*/assets/[1-9][0-9]*$"
+        },
+        "sha256": { "$ref": "#/$defs/sha256" }
+      },
+      "$comment": "Policy derives the canonical URI from repository/release/asset IDs, resolves metadata through the same-repository GitHub API, re-downloads the asset by immutable asset ID, and hashes those bytes."
+    },
+    "oci_manifest": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["kind", "registry", "repository_path", "digest", "immutable_reference", "sha256"],
+      "properties": {
+        "kind": { "const": "oci_manifest" },
+        "registry": {
+          "type": "string",
+          "pattern": "^[A-Za-z0-9.-]+(?::[0-9]{1,5})?$"
+        },
+        "repository_path": {
+          "type": "string",
+          "pattern": "^[A-Za-z0-9._/-]+$"
+        },
+        "digest": {
+          "type": "string",
+          "pattern": "^sha256:[0-9a-f]{64}$"
+        },
+        "immutable_reference": {
+          "type": "string",
+          "pattern": "^oci://[A-Za-z0-9.-]+(?::[0-9]{1,5})?/[A-Za-z0-9._/-]+@sha256:[0-9a-f]{64}$"
+        },
+        "sha256": { "$ref": "#/$defs/sha256" }
+      },
+      "$comment": "Policy derives immutable_reference, resolves the digest from the authenticated registry, and hashes the retrieved OCI manifest bytes; a tag is never accepted."
+    },
+    "trusted_artifact": {
+      "oneOf": [
+        { "$ref": "#/$defs/github_actions_artifact_member" },
+        { "$ref": "#/$defs/github_release_asset" },
+        { "$ref": "#/$defs/oci_manifest" }
+      ]
+    },
+    "trusted_input_manifest": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["manifest_id", "role", "artifact"],
+      "properties": {
+        "manifest_id": { "$ref": "#/$defs/uuid" },
+        "role": {
+          "type": "string",
+          "enum": ["producer", "stage_deploy", "exception_approval", "debt_resolution"]
+        },
+        "artifact": { "$ref": "#/$defs/github_actions_artifact_member" }
+      },
+      "$comment": "Policy resolves and re-hashes the exact canonical artifact member and requires its parsed manifest_id/type to equal this record. Duplicate manifest IDs, artifact identities, bytes, missing required roles, and extra current-run inputs are rejected."
+    },
+    "trusted_workflow_provenance": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": [
+        "document_type",
+        "schema_version",
+        "manifest_id",
+        "repository",
+        "candidate_sha",
+        "workflow",
+        "workflow_ref",
+        "runner",
+        "trusted_builder",
+        "generated_at",
+        "artifacts"
+      ],
+      "properties": {
+        "document_type": { "const": "trusted_workflow_provenance" },
+        "schema_version": { "const": 1 },
+        "manifest_id": { "$ref": "#/$defs/uuid" },
+        "repository": { "$ref": "#/$defs/repository" },
+        "candidate_sha": { "$ref": "#/$defs/git_sha" },
+        "workflow": { "$ref": "#/$defs/workflow" },
+        "workflow_ref": {
+          "type": "string",
+          "pattern": "^[A-Za-z0-9_.-]+/[A-Za-z0-9_.-]+/\\.github/workflows/[A-Za-z0-9_.-]+@[0-9a-f]{40}$"
+        },
+        "runner": { "$ref": "#/$defs/runner" },
+        "trusted_builder": { "$ref": "#/$defs/protected_builder" },
+        "generated_at": { "$ref": "#/$defs/timestamp" },
+        "artifacts": {
+          "type": "array",
+          "minItems": 1,
+          "maxItems": 256,
+          "items": { "$ref": "#/$defs/trusted_artifact" }
+        }
+      },
+      "$comment": "One manifest represents exactly one producer job. Policy rejects duplicate immutable references or identities and requires repository/candidate/workflow/run/attempt/job/runner plus the externally verified attestation subject digest and protected builder identity to match independent current-workflow context. The subject digest is deliberately not embedded because a file cannot contain its own digest."
+    },
+    "trusted_stage_deploy": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": [
+        "document_type",
+        "schema_version",
+        "manifest_id",
+        "repository",
+        "candidate_sha",
+        "workflow",
+        "workflow_ref",
+        "runner",
+        "trusted_builder",
+        "generated_at",
+        "stage_outputs_artifact",
+        "deployment"
+      ],
+      "properties": {
+        "document_type": { "const": "trusted_stage_deploy" },
+        "schema_version": { "const": 1 },
+        "manifest_id": { "$ref": "#/$defs/uuid" },
+        "repository": { "$ref": "#/$defs/repository" },
+        "candidate_sha": { "$ref": "#/$defs/git_sha" },
+        "workflow": { "$ref": "#/$defs/workflow" },
+        "workflow_ref": {
+          "type": "string",
+          "pattern": "^[A-Za-z0-9_.-]+/[A-Za-z0-9_.-]+/\\.github/workflows/[A-Za-z0-9_.-]+@[0-9a-f]{40}$"
+        },
+        "runner": { "$ref": "#/$defs/runner" },
+        "trusted_builder": { "$ref": "#/$defs/protected_builder" },
+        "generated_at": { "$ref": "#/$defs/timestamp" },
+        "stage_outputs_artifact": { "$ref": "#/$defs/github_actions_artifact_member" },
+        "deployment": {
+          "type": "object",
+          "additionalProperties": false,
+          "required": [
+            "environment_id",
+            "request_namespace",
+            "topology",
+            "deployment_run_id",
+            "endpoint",
+            "candidate_image_reference",
+            "candidate_image_sha256",
+            "representative_dataset_sha256",
+            "fixture_manifest_sha256",
+            "keycloak_realm_sha256",
+            "source_schema_revision",
+            "migrated_schema_revision",
+            "authentication_posture",
+            "database_posture",
+            "worker_paths",
+            "capability_manifest_sha256",
+            "service_identity_sha256"
+          ],
+          "properties": {
+            "environment_id": {
+              "type": "string",
+              "pattern": "^[A-Za-z0-9][A-Za-z0-9._-]{2,127}$"
+            },
+            "request_namespace": {
+              "type": "string",
+              "pattern": "^[a-z0-9][a-z0-9_-]{2,127}$"
+            },
+            "topology": {
+              "type": "string",
+              "enum": ["shared_persistent", "shared_reachable_ephemeral"]
+            },
+            "deployment_run_id": { "type": "string", "pattern": "^[1-9][0-9]*$" },
+            "endpoint": {
+              "type": "string",
+              "format": "uri",
+              "minLength": 8,
+              "maxLength": 2048,
+              "pattern": "^https://[^\\s]+$",
+              "not": {
+                "pattern": "(?:^https://(?:localhost|127\\.0\\.0\\.1|\\[::1\\])(?::[0-9]{1,5})?(?:/|$)|^https://[^/]*@|[?#])"
+              }
+            },
+            "candidate_image_reference": {
+              "type": "string",
+              "pattern": "^[A-Za-z0-9.-]+(?::[0-9]{1,5})?/[A-Za-z0-9._/-]+@sha256:[0-9a-f]{64}$"
+            },
+            "candidate_image_sha256": { "$ref": "#/$defs/sha256" },
+            "representative_dataset_sha256": { "$ref": "#/$defs/sha256" },
+            "fixture_manifest_sha256": { "$ref": "#/$defs/sha256" },
+            "keycloak_realm_sha256": { "$ref": "#/$defs/sha256" },
+            "source_schema_revision": { "const": "057.001" },
+            "migrated_schema_revision": { "const": "060.004" },
+            "authentication_posture": { "const": "real_keycloak_oidc" },
+            "database_posture": { "const": "representative_postgresql" },
+            "worker_paths": {
+              "type": "array",
+              "minItems": 2,
+              "uniqueItems": true,
+              "items": {
+                "type": "string",
+                "enum": ["background", "scheduler", "maintenance"]
+              },
+              "allOf": [
+                { "contains": { "const": "background" } },
+                { "contains": { "const": "scheduler" } }
+              ]
+            },
+            "capability_manifest_sha256": { "$ref": "#/$defs/sha256" },
+            "service_identity_sha256": { "$ref": "#/$defs/sha256" }
+          }
+        }
+      },
+      "$comment": "Policy matches the stage producer's run/attempt/job/runner and protected builder to independently verified context, matches every normalized deployment field to platform evidence before reachability, and probes only this endpoint."
+    },
+    "exception_debt_entry": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": [
+        "document_type",
+        "schema_version",
+        "approval_id",
+        "exception_id",
+        "repository",
+        "candidate_sha",
+        "release_id",
+        "platform",
+        "missing_checks",
+        "reason",
+        "requester_login",
+        "reviewer_login",
+        "reviewer_database_id",
+        "approved_at",
+        "expires_at",
+        "exception_request_artifact",
+        "maximum_valid_days",
+        "blocks_next_release",
+        "registered_at"
+      ],
+      "properties": {
+        "document_type": { "const": "release_evidence_debt" },
+        "schema_version": { "const": 1 },
+        "approval_id": { "$ref": "#/$defs/uuid" },
+        "exception_id": { "$ref": "#/$defs/uuid" },
+        "repository": { "$ref": "#/$defs/repository" },
+        "candidate_sha": { "$ref": "#/$defs/git_sha" },
+        "release_id": {
+          "type": "string",
+          "pattern": "^[A-Za-z0-9][A-Za-z0-9._-]{2,127}$"
+        },
+        "platform": {
+          "type": "string",
+          "enum": ["web", "windows", "android", "macos", "ios", "watchos"]
+        },
+        "missing_checks": {
+          "type": "array",
+          "minItems": 1,
+          "uniqueItems": true,
+          "items": {
+            "type": "string",
+            "pattern": "^[a-z][a-z0-9_]{2,63}$",
+            "not": { "enum": ["apple_first_login_llm", "candidate_staging"] }
+          }
+        },
+        "reason": { "type": "string", "minLength": 10, "maxLength": 1000 },
+        "requester_login": { "type": "string", "pattern": "^[A-Za-z0-9-]{1,39}$" },
+        "reviewer_login": { "type": "string", "pattern": "^[A-Za-z0-9-]{1,39}$" },
+        "reviewer_database_id": { "type": "integer", "minimum": 1 },
+        "approved_at": { "$ref": "#/$defs/timestamp" },
+        "expires_at": { "$ref": "#/$defs/timestamp" },
+        "exception_request_artifact": { "$ref": "#/$defs/github_actions_artifact_member" },
+        "maximum_valid_days": { "const": 7 },
+        "blocks_next_release": { "const": true },
+        "registered_at": { "$ref": "#/$defs/timestamp" }
+      },
+      "$comment": "The protected registrar creates these canonical bytes only after approval. Policy cross-checks every request-known field against the re-hashed immutable request artifact and every approval-known field against same-repository API state, requires reviewer != requester, and proves expires_at is after approved_at by no more than seven days."
+    },
+    "exception_debt_resolution_entry": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": [
+        "document_type",
+        "schema_version",
+        "resolution_id",
+        "exception_id",
+        "repository",
+        "candidate_sha",
+        "release_id",
+        "platform",
+        "resolved_checks",
+        "debt_entry_sha256",
+        "passing_evidence_artifact",
+        "passing_provenance_manifest_artifact",
+        "protected_policy_sha256",
+        "resolved_at"
+      ],
+      "properties": {
+        "document_type": { "const": "release_evidence_debt_resolution" },
+        "schema_version": { "const": 1 },
+        "resolution_id": { "$ref": "#/$defs/uuid" },
+        "exception_id": { "$ref": "#/$defs/uuid" },
+        "repository": { "$ref": "#/$defs/repository" },
+        "candidate_sha": { "$ref": "#/$defs/git_sha" },
+        "release_id": {
+          "type": "string",
+          "pattern": "^[A-Za-z0-9][A-Za-z0-9._-]{2,127}$"
+        },
+        "platform": {
+          "type": "string",
+          "enum": ["web", "windows", "android", "macos", "ios", "watchos"]
+        },
+        "resolved_checks": {
+          "type": "array",
+          "minItems": 1,
+          "uniqueItems": true,
+          "items": { "type": "string", "pattern": "^[a-z][a-z0-9_]{2,63}$" }
+        },
+        "debt_entry_sha256": { "$ref": "#/$defs/sha256" },
+        "passing_evidence_artifact": { "$ref": "#/$defs/github_actions_artifact_member" },
+        "passing_provenance_manifest_artifact": { "$ref": "#/$defs/github_actions_artifact_member" },
+        "protected_policy_sha256": { "$ref": "#/$defs/sha256" },
+        "resolved_at": { "$ref": "#/$defs/timestamp" }
+      },
+      "$comment": "The protected registrar appends this create-only record only after independently re-hashing the later candidate's attested platform evidence and producer manifest and proving every resolved check passed. Policy matches exception_id/platform/checks to the earlier debt, requires a strictly later candidate/release, and treats each debt as resolved once; a later outage creates a new exception_id and debt."
+    },
+    "exception_ledger_record": {
+      "oneOf": [
+        { "$ref": "#/$defs/exception_debt_entry" },
+        { "$ref": "#/$defs/exception_debt_resolution_entry" }
+      ]
+    },
+    "trusted_exception_approval": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": [
+        "document_type",
+        "schema_version",
+        "manifest_id",
+        "approval_id",
+        "exception_id",
+        "repository",
+        "candidate_sha",
+        "release_id",
+        "protected_environment",
+        "deployment_id",
+        "approval_state",
+        "reviewer_login",
+        "reviewer_database_id",
+        "requester_login",
+        "github_api_reference",
+        "approved_at",
+        "expires_at",
+        "exception_artifact",
+        "approval_payload_sha256",
+        "ledger_repository",
+        "ledger_ref",
+        "ledger_parent_sha",
+        "ledger_commit_sha",
+        "ledger_entry_path",
+        "ledger_entry_sha256",
+        "ledger_entry_immutable_reference",
+        "ledger_entry",
+        "workflow",
+        "workflow_ref",
+        "runner",
+        "trusted_builder",
+        "generated_at"
+      ],
+      "properties": {
+        "document_type": { "const": "trusted_exception_approval" },
+        "schema_version": { "const": 1 },
+        "manifest_id": { "$ref": "#/$defs/uuid" },
+        "approval_id": { "$ref": "#/$defs/uuid" },
+        "exception_id": { "$ref": "#/$defs/uuid" },
+        "repository": { "$ref": "#/$defs/repository" },
+        "candidate_sha": { "$ref": "#/$defs/git_sha" },
+        "release_id": {
+          "type": "string",
+          "pattern": "^[A-Za-z0-9][A-Za-z0-9._-]{2,127}$"
+        },
+        "protected_environment": { "const": "release-evidence-exception" },
+        "deployment_id": { "type": "integer", "minimum": 1 },
+        "approval_state": { "const": "approved" },
+        "reviewer_login": { "type": "string", "pattern": "^[A-Za-z0-9-]{1,39}$" },
+        "reviewer_database_id": { "type": "integer", "minimum": 1 },
+        "requester_login": { "type": "string", "pattern": "^[A-Za-z0-9-]{1,39}$" },
+        "github_api_reference": {
+          "type": "string",
+          "pattern": "^ghapi://[A-Za-z0-9_.-]+/[A-Za-z0-9_.-]+/deployments/[1-9][0-9]*$"
+        },
+        "approved_at": { "$ref": "#/$defs/timestamp" },
+        "expires_at": { "$ref": "#/$defs/timestamp" },
+        "exception_artifact": { "$ref": "#/$defs/github_actions_artifact_member" },
+        "approval_payload_sha256": {
+          "$ref": "#/$defs/sha256",
+          "$comment": "SHA-256 of exactly the UTF-8 bytes produced for an object with only candidate_sha, exception_artifact_id, exception_artifact_immutable_reference, exception_artifact_sha256, exception_id, and release_id using JSON ensure_ascii=false, sort_keys=true, separators=(',', ':'), allow_nan=false, and no trailing newline. Parsing rejects duplicate keys and non-finite numbers before canonicalization. Values come from this manifest's candidate/release/exception and exception_artifact fields."
+        },
+        "ledger_repository": { "$ref": "#/$defs/repository" },
+        "ledger_ref": { "const": "refs/heads/release-evidence-debt" },
+        "ledger_parent_sha": { "$ref": "#/$defs/git_sha" },
+        "ledger_commit_sha": { "$ref": "#/$defs/git_sha" },
+        "ledger_entry_path": {
+          "type": "string",
+          "pattern": "^debts/[0-9a-fA-F-]{36}\\.json$"
+        },
+        "ledger_entry_sha256": { "$ref": "#/$defs/sha256" },
+        "ledger_entry_immutable_reference": {
+          "type": "string",
+          "pattern": "^ghgit://[A-Za-z0-9_.-]+/[A-Za-z0-9_.-]+/commits/[0-9a-f]{40}/paths/debts/[0-9a-fA-F-]{36}\\.json$"
+        },
+        "ledger_entry": { "$ref": "#/$defs/exception_debt_entry" },
+        "workflow": { "$ref": "#/$defs/workflow" },
+        "workflow_ref": {
+          "type": "string",
+          "pattern": "^[A-Za-z0-9_.-]+/[A-Za-z0-9_.-]+/\\.github/workflows/[A-Za-z0-9_.-]+@[0-9a-f]{40}$"
+        },
+        "runner": { "$ref": "#/$defs/runner" },
+        "trusted_builder": { "$ref": "#/$defs/protected_builder" },
+        "generated_at": { "$ref": "#/$defs/timestamp" }
+      },
+      "$comment": "Before review, the protected approval request exposes the exact evidence_exception_request artifact ID/reference/digest and normative compact sorted-key UTF-8 approval_payload_sha256. After an allowlisted reviewer other than the requester approves, a separately pinned protected registrar re-queries same-repository API state, resolves/re-hashes those immutable request bytes, creates the canonical ledger_entry, and appends it create-only beneath debts/ on refs/heads/release-evidence-debt. Policy independently verifies the protected ref/rules, parent-to-child commit, previously absent unique path, immutable commit/path reference, canonical entry bytes/digest, field equality, expiry, and attestation before accepting this manifest. Candidate commits never contain current exception debt, and a manifest without the completed append receipt cannot qualify."
+    },
+    "trusted_debt_resolution": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": [
+        "document_type",
+        "schema_version",
+        "manifest_id",
+        "resolution_id",
+        "exception_id",
+        "repository",
+        "candidate_sha",
+        "release_id",
+        "ledger_repository",
+        "ledger_ref",
+        "ledger_parent_sha",
+        "ledger_commit_sha",
+        "ledger_entry_path",
+        "ledger_entry_sha256",
+        "ledger_entry_immutable_reference",
+        "ledger_entry",
+        "workflow",
+        "workflow_ref",
+        "runner",
+        "trusted_builder",
+        "generated_at"
+      ],
+      "properties": {
+        "document_type": { "const": "trusted_debt_resolution" },
+        "schema_version": { "const": 1 },
+        "manifest_id": { "$ref": "#/$defs/uuid" },
+        "resolution_id": { "$ref": "#/$defs/uuid" },
+        "exception_id": { "$ref": "#/$defs/uuid" },
+        "repository": { "$ref": "#/$defs/repository" },
+        "candidate_sha": { "$ref": "#/$defs/git_sha" },
+        "release_id": {
+          "type": "string",
+          "pattern": "^[A-Za-z0-9][A-Za-z0-9._-]{2,127}$"
+        },
+        "ledger_repository": { "$ref": "#/$defs/repository" },
+        "ledger_ref": { "const": "refs/heads/release-evidence-debt" },
+        "ledger_parent_sha": { "$ref": "#/$defs/git_sha" },
+        "ledger_commit_sha": { "$ref": "#/$defs/git_sha" },
+        "ledger_entry_path": {
+          "type": "string",
+          "pattern": "^resolutions/[0-9a-fA-F-]{36}\\.json$"
+        },
+        "ledger_entry_sha256": { "$ref": "#/$defs/sha256" },
+        "ledger_entry_immutable_reference": {
+          "type": "string",
+          "pattern": "^ghgit://[A-Za-z0-9_.-]+/[A-Za-z0-9_.-]+/commits/[0-9a-f]{40}/paths/resolutions/[0-9a-fA-F-]{36}\\.json$"
+        },
+        "ledger_entry": { "$ref": "#/$defs/exception_debt_resolution_entry" },
+        "workflow": { "$ref": "#/$defs/workflow" },
+        "workflow_ref": {
+          "type": "string",
+          "pattern": "^[A-Za-z0-9_.-]+/[A-Za-z0-9_.-]+/\\.github/workflows/[A-Za-z0-9_.-]+@[0-9a-f]{40}$"
+        },
+        "runner": { "$ref": "#/$defs/runner" },
+        "trusted_builder": { "$ref": "#/$defs/protected_builder" },
+        "generated_at": { "$ref": "#/$defs/timestamp" }
+      },
+      "$comment": "The protected registrar emits this attested receipt only after appending one canonical resolution record beneath resolutions/. Policy verifies the protected parent-to-child commit, unique absent path, immutable bytes/reference, exact later passing evidence and producer provenance, one-time resolution of the named debt, and no mutation of prior debts or resolutions."
+    },
+    "trusted_release_decision": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": [
+        "document_type",
+        "schema_version",
+        "decision_id",
+        "repository",
+        "base_sha",
+        "candidate_sha",
+        "release_id",
+        "readiness_evidence_set_id",
+        "evidence_set_artifact",
+        "coverage_artifact",
+        "input_manifests",
+        "exception_ledger_repository",
+        "exception_ledger_ref",
+        "exception_ledger_commit_sha",
+        "exception_ledger_tree_sha",
+        "exception_ledger_snapshot_sha256",
+        "exception_ledger_immutable_reference",
+        "exception_ledger_verified_at",
+        "policy_sha256",
+        "decision",
+        "coverage_percent",
+        "required_check_name",
+        "workflow",
+        "workflow_ref",
+        "runner",
+        "trusted_builder",
+        "valid_until",
+        "generated_at"
+      ],
+      "properties": {
+        "document_type": { "const": "trusted_release_decision" },
+        "schema_version": { "const": 1 },
+        "decision_id": { "$ref": "#/$defs/uuid" },
+        "repository": { "$ref": "#/$defs/repository" },
+        "base_sha": { "$ref": "#/$defs/git_sha" },
+        "candidate_sha": { "$ref": "#/$defs/git_sha" },
+        "release_id": {
+          "type": "string",
+          "pattern": "^[A-Za-z0-9][A-Za-z0-9._-]{2,127}$"
+        },
+        "readiness_evidence_set_id": { "$ref": "#/$defs/uuid" },
+        "evidence_set_artifact": { "$ref": "#/$defs/github_actions_artifact_member" },
+        "coverage_artifact": { "$ref": "#/$defs/github_actions_artifact_member" },
+        "input_manifests": {
+          "type": "array",
+          "minItems": 1,
+          "maxItems": 128,
+          "uniqueItems": true,
+          "items": { "$ref": "#/$defs/trusted_input_manifest" },
+          "allOf": [
+            {
+              "contains": {
+                "properties": { "role": { "const": "producer" } },
+                "required": ["role"]
+              }
+            },
+            {
+              "contains": {
+                "properties": { "role": { "const": "stage_deploy" } },
+                "required": ["role"]
+              }
+            }
+          ]
+        },
+        "exception_ledger_repository": { "$ref": "#/$defs/repository" },
+        "exception_ledger_ref": { "const": "refs/heads/release-evidence-debt" },
+        "exception_ledger_commit_sha": { "$ref": "#/$defs/git_sha" },
+        "exception_ledger_tree_sha": { "$ref": "#/$defs/git_sha" },
+        "exception_ledger_snapshot_sha256": {
+          "$ref": "#/$defs/sha256",
+          "$comment": "SHA-256 of compact sorted-key UTF-8 JSON (ensure_ascii=false, sort_keys=true, separators=(',', ':'), allow_nan=false, no trailing newline) mapping every normalized debts/<uuid>.json and resolutions/<uuid>.json path to its re-hashed byte SHA-256; duplicate/non-finite/path-invalid input is rejected."
+        },
+        "exception_ledger_immutable_reference": {
+          "type": "string",
+          "pattern": "^ghgit://[A-Za-z0-9_.-]+/[A-Za-z0-9_.-]+/commits/[0-9a-f]{40}$"
+        },
+        "exception_ledger_verified_at": { "$ref": "#/$defs/timestamp" },
+        "policy_sha256": { "$ref": "#/$defs/sha256" },
+        "decision": { "const": "passed" },
+        "coverage_percent": { "type": "number", "minimum": 90, "maximum": 100 },
+        "required_check_name": { "const": "release-readiness / protected-decision" },
+        "workflow": { "$ref": "#/$defs/workflow" },
+        "workflow_ref": {
+          "type": "string",
+          "pattern": "^[A-Za-z0-9_.-]+/[A-Za-z0-9_.-]+/\\.github/workflows/[A-Za-z0-9_.-]+@[0-9a-f]{40}$"
+        },
+        "runner": { "$ref": "#/$defs/runner" },
+        "trusted_builder": { "$ref": "#/$defs/protected_builder" },
+        "valid_until": { "$ref": "#/$defs/timestamp" },
+        "generated_at": { "$ref": "#/$defs/timestamp" }
+      },
+      "$comment": "Only the protected reusable verifier may emit a qualifying passed decision. It reconstructs every producer/stage/approval input from bounded current-run IDs and GitHub API state, binds each input manifest ID to its canonical artifact member and re-hashed bytes, verifies attestations, and reads the current protected exception-ledger head/tree through the same-repository API. It rejects a stale or concurrently moved head, schema-validates debt and resolution records, re-hashes every normalized entry into exception_ledger_snapshot_sha256, proves current approvals' registered entries are present and all unresolved historical debt is either passed and registered as resolved now or remains blocking, and prevents an old resolution from satisfying a later distinct debt. It runs policy and coverage code from its independently pinned signer digest rather than the candidate checkout, sets valid_until no later than the earliest current approval expiry (and to a bounded protected-policy lifetime when there is no exception), hashes the exact evidence-set and coverage outputs, and attests this manifest. Repository rules require the installed protected workflow identity, not a name-only status. A caller aggregate, candidate validator, same-name job, UUID-only list, stale ledger snapshot, expired decision, or self-declared success cannot substitute for it."
+    }
+  }
+}

@@ -1,8 +1,8 @@
+import AstralCore
 // Feature 051 — the History screen (Android HistoryScreen parity): recent chats
 // (from the `get_history` → `history_list` WS round trip) as tappable cards; a
 // skeleton while loading; tap opens the conversation.
 import SwiftUI
-import AstralCore
 
 struct HistoryView: View {
     @Environment(AppModel.self) var model
@@ -23,15 +23,19 @@ struct HistoryView: View {
                 ScrollView {
                     LazyVStack(spacing: 8) {
                         ForEach(model.history) { chat in
-                            Button { model.openChat(chat.id) } label: { row(chat) }
-                                .buttonStyle(.plain)
-                                .contextMenu {
-                                    Button(role: .destructive) {
-                                        model.deleteChat(chat.id)
-                                    } label: {
-                                        Label("Delete conversation", systemImage: "trash")
-                                    }
+                            Button {
+                                model.openChat(chat.id)
+                            } label: {
+                                row(chat)
+                            }
+                            .buttonStyle(.plain)
+                            .contextMenu {
+                                Button(role: .destructive) {
+                                    model.deleteChat(chat.id)
+                                } label: {
+                                    Label("Delete conversation", systemImage: "trash")
                                 }
+                            }
                         }
                     }
                     .padding(16)

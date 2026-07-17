@@ -1,3 +1,4 @@
+import AstralCore
 // Feature 051 — the adaptive chat shell, a 1:1 match to the Android AdaptiveShell:
 // a canvas-dominant area (skeleton while a replacing turn is in flight, empty-
 // state hint, live working bar, read-only timeline banner + snapshot overlay), a
@@ -6,21 +7,21 @@
 // Compact widths stack; regular widths (iPad/landscape/macOS) split into a rail.
 import SwiftUI
 import UniformTypeIdentifiers
-import AstralCore
+
 #if os(iOS)
-import PhotosUI
+    import PhotosUI
 #endif
 
 struct ChatShell: View {
     @Environment(AppModel.self) var model
     #if os(iOS)
-    @Environment(\.horizontalSizeClass) private var hSize
+        @Environment(\.horizontalSizeClass) private var hSize
     #endif
     private var isSplit: Bool {
         #if os(iOS)
-        return hSize == .regular
+            return hSize == .regular
         #else
-        return true
+            return true
         #endif
     }
     var body: some View {
@@ -28,13 +29,15 @@ struct ChatShell: View {
             if isSplit { SplitShell() } else { StackedShell() }
         }
         #if os(macOS)
-        // T033/FR-017: Finder drag-and-drop stages chips exactly like the
-        // file dialog (Windows-client parity).
-        .dropDestination(for: URL.self) { urls, _ in
-            guard !model.mutationsLocked, !urls.isEmpty else { return false }
-            urls.forEach { model.stageFile(url: $0) }
-            return true
-        }
+            // T033/FR-017: Finder drag-and-drop stages chips exactly like the
+            // file dialog (Windows-client parity).
+            .dropDestination(for: URL.self) { urls, _ in
+                guard !model.mutationsLocked, !urls.isEmpty else { return false }
+                for url in urls {
+                    model.stageFile(url: url)
+                }
+                return true
+            }
         #endif
     }
 }
@@ -111,13 +114,15 @@ private struct CanvasArea: View {
                                 ForEach(canvasItems, id: \.key) { item in
                                     // 055 US4/US5 chrome: provenance badge +
                                     // refine/export context menu (top-level only).
-                                    ComponentChrome(component: item.comp,
-                                                    interactive: !model.isViewingHistory,
-                                                    onRefine: { refineTarget = $0 })
+                                    ComponentChrome(
+                                        component: item.comp,
+                                        interactive: !model.isViewingHistory,
+                                        onRefine: { refineTarget = $0 })
                                 }
                             }
                             .padding(16)
                         }
+                        .scrollDismissesKeyboard(.immediately)
                     }
                 }
                 .frame(maxWidth: .infinity, maxHeight: .infinity)
@@ -127,7 +132,8 @@ private struct CanvasArea: View {
                         // 055 US5 (T045): canvas HTML export, opened in the
                         // system browser (session-authed route).
                         if !model.visibleCanvas.isEmpty, !model.showSkeleton,
-                           let exportURL = model.exportCanvasURL() {
+                            let exportURL = model.exportCanvasURL()
+                        {
                             CanvasExportPill(url: exportURL)
                         }
                         if !model.canvasHistory.isEmpty {
@@ -264,7 +270,9 @@ private struct CanvasTimelineOverlay: View {
             ScrollView {
                 LazyVStack(spacing: 8) {
                     ForEach(Array(history.enumerated()).reversed(), id: \.offset) { idx, snap in
-                        Button { onSelect(idx) } label: {
+                        Button {
+                            onSelect(idx)
+                        } label: {
                             HStack {
                                 VStack(alignment: .leading, spacing: 1) {
                                     Text(snap.label.isEmpty ? "Canvas \(idx + 1)" : snap.label)
@@ -314,7 +322,9 @@ private struct MessagesPanel: View {
     @Environment(ThemeStore.self) var theme
     @State private var expanded = true
     private var p: AstralPalette { theme.palette }
-    private var visible: [AppModel.ChatTurn] { model.turns.filter { !$0.text.isEmpty } }
+    private var visible: [AppModel.ChatTurn] {
+        model.visibleTurns.filter { !$0.text.isEmpty || !$0.components.isEmpty }
+    }
 
     var body: some View {
         if visible.isEmpty {
@@ -360,7 +370,9 @@ private struct PanelHeader: View {
 
 private struct ChatList: View {
     @Environment(AppModel.self) var model
-    private var visible: [AppModel.ChatTurn] { model.turns.filter { !$0.text.isEmpty } }
+    private var visible: [AppModel.ChatTurn] {
+        model.visibleTurns.filter { !$0.text.isEmpty || !$0.components.isEmpty }
+    }
     var body: some View {
         ScrollViewReader { proxy in
             ScrollView {
@@ -370,6 +382,8 @@ private struct ChatList: View {
                 }
                 .padding(.horizontal, 12).padding(.vertical, 8)
             }
+            .accessibilityIdentifier("conversation-message-scroll")
+            .scrollDismissesKeyboard(.immediately)
             .onChange(of: visible.count) { _, _ in
                 if let last = visible.last { withAnimation { proxy.scrollTo(last.id, anchor: .bottom) } }
             }
@@ -399,21 +413,34 @@ private struct ChatBubble: View {
             let isUser = turn.role == "user"
             HStack {
                 if isUser { Spacer(minLength: 40) }
-                Group {
-                    if isUser { Text(turn.text).foregroundStyle(p.text) }
-                    // Assistant narrative (incl. doc cards diverted into the
-                    // transcript) carries block markdown — headings, fences,
-                    // lists and tables must render, not show their syntax.
-                    else { MarkdownBlockView(source: turn.text).foregroundStyle(p.text) }
+                VStack(alignment: .leading, spacing: 8) {
+                    if !turn.text.isEmpty {
+                        if isUser {
+                            Text(turn.text).foregroundStyle(p.text)
+                        }
+                        // Assistant narrative (incl. doc cards diverted into the
+                        // transcript) carries block markdown — headings, fences,
+                        // lists and tables must render, not show their syntax.
+                        else {
+                            MarkdownBlockView(source: turn.text).foregroundStyle(p.text)
+                        }
+                    }
+                    ForEach(Array(turn.components.enumerated()), id: \.offset) { _, component in
+                        ComponentView(component: component)
+                    }
                 }
                 .font(.subheadline)
                 .padding(.horizontal, 14).padding(.vertical, 10)
                 // User turns are the web's 20% primary tint + 30% border —
                 // not a saturated pill (cross-client bubble convention).
-                .background(isUser ? AnyShapeStyle(p.primary.opacity(0.20)) : AnyShapeStyle(p.surface2),
-                            in: RoundedRectangle(cornerRadius: AstralRadius.md))
-                .overlay(RoundedRectangle(cornerRadius: AstralRadius.md)
-                    .stroke(isUser ? p.primary.opacity(0.30) : .clear))
+                .background(
+                    isUser ? AnyShapeStyle(p.primary.opacity(0.20)) : AnyShapeStyle(p.surface2),
+                    in: RoundedRectangle(cornerRadius: AstralRadius.md)
+                )
+                .overlay(
+                    RoundedRectangle(cornerRadius: AstralRadius.md)
+                        .stroke(isUser ? p.primary.opacity(0.30) : .clear)
+                )
                 .frame(maxWidth: isUser ? 300 : .infinity, alignment: isUser ? .trailing : .leading)
                 if !isUser { Spacer(minLength: 20) }
             }
@@ -429,7 +456,9 @@ private struct ReasoningSnippet: View {
     private var p: AstralPalette { theme.palette }
     var body: some View {
         VStack(alignment: .leading, spacing: 6) {
-            Button { withAnimation { expanded.toggle() } } label: {
+            Button {
+                withAnimation { expanded.toggle() }
+            } label: {
                 HStack(spacing: 6) {
                     Text(expanded ? "▼" : "▶").font(.caption2).foregroundStyle(p.muted)
                     Text("Reasoning").font(.caption.weight(.medium)).foregroundStyle(p.muted)
@@ -455,8 +484,8 @@ private struct InputBar: View {
     @State private var input = ""
     @State private var showImporter = false
     #if os(iOS)
-    @State private var showPhotoPicker = false
-    @State private var photoItem: PhotosPickerItem?
+        @State private var showPhotoPicker = false
+        @State private var photoItem: PhotosPickerItem?
     #endif
     @FocusState private var focused: Bool
     private var p: AstralPalette { theme.palette }
@@ -487,6 +516,9 @@ private struct InputBar: View {
                     .accessibilityLabel("Dictate a message")
                 TextField("Message AstralDeep…", text: $input, axis: .vertical)
                     .textFieldStyle(.plain)
+                    .accessibilityIdentifier("chat-composer-input")
+                    .accessibilityLabel("Message AstralDeep")
+                    .submitLabel(.send)
                     .lineLimit(1...4)
                     .disabled(model.mutationsLocked)
                     .focused($focused)
@@ -497,7 +529,7 @@ private struct InputBar: View {
                 Menu {
                     Button("Upload a file") { showImporter = true }
                     #if os(iOS)
-                    Button("Choose a photo") { showPhotoPicker = true }
+                        Button("Choose a photo") { showPhotoPicker = true }
                     #endif
                     Button("Choose from your files") { model.openSurface("attachments") }
                 } label: {
@@ -510,46 +542,44 @@ private struct InputBar: View {
         }
         .padding(.horizontal, 8).padding(.vertical, 8)
         .background(p.surface)
-        .fileImporter(isPresented: $showImporter, allowedContentTypes: [.item],
-                      allowsMultipleSelection: true) { result in
+        .fileImporter(
+            isPresented: $showImporter, allowedContentTypes: [.item],
+            allowsMultipleSelection: true
+        ) { result in
             guard case .success(let urls) = result else { return }
-            urls.forEach { model.stageFile(url: $0) }
+            for url in urls {
+                model.stageFile(url: url)
+            }
         }
         #if os(iOS)
-        .photosPicker(isPresented: $showPhotoPicker, selection: $photoItem, matching: .images)
-        .onChange(of: photoItem) { _, item in
-            guard let item else { return }
-            Task {
-                if let data = try? await item.loadTransferable(type: Data.self) {
-                    let ext = item.supportedContentTypes.first?.preferredFilenameExtension ?? "jpg"
-                    let mime = item.supportedContentTypes.first?.preferredMIMEType
-                    model.stageAttachment(filename: "photo-\(UUID().uuidString.prefix(8)).\(ext)",
-                                          mimeType: mime, data: data)
+            .photosPicker(isPresented: $showPhotoPicker, selection: $photoItem, matching: .images)
+            .onChange(of: photoItem) { _, item in
+                guard let item else { return }
+                Task {
+                    if let data = try? await item.loadTransferable(type: Data.self) {
+                        let ext = item.supportedContentTypes.first?.preferredFilenameExtension ?? "jpg"
+                        let mime = item.supportedContentTypes.first?.preferredMIMEType
+                        model.stageAttachment(
+                            filename: "photo-\(UUID().uuidString.prefix(8)).\(ext)",
+                            mimeType: mime, data: data)
+                    }
+                    photoItem = nil
                 }
-                photoItem = nil
             }
-        }
-        .toolbar {
-            ToolbarItemGroup(placement: .keyboard) {
-                Spacer()
-                Button("Done") { focused = false }
-                    .fontWeight(.semibold)
-            }
-        }
         #endif
     }
 
     private var canSend: Bool {
-        !model.mutationsLocked &&
-            (!input.trimmingCharacters(in: .whitespaces).isEmpty ||
-                model.staged.contains { $0.state == "ready" })
+        !model.mutationsLocked
+            && (!input.trimmingCharacters(in: .whitespaces).isEmpty || model.staged.contains { $0.state == "ready" })
     }
 
     private func send() {
         guard canSend else { return }
-        model.sendChat(input)
+        let submittedInput = input
+        focused = false  // resign native keyboard focus before model-driven re-rendering
         input = ""
-        focused = false   // auto-dismiss the keyboard after a message is sent
+        model.sendChat(submittedInput)
     }
 }
 
@@ -571,7 +601,9 @@ private struct AttachmentChips: View {
                                 Text(note).font(.caption2).foregroundStyle(p.muted).lineLimit(1)
                             }
                         }
-                        Button { onRemove(att.uid) } label: {
+                        Button {
+                            onRemove(att.uid)
+                        } label: {
                             Image(systemName: "xmark").font(.caption2).foregroundStyle(p.muted)
                         }
                         .buttonStyle(.plain)
@@ -584,7 +616,11 @@ private struct AttachmentChips: View {
         }
     }
     private func marker(_ state: String) -> String {
-        switch state { case "uploading": return "…"; case "failed": return "⚠"; default: return "📄" }
+        switch state {
+        case "uploading": return "…"
+        case "failed": return "⚠"
+        default: return "📄"
+        }
     }
 }
 
@@ -631,10 +667,12 @@ private struct ShimmerModifier: ViewModifier {
     func body(content: Content) -> some View {
         content.overlay(
             GeometryReader { geo in
-                LinearGradient(colors: [.clear, .white.opacity(0.18), .clear],
-                               startPoint: .leading, endPoint: .trailing)
-                    .frame(width: geo.size.width * 0.6)
-                    .offset(x: geo.size.width * phase)
+                LinearGradient(
+                    colors: [.clear, .white.opacity(0.18), .clear],
+                    startPoint: .leading, endPoint: .trailing
+                )
+                .frame(width: geo.size.width * 0.6)
+                .offset(x: geo.size.width * phase)
             }
             .allowsHitTesting(false)
         )
@@ -660,9 +698,10 @@ extension Array {
     // Authored with AstralPrims (the Swift astralprims mirror) — the same
     // wire dicts a Python agent would produce.
     model.canvas = [
-        AstralPrims.Hero(title: "Q3 Sales",
-                         subtitle: "Revenue up 12% quarter over quarter",
-                         variant: "gradient"),
+        AstralPrims.Hero(
+            title: "Q3 Sales",
+            subtitle: "Revenue up 12% quarter over quarter",
+            variant: "gradient"),
         AstralPrims.Grid(columns: 2).add(
             AstralPrims.MetricCard(title: "Revenue", value: "$1.2M", subtitle: "+12%"),
             AstralPrims.MetricCard(title: "New users", value: "3,401", variant: "success")),

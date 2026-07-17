@@ -1,0 +1,233 @@
+name: Build Windows unsigned candidate
+
+on:
+  workflow_call:
+    inputs:
+      candidate_sha:
+        description: Exact candidate commit to build once
+        required: true
+        type: string
+    secrets:
+      staging_access_token:
+        description: Short-lived token for the bundled staging deployment
+        required: true
+    outputs:
+      artifact_id:
+        description: Immutable GitHub Actions artifact ID
+        value: ${{ jobs.windows-candidate.outputs.artifact_id }}
+      artifact_digest:
+        description: SHA-256 reported by upload-artifact
+        value: ${{ jobs.windows-candidate.outputs.artifact_digest }}
+      executable_sha256:
+        description: SHA-256 of the one unsigned AstralDeep.exe
+        value: ${{ jobs.windows-candidate.outputs.executable_sha256 }}
+  workflow_dispatch:
+    inputs:
+      candidate_sha:
+        description: Exact candidate commit (defaults to the dispatched commit)
+        required: false
+        type: string
+
+# This candidate producer cannot sign, tag, create a release, upload release
+# assets, or otherwise mutate public state. The protected native CI publisher
+# consumes the independently validated decision and these exact artifact
+# identities with a job-scoped short-lived token; no custom GitHub App is used.
+permissions:
+  contents: read
+
+concurrency:
+  group: windows-unsigned-candidate-${{ inputs.candidate_sha || github.sha }}
+  cancel-in-progress: false
+
+jobs:
+  windows-candidate:
+    name: Windows 0.4.0 build-once candidate
+    runs-on: windows-latest
+    timeout-minutes: 90
+    outputs:
+      artifact_id: ${{ steps.upload.outputs.artifact-id }}
+      artifact_digest: ${{ steps.upload.outputs.artifact-digest }}
+      executable_sha256: ${{ steps.identity.outputs.executable_sha256 }}
+    env:
+      CANDIDATE_SHA: ${{ inputs.candidate_sha || github.sha }}
+      PIP_DISABLE_PIP_VERSION_CHECK: "1"
+      PYTHONUTF8: "1"
+    steps:
+      # actions/checkout v5, pinned to immutable action bytes.
+      - name: Check out the exact candidate
+        uses: actions/checkout@93cb6efe18208431cddfb8368fd83d5badbf9bfd # v5.0.1
+        with:
+          ref: ${{ env.CANDIDATE_SHA }}
+          persist-credentials: false
+
+      - name: Prove checkout and staging input
+        shell: pwsh
+        env:
+          ASTRAL_WINDOWS_SMOKE_TOKEN: ${{ secrets.staging_access_token }}
+        run: |
+          $ErrorActionPreference = "Stop"
+          $actual = (git rev-parse HEAD).Trim()
+          if ($env:CANDIDATE_SHA -notmatch '^[0-9a-f]{40}$') {
+            throw "candidate_sha must be one exact lowercase 40-character commit SHA"
+          }
+          if ($actual -ne $env:CANDIDATE_SHA) {
+            throw "checked out $actual instead of candidate $env:CANDIDATE_SHA"
+          }
+          if ([string]::IsNullOrWhiteSpace($env:ASTRAL_WINDOWS_SMOKE_TOKEN)) {
+            throw "the short-lived Windows staging token is required"
+          }
+
+      # actions/setup-python v6, pinned to immutable action bytes.
+      - name: Select release Python 3.11
+        uses: actions/setup-python@ece7cb06caefa5fff74198d8649806c4678c61a1 # v6.3.0
+        with:
+          python-version: "3.11"
+          cache: pip
+          cache-dependency-path: |
+            windows-client/requirements-release.lock.txt
+            tooling/python-ci/requirements.lock.txt
+
+      - name: Create two clean locked release environments
+        shell: pwsh
+        run: |
+          $ErrorActionPreference = "Stop"
+          $PSNativeCommandUseErrorActionPreference = $true
+          python -c "import sys; assert sys.version_info[:2] == (3, 11), sys.version"
+          python -m venv windows-client\.venv-release-a
+          python -m venv windows-client\.venv-release-b
+          & windows-client\.venv-release-a\Scripts\python -m pip install --require-hashes -r windows-client\requirements-release.lock.txt
+          & windows-client\.venv-release-b\Scripts\python -m pip install --require-hashes -r windows-client\requirements-release.lock.txt
+          & windows-client\.venv-release-a\Scripts\python -m pip check
+          & windows-client\.venv-release-b\Scripts\python -m pip check
+
+      - name: Prove the clean runtime sets are identical
+        shell: pwsh
+        run: |
+          $ErrorActionPreference = "Stop"
+          $PSNativeCommandUseErrorActionPreference = $true
+          New-Item -ItemType Directory -Force build\windows-candidate | Out-Null
+          & windows-client\.venv-release-a\Scripts\python scripts\windows_release_candidate.py environment-manifest `
+            --lock windows-client\requirements-release.lock.txt `
+            --output build\windows-candidate\environment-a.json
+          & windows-client\.venv-release-b\Scripts\python scripts\windows_release_candidate.py environment-manifest `
+            --lock windows-client\requirements-release.lock.txt `
+            --output build\windows-candidate\environment-b.json
+          & windows-client\.venv-release-a\Scripts\python scripts\windows_release_candidate.py compare-environments `
+            --first build\windows-candidate\environment-a.json `
+            --second build\windows-candidate\environment-b.json `
+            --output build\windows-candidate\reproducibility.json
+
+      - name: Build the unsigned executable exactly once
+        working-directory: windows-client
+        shell: pwsh
+        run: |
+          $ErrorActionPreference = "Stop"
+          $PSNativeCommandUseErrorActionPreference = $true
+          & .\.venv-release-a\Scripts\pyinstaller --noconfirm --clean AstralDeep.spec
+          if (-not (Test-Path .\dist\AstralDeep.exe)) {
+            throw "PyInstaller did not produce AstralDeep.exe"
+          }
+
+      - name: Clear the native QSettings key
+        shell: pwsh
+        run: |
+          reg.exe delete HKCU\Software\AstralDeep\WindowsClient /f 2>$null
+          if ($LASTEXITCODE -ne 0 -and $LASTEXITCODE -ne 1) {
+            throw "could not clear the WindowsClient QSettings key"
+          }
+          exit 0
+
+      - name: Preflight the actual frozen profile, runtime, and lock
+        shell: pwsh
+        run: |
+          $ErrorActionPreference = "Stop"
+          & windows-client\dist\AstralDeep.exe --validate-deployment `
+            --report build\windows-candidate\deployment-validation.json
+          if ($LASTEXITCODE -ne 0) {
+            throw "frozen deployment validation failed with $LASTEXITCODE"
+          }
+
+      - name: Run frozen worker, no-dialog, rendered-chat, offline, and termination smoke
+        shell: pwsh
+        env:
+          ASTRAL_WINDOWS_EXE: ${{ github.workspace }}\windows-client\dist\AstralDeep.exe
+          ASTRAL_WINDOWS_SMOKE_TOKEN: ${{ secrets.staging_access_token }}
+        run: |
+          $ErrorActionPreference = "Stop"
+          $PSNativeCommandUseErrorActionPreference = $true
+          # The candidate bytes were built above from the pristine release
+          # environment. Test-only packages enter that environment only now,
+          # from the separate complete hash lock, so they cannot affect the exe.
+          & windows-client\.venv-release-a\Scripts\python -m pip install --require-hashes -r tooling\python-ci\requirements.lock.txt
+          & windows-client\.venv-release-a\Scripts\python -m pytest `
+            windows-client\tests\test_packaged_release.py -q `
+            --junitxml=build\windows-candidate\packaged-release.junit.xml
+
+      - name: Run full Windows source suite with coverage
+        working-directory: windows-client
+        shell: pwsh
+        env:
+          QT_QPA_PLATFORM: offscreen
+        run: |
+          $ErrorActionPreference = "Stop"
+          $PSNativeCommandUseErrorActionPreference = $true
+          & .\.venv-release-a\Scripts\python -m pytest tests -q `
+            --cov=astral_client `
+            --cov=win_agent `
+            --cov=main `
+            --cov-report=xml:..\build\windows-candidate\windows-coverage.xml `
+            --junitxml=..\build\windows-candidate\windows-source.junit.xml
+
+      - name: Bind executable to source, profile, runtime, and lock
+        id: identity
+        shell: pwsh
+        env:
+          ARTIFACT_NAME: windows-unsigned-${{ env.CANDIDATE_SHA }}-${{ github.run_id }}-${{ github.run_attempt }}
+        run: |
+          $ErrorActionPreference = "Stop"
+          $PSNativeCommandUseErrorActionPreference = $true
+          & windows-client\.venv-release-a\Scripts\python scripts\windows_release_candidate.py artifact-manifest `
+            --executable windows-client\dist\AstralDeep.exe `
+            --profile windows-client\deployment\release-profile.json `
+            --runtime-manifest windows-client\deployment\runtime-manifest.json `
+            --requirements-input windows-client\requirements.in `
+            --lock windows-client\requirements-release.lock.txt `
+            --source-sha $env:CANDIDATE_SHA `
+            --run-id "${{ github.run_id }}" `
+            --run-attempt "${{ github.run_attempt }}" `
+            --artifact-name $env:ARTIFACT_NAME `
+            --output build\windows-candidate\candidate-manifest.json
+          $manifest = Get-Content build\windows-candidate\candidate-manifest.json -Raw | ConvertFrom-Json
+          "artifact_name=$env:ARTIFACT_NAME" >> $env:GITHUB_OUTPUT
+          "executable_sha256=$($manifest.executable_sha256)" >> $env:GITHUB_OUTPUT
+          Copy-Item windows-client\dist\AstralDeep.exe build\windows-candidate\AstralDeep.exe
+
+      # actions/upload-artifact v4, pinned to immutable action bytes.
+      - name: Archive the exact matrix-input executable and provenance
+        id: upload
+        uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4.6.2
+        with:
+          name: ${{ steps.identity.outputs.artifact_name }}
+          path: build/windows-candidate/
+          if-no-files-found: error
+          retention-days: 14
+          compression-level: 0
+
+      - name: Record immutable Actions artifact identity
+        shell: pwsh
+        run: |
+          $ErrorActionPreference = "Stop"
+          $PSNativeCommandUseErrorActionPreference = $true
+          & windows-client\.venv-release-a\Scripts\python scripts\windows_release_candidate.py artifact-reference `
+            --manifest build\windows-candidate\candidate-manifest.json `
+            --artifact-id "${{ steps.upload.outputs.artifact-id }}" `
+            --artifact-digest "${{ steps.upload.outputs.artifact-digest }}" `
+            --output build\windows-candidate-reference.json
+
+      - name: Archive the artifact reference receipt
+        uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4.6.2
+        with:
+          name: windows-candidate-reference-${{ github.run_id }}-${{ github.run_attempt }}
+          path: build/windows-candidate-reference.json
+          if-no-files-found: error
+          retention-days: 14

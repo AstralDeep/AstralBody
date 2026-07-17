@@ -160,6 +160,10 @@ def _bind_handle_ui_message(fake, ws, user_id, monkeypatch):
     import audit.hooks
     monkeypatch.setattr(audit.hooks, "record_ws_action", _record_ws_action)
     fake.ui_sessions = {ws: {"sub": user_id, "preferred_username": "tester"}}
+    # The fake intentionally binds the production dispatcher rather than
+    # constructing a full Orchestrator. Keep its new structural parser seam
+    # explicit instead of weakening production parsing for the test double.
+    fake._parsed_ui_frame = Orchestrator._parsed_ui_frame
     fake.handle_ui_message = types.MethodType(Orchestrator.handle_ui_message, fake)
     return ws_actions
 

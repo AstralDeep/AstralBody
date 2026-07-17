@@ -249,13 +249,13 @@ async def _live(orch, websocket, user_id, roles, payload):
 async def _close_modal(orch, websocket):
     """Feature 044 — device-aware modal close shared by ``_view``/``_live``.
 
-    Delegates to the chrome dispatcher's ``_push_close`` so the frame is
+    Delegates to the chrome dispatcher's ``push_close`` so the frame is
     IDENTICAL to the ``chrome_close`` action: an empty-HTML ``chrome_render``
     for web, an empty-components ``chrome_surface`` for native SDUI
     (windows/android). Imported lazily to avoid an import cycle (chrome_events
     imports the surface registry)."""
-    from orchestrator.chrome_events import _push_close
-    await _push_close(orch, websocket)
+    from orchestrator.chrome_events import push_close
+    await push_close(orch, websocket)
 
 
 HANDLERS = {

@@ -1,3 +1,4 @@
+import AstralCore
 // Feature 053 — native rendering for block markdown (FR-004 parity with the
 // web's block_md): text components with variant="markdown" and assistant
 // narrative doc cards carry headings, fenced code, lists and pipe tables that
@@ -5,7 +6,6 @@
 // source; this view styles each block and runs the shared inline parse on the
 // text-bearing ones.
 import SwiftUI
-import AstralCore
 
 struct MarkdownBlockView: View {
     let source: String

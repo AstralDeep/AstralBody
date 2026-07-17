@@ -1,3 +1,5 @@
+import AstralCore
+import AuthenticationServices
 // Feature 051 — the iOS/macOS app model: a faithful port of the Android
 // `AppViewModel`. System-browser PKCE sign-in, WS session with the ios/macos
 // device profile, and the full server-driven reduce: the "commit-on-done"
@@ -8,14 +10,69 @@
 // history surfaces, streaming nodes, attachments, and live theming.
 import Foundation
 import SwiftUI
-import AuthenticationServices
 import UniformTypeIdentifiers
-import AstralCore
+
 #if os(iOS)
-import UIKit
+    import UIKit
 #else
-import AppKit
+    import AppKit
 #endif
+
+struct LLMFirstLoginOperation: Equatable {
+    enum State: String, Equatable {
+        case submitting
+        case accepted
+        case validating
+        case persisting
+        case running
+        case completed
+        case failed
+        case cancelled
+        case retryable
+        case unconfirmed
+    }
+
+    let submissionId: String
+    let requestGeneration: String
+    let connectionGeneration: String
+    let requiresAdvance: Bool
+    var operationId: String?
+    var sequence: UInt64?
+    var state: State
+    var phase: String
+    var label: String
+    var retryable: Bool
+    var errorCode: String?
+    var errorMessage: String?
+    var phaseVisible: Bool
+    var isAuthoritativelyTerminal: Bool
+    var didAdvance: Bool
+
+    var isLoading: Bool {
+        !isAuthoritativelyTerminal
+            && state != .unconfirmed
+            && [.submitting, .accepted, .validating, .persisting, .running].contains(state)
+    }
+
+    var fieldsEditable: Bool { true }
+
+    var presentedLabel: String {
+        if phaseVisible && [State.submitting, .accepted].contains(state) {
+            return "Waiting to check your provider credentials…"
+        }
+        // Never empty while loading: the status view is a Text, and an empty
+        // Text exposes NO accessibility element — the status would vanish from
+        // the AX tree during the brief pre-first-frame window.
+        if label.isEmpty && isLoading { return "Submitting…" }
+        return label
+    }
+}
+
+enum LLMOperationReconciliation {
+    case operation(OperationProjection)
+    case submission(OperationSubmissionProjection)
+    case unavailable
+}
 
 @MainActor
 @Observable
@@ -25,8 +82,21 @@ final class AppModel: NSObject {
 
     struct ChatTurn: Identifiable, Equatable {
         let id: String
-        let role: String   // "user" | "assistant" | "reasoning"
+        let role: String  // "user" | "assistant" | "reasoning"
         let text: String
+        let components: [AstralComponent]
+
+        init(
+            id: String,
+            role: String,
+            text: String,
+            components: [AstralComponent] = []
+        ) {
+            self.id = id
+            self.role = role
+            self.text = text
+            self.components = components
+        }
     }
 
     struct StagedAttachment: Identifiable, Equatable {
@@ -34,7 +104,7 @@ final class AppModel: NSObject {
         let filename: String
         var category: String
         var attachmentId: String?
-        var state: String   // "uploading" | "ready" | "failed"
+        var state: String  // "uploading" | "ready" | "failed"
         var note: String?
         var id: Int { uid }
     }
@@ -61,7 +131,7 @@ final class AppModel: NSObject {
             // Feature 053 — mirror the endpoint to the paired watch. Best-effort:
             // the watch runs independently and falls back to its build-time default.
             #if os(iOS)
-            WatchOverrideSync.shared.push(serverBaseText)
+                WatchOverrideSync.shared.push(serverBaseText)
             #endif
         }
     }
@@ -70,9 +140,9 @@ final class AppModel: NSObject {
     }
 
     #if os(macOS)
-    let clientId = AstralConfig.macosClientId
+        let clientId = AstralConfig.macosClientId
     #else
-    let clientId = AstralConfig.iosClientId
+        let clientId = AstralConfig.iosClientId
     #endif
     let redirectURI = AstralConfig.redirectURI
 
@@ -87,6 +157,8 @@ final class AppModel: NSObject {
 
     var turns: [ChatTurn] = []
     var canvas: [AstralComponent] = []
+    var transientTurns: [ChatTurn] = []
+    var transientCanvas: [AstralComponent]?
     var pendingCanvas: [AstralComponent] = []
     var turnActive = false
     var pendingReplace = false
@@ -104,6 +176,22 @@ final class AppModel: NSObject {
     var bannerIsError = true
     var stepTrail: [String] = []
     var asyncDetached = false
+    var operationStatuses: [String: OperationStatus] = [:]
+    var agentLifecycles: [String: AgentLifecycle] = [:]
+    var localOperationSubmissions: [String: LocalOperationSubmission] = [:]
+
+    var pendingSurfaceRequestGenerations: Set<String> {
+        Set(
+            localOperationSubmissions.values.compactMap { submission in
+                submission.chatId == nil ? submission.requestGeneration : nil
+            })
+    }
+    var pendingChatRequestGenerations: Set<String> {
+        Set(
+            localOperationSubmissions.values.compactMap { submission in
+                submission.chatId == activeChatId ? submission.requestGeneration : nil
+            })
+    }
 
     var agents: [Agent] = []
     var history: [ChatSummary] = []
@@ -124,6 +212,11 @@ final class AppModel: NSObject {
 
     var signInError: String?
 
+    /// One client-local projection for the current provider Save attempt. It
+    /// never claims server acceptance; canonical operation frames or the
+    /// authenticated reconciliation endpoints own that transition.
+    var llmFirstLoginOperation: LLMFirstLoginOperation?
+
     let themeStore = ThemeStore()
 
     // Derived
@@ -131,8 +224,9 @@ final class AppModel: NSObject {
         if let idx = viewingIndex, canvasHistory.indices.contains(idx) {
             return canvasHistory[idx].components
         }
-        return canvas
+        return transientCanvas ?? canvas
     }
+    var visibleTurns: [ChatTurn] { turns + transientTurns }
     var isViewingHistory: Bool { viewingIndex != nil }
     var showSkeleton: Bool { pendingReplace && !liveOpsThisTurn && viewingIndex == nil }
     var mutationsLocked: Bool { timelineReadOnly }
@@ -141,9 +235,9 @@ final class AppModel: NSObject {
 
     private let store: TokenStorage = {
         #if canImport(Security)
-        KeychainTokenStore()
+            KeychainTokenStore()
         #else
-        InMemoryTokenStore()
+            InMemoryTokenStore()
         #endif
     }()
     @ObservationIgnored private var tokens: TokenSet?
@@ -152,17 +246,38 @@ final class AppModel: NSObject {
     @ObservationIgnored private var authSession: ASWebAuthenticationSession?
     @ObservationIgnored private var seqState: [String: Int] = [:]
     @ObservationIgnored private var attachSeq = 0
+    @ObservationIgnored private var statusLifecycle = StatusLifecycleReducer()
     /// Single-flight refresh (see `refreshOutcome`) + a session generation so
     /// a refresh resolving after sign-out can never resurrect wiped
     /// credentials or be joined by the next account's session.
     @ObservationIgnored private var refreshTask: Task<RefreshResult, Never>?
     @ObservationIgnored private var refreshTaskGeneration = -1
     @ObservationIgnored private var sessionGeneration = 0
+    @ObservationIgnored private var conversationResumeStore: ConversationResumeStore
+    @ObservationIgnored private var conversationAccount: ConversationAccount?
+    @ObservationIgnored private var continuity = ConversationContinuityReducer()
+    @ObservationIgnored private var pendingCommitRequestGeneration: String?
+    @ObservationIgnored private var llmPhaseTask: Task<Void, Never>?
+    @ObservationIgnored private var llmWatchdogTask: Task<Void, Never>?
+    @ObservationIgnored private var llmReconciliationRunning = false
+    @ObservationIgnored var llmFirstLoginPhaseDelay = AppModel.llmFirstLoginPhaseDelayNanoseconds
+    @ObservationIgnored var llmFirstLoginWatchdogDelay = AppModel.llmFirstLoginWatchdogNanoseconds
+    @ObservationIgnored var llmOperationReconciler: ((String?, String) async -> LLMOperationReconciliation)?
 
     private let docMarker = "full write-up is on the canvas"
     private let maxTrail = 20
-    private let timelineMutations: Set<String> = ["chat_message", "component_action", "table_paginate",
-                                                  "save_theme", "component_refine", "component_restore"]
+    private let timelineMutations: Set<String> = [
+        "chat_message", "component_action", "table_paginate",
+        "save_theme", "component_refine", "component_restore",
+    ]
+    private let conversationMutationActions: Set<String> = [
+        "save_component", "delete_saved_component", "combine_components",
+        "condense_components", "component_action", "component_refine",
+        "component_restore", "table_paginate",
+    ]
+
+    static let llmFirstLoginPhaseDelayNanoseconds: UInt64 = 1_000_000_000
+    static let llmFirstLoginWatchdogNanoseconds: UInt64 = 10_000_000_000
 
     /// Test seam: observes every outbound WS frame text (nil in production).
     @ObservationIgnored var outboundTap: ((String) -> Void)?
@@ -184,7 +299,12 @@ final class AppModel: NSObject {
 
     // MARK: lifecycle
 
-    override init() {
+    override convenience init() {
+        self.init(conversationResumeStore: ConversationResumeStore())
+    }
+
+    init(conversationResumeStore: ConversationResumeStore) {
+        self.conversationResumeStore = conversationResumeStore
         let defaults = UserDefaults.standard
         var storedBase = defaults.string(forKey: "serverBase") ?? ""
         var storedAuthority = defaults.string(forKey: "authority") ?? ""
@@ -206,9 +326,88 @@ final class AppModel: NSObject {
         authorityText = storedAuthority.isEmpty ? AstralConfig.keycloakAuthority : storedAuthority
         super.init()
         #if os(iOS)
-        WatchOverrideSync.shared.activate()
-        if !storedBase.isEmpty { WatchOverrideSync.shared.push(serverBaseText) }
+            WatchOverrideSync.shared.activate()
+            if !storedBase.isEmpty { WatchOverrideSync.shared.push(serverBaseText) }
         #endif
+    }
+
+    /// Bind the authenticated OIDC account to its opaque local locator. This
+    /// is preference namespacing only; the server remains authoritative for
+    /// ownership when the following registration/load request is handled.
+    func bindConversationAccount(_ account: ConversationAccount) {
+        if conversationAccount != account {
+            continuity.clear()
+            resetChatState()
+        }
+        conversationAccount = account
+        activeChatId = conversationResumeStore.load(for: account)?.chatId
+    }
+
+    /// Build one reconnect registration and open its hydration fence before
+    /// any welcome or transient frame can be reduced.
+    func registrationFrame(token: String, resumed: Bool) -> String {
+        let connection = UUID().uuidString.lowercased()
+        guard beginConversationConnection(connection) else { return "{}" }
+
+        var resume: ConversationResumeRegistration?
+        if let account = conversationAccount,
+            let chatId = conversationResumeStore.load(for: account)?.chatId
+        {
+            guard conversationResumeStore.save(chatId: chatId, for: account) else {
+                return "{}"
+            }
+            activeChatId = chatId
+            let request = UUID().uuidString.lowercased()
+            if openConversationRequest(
+                chatId: chatId,
+                requestGeneration: request,
+                purpose: .hydration)
+            {
+                resume = ConversationResumeRegistration(
+                    activeChatId: chatId,
+                    requestGeneration: request)
+            }
+        }
+        return Outbound.registerUI(
+            token: token,
+            sessionId: activeChatId,
+            device: device,
+            resumed: resumed,
+            connectionGeneration: connection,
+            resume: resume)
+    }
+
+    @discardableResult
+    func beginConversationConnection(_ generation: String) -> Bool {
+        clearPendingOperationSubmissions()
+        transientTurns = []
+        transientCanvas = nil
+        return continuity.beginConnection(generation)
+    }
+
+    @discardableResult
+    func openConversationRequest(
+        chatId: String,
+        requestGeneration: String,
+        purpose: ConversationGenerationPurpose
+    ) -> Bool {
+        let resetRevision =
+            continuity.activeChatId != nil
+            && continuity.activeChatId != chatId
+        guard continuity.selectChat(chatId, resetRevision: resetRevision),
+            continuity.openRequest(
+                chatId: chatId,
+                requestGeneration: requestGeneration,
+                purpose: purpose)
+        else { return false }
+        activeChatId = chatId
+        transientTurns = []
+        transientCanvas = nil
+        return true
+    }
+
+    var lastCommittedRenderRevision: UInt64 {
+        continuity.lastCommittedRenderRevision
     }
 
     func bootstrap() async {
@@ -224,7 +423,7 @@ final class AppModel: NSObject {
         // rejection — never for being offline at launch.
         enterSignedIn(resumedSession: true)
         if case .rejected = await refreshOutcome() {
-            await signOut(revokeRemote: false)   // the IdP already refused the credential
+            await signOut(revokeRemote: false)  // the IdP already refused the credential
         }
     }
 
@@ -249,9 +448,10 @@ final class AppModel: NSObject {
                     return
                 }
                 guard let callback,
-                      let items = URLComponents(url: callback, resolvingAgainstBaseURL: false)?.queryItems,
-                      items.first(where: { $0.name == "state" })?.value == state,
-                      let code = items.first(where: { $0.name == "code" })?.value else {
+                    let items = URLComponents(url: callback, resolvingAgainstBaseURL: false)?.queryItems,
+                    items.first(where: { $0.name == "state" })?.value == state,
+                    let code = items.first(where: { $0.name == "code" })?.value
+                else {
                     self.signInError = "Sign-in was cancelled."
                     return
                 }
@@ -273,7 +473,8 @@ final class AppModel: NSObject {
             let (data, response) = try await URLSession.shared.data(for: request)
             let status = (response as? HTTPURLResponse)?.statusCode ?? 0
             guard status == 200, let json = try? JSONValue.parse(data),
-                  let set = TokenSet(json: json) else {
+                let set = TokenSet(json: json)
+            else {
                 signInError = "Token exchange failed (HTTP \(status))."
                 return
             }
@@ -347,14 +548,21 @@ final class AppModel: NSObject {
         case .ok(let set) where set.accessToken != refused:
             connectWS(resumed: true)
         case .ok, .rejected:
-            await signOut()   // same token — the server will just refuse it again
+            await signOut()  // same token — the server will just refuse it again
         case .transient:
-            break             // offline blip; the WS backoff loop keeps retrying
+            break  // offline blip; the WS backoff loop keeps retrying
         }
     }
 
     private func enterSignedIn(resumedSession: Bool) {
         accountName = tokens?.displayName ?? ""
+        if let account = tokens?.conversationAccount {
+            bindConversationAccount(account)
+        } else {
+            conversationAccount = nil
+            continuity.clear()
+            resetChatState()
+        }
         signedIn = true
         connectWS(resumed: resumedSession)
     }
@@ -363,21 +571,60 @@ final class AppModel: NSObject {
     /// used when the IdP has ALREADY refused the credential (nothing to
     /// revoke, and the call would only delay landing on the sign-in screen).
     func signOut(revokeRemote: Bool = true) async {
-        if revokeRemote, let refresh = tokens?.refreshToken {
-            _ = try? await rest.logout(clientId: clientId, refreshToken: refresh)
+        // Snapshot the old credential and an authenticated revocation client,
+        // then make local sign-out durable before the first suspension point.
+        // A killed or frozen revocation request must not leave Keychain able
+        // to resurrect the account that the user just signed out of.
+        let access = tokens?.accessToken
+        let refresh = tokens?.refreshToken
+        let logoutClient = RestClient(serverBase: serverBase) { access }
+        let socket = ws
+        if let account = conversationAccount {
+            _ = conversationResumeStore.clear(.signOut, for: account)
         }
         sessionGeneration += 1
+        refreshTask?.cancel()
         refreshTask = nil
         wsTask?.cancel()
-        await ws?.stop()
+        wsTask = nil
         ws = nil
         store.wipe()
         tokens = nil
+        conversationAccount = nil
         signedIn = false
+        continuity.clear()
         resetChatState()
+        clearPendingOperationSubmissions()
+        statusLifecycle.clear()
+        operationStatuses = [:]
+        agentLifecycles = [:]
         chromeMenu = nil
-        mandatorySurface = false   // the next session re-gates server-side
-        agents = []; history = []; audit = []
+        mandatorySurface = false  // the next session re-gates server-side
+        clearLLMFirstLoginOperation()
+        agents = []
+        history = []
+        audit = []
+
+        // Everything above is synchronous local teardown. Remote revocation
+        // remains best-effort and uses only the captured old access token.
+        await socket?.stop()
+        if revokeRemote, let refresh {
+            _ = try? await logoutClient.logout(clientId: clientId, refreshToken: refresh)
+        }
+    }
+
+    /// Local account-removal seam (for MDM/account-management surfaces).
+    func clearConversationForAccountRemoval() {
+        if let account = conversationAccount {
+            _ = conversationResumeStore.clear(.accountRemoval, for: account)
+        }
+        conversationAccount = nil
+        continuity.clear()
+        resetChatState()
+        clearPendingOperationSubmissions()
+        statusLifecycle.clear()
+        operationStatuses = [:]
+        agentLifecycles = [:]
     }
 
     // MARK: WS
@@ -386,12 +633,12 @@ final class AppModel: NSObject {
 
     private var device: DeviceDescriptor {
         #if os(macOS)
-        let (w, h) = lastReportedViewport ?? (1280, 800)
-        return .macos(viewportWidth: w, viewportHeight: h)
+            let (w, h) = lastReportedViewport ?? (1280, 800)
+            return .macos(viewportWidth: w, viewportHeight: h)
         #else
-        let size = UIScreen.main.bounds.size
-        let (w, h) = lastReportedViewport ?? (Int(size.width), Int(size.height))
-        return .ios(viewportWidth: w, viewportHeight: h)
+            let size = UIScreen.main.bounds.size
+            let (w, h) = lastReportedViewport ?? (Int(size.width), Int(size.height))
+            return .ios(viewportWidth: w, viewportHeight: h)
         #endif
     }
 
@@ -405,28 +652,42 @@ final class AppModel: NSObject {
         lastReportedViewport = (width, height)
         // The initial size rides on register_ui; only CHANGES re-report.
         guard signedIn, !isFirst else { return }
-        rawSend(Outbound.updateDevice(sessionId: activeChatId ?? "", device: device))
+        let identity = ClientOperationIdentity.fresh()
+        beginLocalOperationSubmission(
+            identity: identity,
+            action: "update_device",
+            surface: "operation",
+            chatId: nil,
+            exposeStatus: false)
+        rawSend(
+            Outbound.updateDevice(
+                sessionId: nil,
+                device: device,
+                submissionId: identity.submissionId,
+                requestGeneration: identity.requestGeneration))
     }
 
     private func connectWS(resumed initialResumed: Bool) {
         wsTask?.cancel()
         if let previous = ws {
-            Task { await previous.stop() }   // never leak a live socket loop
+            Task { await previous.stop() }  // never leak a live socket loop
         }
         let client = WSClient(url: rest.webSocketURL)
         ws = client
-        var resumed = initialResumed
+        let resumeState = AppRegistrationResumeState(initial: initialResumed)
         wsTask = Task {
             let events = await client.events()
-            await client.start(onConnect: { [weak self] in
-                guard let self else { return nil }
-                guard let token = await self.freshAccessToken() else { return nil }
-                let frame = Outbound.registerUI(
-                    token: token, sessionId: await self.activeChatId,
-                    device: await self.device, resumed: resumed)
-                resumed = true
-                return frame
-            })
+            await client.start(
+                onConnect: { [weak self] in
+                    guard let self else { return nil }
+                    guard let token = await self.freshAccessToken() else { return nil }
+                    let resumed = await resumeState.consume()
+                    return await self.registrationFrame(token: token, resumed: resumed)
+                },
+                onReplay: { [weak self] replay in
+                    guard let self else { return false }
+                    return await self.replayQueuedOperation(replay)
+                })
             for await event in events {
                 await self.handle(event)
             }
@@ -444,16 +705,42 @@ final class AppModel: NSObject {
             // so anything that finished while this socket was down (background
             // task, another device) re-hydrates the narrative and canvas.
             // No-op on first connect: activeChatId is never persisted.
-            refreshActiveChat()
+            if continuity.connectionGeneration == nil {
+                refreshActiveChat()
+            }
+            if let attempt = llmFirstLoginOperation,
+                !attempt.isAuthoritativelyTerminal
+            {
+                Task { await self.reconcileLLMFirstLoginOperation() }
+            }
         case .disconnected:
             connected = false
+            clearPendingOperationSubmissions()
             turnActive = false
             pendingReplace = false
             pendingCanvas = []
-            agentsLoading = false; historyLoading = false; auditLoading = false
+            transientTurns = []
+            transientCanvas = nil
+            agentsLoading = false
+            historyLoading = false
+            auditLoading = false
         case .sendDropped(let total):
             bannerIsError = true
             errorBanner = "Not sent while offline (queue full: \(total) dropped)"
+        case .queuedOperationDropped(let replay, let reason):
+            localOperationSubmissions.removeValue(forKey: replay.identity.submissionId)
+            if localOperationSubmissions.isEmpty && statusText == "Submitting…" {
+                statusText = nil
+            }
+            bannerIsError = true
+            errorBanner = "Not sent while offline: \(replay.action) (\(reason))"
+        case .sendRejected(let action):
+            // A malformed queued frame cannot be correlated safely. Clear the
+            // local-only map; valid retained frames restore themselves before
+            // replay on the next connection.
+            clearPendingOperationSubmissions()
+            bannerIsError = true
+            errorBanner = "Not sent while offline: \(action) (invalid queued identity)"
         case .frame(let frame):
             handleFrame(frame)
         }
@@ -463,21 +750,39 @@ final class AppModel: NSObject {
 
     /// Internal (not private) so XCTests can drive frames through the reducer.
     func handleFrame(_ frame: InboundFrame) {
+        if continuity.connectionGeneration != nil,
+            ["ui_render", "ui_update", "ui_upsert", "ui_append", "ui_stream_data"]
+                .contains(frame.name)
+        {
+            reduceTransient(frame)
+            return
+        }
         switch frame.name {
+        case "conversation_snapshot":
+            reduceConversationSnapshot(frame)
+        case "conversation_commit_ready":
+            if let ready = ConversationCommitReady(frame: frame), continuity.accept(ready) {
+                transientTurns = []
+                transientCanvas = nil
+            }
         case "ui_render":
             reduceUiRender(frame)
         case "ui_upsert":
             reduceUiUpsert(frame)
         case "chat_created":
-            activeChatId = nestedChatId(frame) ?? activeChatId
+            if let chatId = nestedChatId(frame) { adoptChat(chatId) }
         case "user_message_acked":
-            activeChatId = nestedChatId(frame) ?? activeChatId
+            if let chatId = nestedChatId(frame) { adoptChat(chatId) }
             turnActive = true
             pendingReplace = true
             pendingCanvas = []
             liveOpsThisTurn = false
         case "chat_loaded":
-            reduceChatLoaded(frame)
+            if continuity.connectionGeneration == nil {
+                reduceChatLoaded(frame)
+            }
+        case "chat_deleted":
+            if let chatId = nestedChatId(frame) { clearConfirmedDeletion(chatId) }
         case "chat_status":
             reduceStatus(frame)
         case "agent_list":
@@ -487,25 +792,49 @@ final class AppModel: NSObject {
             history = (frame.payload["chats"]?.arrayValue ?? []).compactMap { ChatSummary(json: $0) }
             historyLoading = false
         case "ui_stream_data", "stream_data":
-            applyCanvasOps(streamFrameToOps(frame, activeChat: activeChatId, seqState: &seqState))
+            if continuity.connectionGeneration == nil {
+                applyCanvasOps(streamFrameToOps(frame, activeChat: activeChatId, seqState: &seqState))
+            }
         case "stream_subscribed":
             // 055 mid-stream join: load_chat may already have re-hydrated the
             // streamed component — the placeholder must not blank it. Ops go
             // live to the visible canvas even mid-turn, so its ids are the
             // guard source (the same list applyCanvasOps mutates).
-            applyCanvasOps(subscribeAckOps(frame, existingIds: Set(canvas.compactMap(\.componentId))))
+            if continuity.connectionGeneration == nil {
+                applyCanvasOps(
+                    subscribeAckOps(
+                        frame,
+                        existingIds: Set(canvas.compactMap(\.componentId))))
+            }
         case "stream_error":
-            applyCanvasOps(streamErrorOps(frame))
+            if continuity.connectionGeneration != nil {
+                transientTurns = []
+                transientCanvas = nil
+                statusText = nil
+                bannerIsError = true
+                errorBanner = frame.errorMessage
+            } else {
+                applyCanvasOps(streamErrorOps(frame))
+            }
         case "chrome_menu":
             chromeMenu = ChromeMenuModel.fromJSON(frame.payload["model"])
         case "chrome_surface":
             reduceChromeSurface(frame)
+        case "operation_status":
+            reduceOperationStatus(frame)
+            reduceLLMOperationStatus(frame)
+        case "agent_lifecycle":
+            reduceAgentLifecycle(frame)
         case "user_preferences":
             themeStore.applyPreferences(frame.payload)
         case "workspace_timeline_mode":
             timelineReadOnly = frame.payload["active"]?.boolValue ?? frame.payload["on"]?.boolValue ?? false
         case "error":
-            reduceError(frame)
+            let admissionRefused = reduceAdmissionRefusal(frame)
+            let llmAdmissionRefused = reduceLLMAdmissionRefusal(frame)
+            if !admissionRefused && !llmAdmissionRefused {
+                reduceError(frame)
+            }
         case "chat_step":
             let step = frame.payload["step"]
             let name = step?["name"]?.stringValue ?? step?["kind"]?.stringValue
@@ -516,7 +845,8 @@ final class AppModel: NSObject {
             // The wire `percentage` is a JSON number (Optional[int] server-side).
             // Bounds-checked: Int(Double) traps on out-of-range values, and no
             // inbound frame may crash the client (FR-003).
-            let pct = frame.payload["percentage"]
+            let pct =
+                frame.payload["percentage"]
                 .flatMap { value -> String? in
                     if let s = value.stringValue { return s }
                     guard let n = value.numberValue, n.isFinite, n >= 0, n <= 999
@@ -536,12 +866,15 @@ final class AppModel: NSObject {
             }
         case "task_completed":
             if frameTargetsActiveChat(frame) {
-                commitTurn()
+                if continuity.connectionGeneration == nil {
+                    commitTurn()
+                    refreshActiveChat()
+                } else {
+                    turnActive = false
+                    statusText = nil
+                }
                 bannerIsError = false
                 errorBanner = "Background task finished"
-                // The task ran detached — its output landed server-side, not
-                // in this socket's turn frames. Reload to pick it up.
-                refreshActiveChat()
             } else {
                 bannerIsError = false
                 errorBanner = "Background task finished in another chat"
@@ -570,7 +903,10 @@ final class AppModel: NSObject {
             bannerIsError = true
             errorBanner = frame.payload["error"]?.stringValue ?? "Couldn't save component"
         case "component_deleted":
-            if let cid = frame.payload["component_id"]?.stringValue, !cid.isEmpty {
+            if continuity.connectionGeneration == nil,
+                let cid = frame.payload["component_id"]?.stringValue,
+                !cid.isEmpty
+            {
                 applyCanvasOps([UpsertOp(op: "remove", componentId: cid, component: nil)])
             }
         case "combine_status":
@@ -581,7 +917,9 @@ final class AppModel: NSObject {
             errorBanner = frame.payload["error"]?.stringValue ?? "Couldn't combine components"
         case "components_combined", "components_condensed":
             statusText = nil
-            applyCanvasOps(replacementOps(frame))
+            if continuity.connectionGeneration == nil {
+                applyCanvasOps(replacementOps(frame))
+            }
         case "saved_components_list":
             // Accepted ack; there is no native saved-components surface to
             // refresh (browsing rides the server-driven chrome surface) — a
@@ -591,6 +929,465 @@ final class AppModel: NSObject {
             Task { await self.handleAuthRequired() }
         default:
             break
+        }
+    }
+
+    private func reduceLLMOperationStatus(_ frame: InboundFrame) {
+        guard let status = OperationStatus(frame: frame),
+            status.action == "chrome_llm_save",
+            status.surface == "llm_settings",
+            continuity.connectionGeneration == status.connectionGeneration,
+            var current = llmFirstLoginOperation,
+            current.requestGeneration == status.requestGeneration,
+            !current.isAuthoritativelyTerminal
+        else { return }
+        if let operationId = current.operationId, operationId != status.operationId {
+            return
+        }
+        if let sequence = current.sequence, status.sequence <= sequence {
+            return
+        }
+        current.operationId = status.operationId
+        current.sequence = status.sequence
+        current.phase = status.phase
+        current.phaseVisible = current.phaseVisible || status.state != "accepted"
+
+        let authoritativeState = LLMFirstLoginOperation.State(rawValue: status.state)
+        guard let authoritativeState, authoritativeState != .submitting,
+            authoritativeState != .unconfirmed
+        else { return }
+        if current.state == .unconfirmed && !status.terminal {
+            current.label = "Unable to confirm; reconnecting"
+            current.retryable = true
+            llmFirstLoginOperation = current
+            return
+        }
+
+        current.state = authoritativeState
+        current.label = status.label
+        current.retryable = status.retryable
+        current.errorCode = status.error.objectValue?["code"]?.stringValue
+        current.errorMessage = status.error.objectValue?["message"]?.stringValue
+        current.isAuthoritativelyTerminal = status.terminal
+        llmFirstLoginOperation = current
+        if status.terminal {
+            cancelLLMTimers()
+            if authoritativeState == .completed {
+                advanceAfterLLMCompletionIfNeeded()
+            }
+        }
+    }
+
+    private func reduceOperationStatus(_ frame: InboundFrame) {
+        guard let status = OperationStatus(frame: frame),
+            statusLifecycle.accept(
+                operation: status,
+                connectionGeneration: continuity.connectionGeneration,
+                conversationRequestGeneration: continuity.requestGeneration,
+                activeChatId: activeChatId,
+                pendingChatRequestGenerations: pendingChatRequestGenerations,
+                pendingSurfaceRequestGenerations: pendingSurfaceRequestGenerations)
+        else { return }
+        operationStatuses = statusLifecycle.operations
+        statusText = status.error.objectValue?["message"]?.stringValue ?? status.label
+        if status.terminal {
+            clearLocalOperationSubmission(requestGeneration: status.requestGeneration)
+        }
+        if status.terminal && ["failed", "cancelled", "retryable"].contains(status.state) {
+            transientTurns = []
+            transientCanvas = nil
+        }
+    }
+
+    private func reduceAgentLifecycle(_ frame: InboundFrame) {
+        guard let lifecycle = AgentLifecycle(frame: frame),
+            statusLifecycle.accept(lifecycle: lifecycle)
+        else { return }
+        agentLifecycles = statusLifecycle.agents
+        bannerIsError = lifecycle.state == "failed"
+        errorBanner = "\(lifecycle.agentId): \(lifecycle.label)"
+    }
+
+    @discardableResult
+    private func reduceAdmissionRefusal(_ frame: InboundFrame) -> Bool {
+        guard let refusal = AdmissionRefusal(frame: frame),
+            localOperationSubmissions.removeValue(forKey: refusal.submissionId) != nil
+        else { return false }
+        statusText = refusal.message
+        bannerIsError = !refusal.retryable
+        errorBanner = refusal.message
+        return true
+    }
+
+    @discardableResult
+    private func reduceLLMAdmissionRefusal(_ frame: InboundFrame) -> Bool {
+        guard let refusal = AdmissionRefusal(frame: frame),
+            var current = llmFirstLoginOperation,
+            current.submissionId == refusal.submissionId,
+            current.operationId == nil,
+            !current.isAuthoritativelyTerminal
+        else { return false }
+        current.state = refusal.retryable ? .retryable : .failed
+        current.phase = refusal.code
+        current.label = refusal.message
+        current.retryable = refusal.retryable
+        current.errorCode = refusal.code
+        current.errorMessage = current.label
+        current.phaseVisible = true
+        current.isAuthoritativelyTerminal = true
+        llmFirstLoginOperation = current
+        cancelLLMTimers()
+        return true
+    }
+
+    private func advanceAfterLLMCompletionIfNeeded() {
+        guard var current = llmFirstLoginOperation,
+            current.requiresAdvance,
+            !current.didAdvance
+        else { return }
+        current.didAdvance = true
+        llmFirstLoginOperation = current
+        mandatorySurface = false
+        if screen == .surface {
+            screen = .chat
+            pendingSurface = nil
+            pendingSurfaceKey = ""
+            pendingSurfaceParams = .object([:])
+        }
+    }
+
+    private func cancelLLMTimers() {
+        llmPhaseTask?.cancel()
+        llmPhaseTask = nil
+        llmWatchdogTask?.cancel()
+        llmWatchdogTask = nil
+    }
+
+    private func clearLLMFirstLoginOperation() {
+        cancelLLMTimers()
+        llmFirstLoginOperation = nil
+        llmReconciliationRunning = false
+    }
+
+    private func armLLMFirstLoginTimers(submissionId: String) {
+        cancelLLMTimers()
+        let phaseDelay = llmFirstLoginPhaseDelay
+        llmPhaseTask = Task { [weak self] in
+            do {
+                try await Task.sleep(nanoseconds: phaseDelay)
+            } catch {
+                return
+            }
+            guard let self, var current = self.llmFirstLoginOperation,
+                current.submissionId == submissionId,
+                current.isLoading
+            else { return }
+            current.phaseVisible = true
+            self.llmFirstLoginOperation = current
+        }
+
+        let watchdogDelay = llmFirstLoginWatchdogDelay
+        llmWatchdogTask = Task { [weak self] in
+            do {
+                try await Task.sleep(nanoseconds: watchdogDelay)
+            } catch {
+                return
+            }
+            guard let self, var current = self.llmFirstLoginOperation,
+                current.submissionId == submissionId,
+                !current.isAuthoritativelyTerminal
+            else { return }
+            current.state = .unconfirmed
+            current.phase = "awaiting_reconciliation"
+            current.label = "Unable to confirm; reconnecting"
+            current.retryable = true
+            current.errorCode = "deadline_exceeded"
+            current.errorMessage = "Unable to confirm; reconnecting"
+            current.phaseVisible = true
+            self.llmFirstLoginOperation = current
+            self.llmPhaseTask?.cancel()
+            self.llmPhaseTask = nil
+            if self.connected {
+                Task { await self.reconcileLLMFirstLoginOperation() }
+            }
+        }
+    }
+
+    func reconcileLLMFirstLoginOperation() async {
+        guard !llmReconciliationRunning,
+            let current = llmFirstLoginOperation,
+            !current.isAuthoritativelyTerminal
+        else { return }
+        llmReconciliationRunning = true
+        defer { llmReconciliationRunning = false }
+
+        let result: LLMOperationReconciliation
+        if let llmOperationReconciler {
+            result = await llmOperationReconciler(current.operationId, current.submissionId)
+        } else {
+            do {
+                let client = rest
+                if let operationId = current.operationId {
+                    if let operation = try await client.operation(id: operationId) {
+                        result = .operation(operation)
+                    } else {
+                        result = .unavailable
+                    }
+                } else if let submission = try await client.operationSubmission(id: current.submissionId) {
+                    result = .submission(submission)
+                } else {
+                    result = .unavailable
+                }
+            } catch {
+                result = .unavailable
+            }
+        }
+
+        guard let latest = llmFirstLoginOperation,
+            latest.submissionId == current.submissionId,
+            !latest.isAuthoritativelyTerminal
+        else { return }
+        switch result {
+        case .operation(let operation):
+            applyReconciledLLMOperation(operation)
+        case .submission(.accepted(let operation)):
+            applyReconciledLLMOperation(operation)
+        case .submission(.refused(let code, let retryable, _)):
+            var refused = latest
+            refused.state = retryable ? .retryable : .failed
+            refused.phase = code
+            refused.label =
+                retryable
+                ? "The request was not accepted. Try again."
+                : "The request was not accepted. Check the form."
+            refused.retryable = retryable
+            refused.errorCode = code
+            refused.errorMessage = refused.label
+            refused.phaseVisible = true
+            refused.isAuthoritativelyTerminal = true
+            llmFirstLoginOperation = refused
+            cancelLLMTimers()
+        case .unavailable:
+            if latest.state == .unconfirmed {
+                var unavailable = latest
+                unavailable.label = "Unable to confirm; reconnecting"
+                llmFirstLoginOperation = unavailable
+            }
+        }
+    }
+
+    private func applyReconciledLLMOperation(_ projection: OperationProjection) {
+        guard projection.operationKind == "llm_credential_save",
+            var current = llmFirstLoginOperation,
+            projection.requestGeneration == current.requestGeneration,
+            current.operationId == nil || current.operationId == projection.operationId,
+            current.sequence == nil || projection.stateRevision > current.sequence!,
+            !current.isAuthoritativelyTerminal
+        else { return }
+        current.operationId = projection.operationId
+        current.sequence = projection.stateRevision
+        current.phase = projection.phaseCode ?? projection.state
+        let mapped: LLMFirstLoginOperation.State
+        switch projection.state {
+        case "queued":
+            mapped = .accepted
+        case "running":
+            if current.phase == "validating_credentials" {
+                mapped = .validating
+            } else if current.phase == "saving_credentials" {
+                mapped = .persisting
+            } else {
+                mapped = .running
+            }
+        case "completed":
+            mapped = .completed
+        case "failed":
+            mapped = .failed
+        case "cancelled":
+            mapped = .cancelled
+        case "retryable":
+            mapped = .retryable
+        default:
+            return
+        }
+        let terminal = [.completed, .failed, .cancelled, .retryable].contains(mapped)
+        if current.state != .unconfirmed || terminal {
+            current.state = mapped
+            current.label = projection.safeSummary ?? reconciledLLMLabel(for: mapped)
+            current.retryable = mapped == .retryable
+        }
+        current.errorCode = projection.terminalCode
+        current.errorMessage = terminal && mapped != .completed ? current.label : nil
+        current.phaseVisible = current.phaseVisible || mapped != .accepted
+        current.isAuthoritativelyTerminal = terminal
+        llmFirstLoginOperation = current
+        if terminal {
+            cancelLLMTimers()
+            if mapped == .completed {
+                advanceAfterLLMCompletionIfNeeded()
+            }
+        }
+    }
+
+    private func reconciledLLMLabel(for state: LLMFirstLoginOperation.State) -> String {
+        switch state {
+        case .accepted:
+            return "Accepted"
+        case .validating:
+            return "Checking your provider credentials…"
+        case .persisting:
+            return "Saving credentials…"
+        case .running:
+            return "Finishing provider setup…"
+        case .completed:
+            return "Provider setup complete"
+        case .failed:
+            return "Check your provider credentials"
+        case .cancelled:
+            return "Provider setup cancelled"
+        case .retryable:
+            return "Provider unavailable. Try again."
+        case .submitting:
+            return "Submitting…"
+        case .unconfirmed:
+            return "Unable to confirm; reconnecting"
+        }
+    }
+
+    private func reduceConversationSnapshot(_ frame: InboundFrame) {
+        guard let snapshot = ConversationSnapshot(frame: frame),
+            continuity.apply(snapshot) == .applied
+        else { return }
+
+        // Persist the locator before publishing either half of the atomic
+        // transcript+canvas replacement to observation.
+        if let account = conversationAccount {
+            _ = conversationResumeStore.save(chatId: snapshot.chatId, for: account)
+        }
+        let restoredTurns = snapshot.messages.map { message in
+            var text = message.visibleText
+            if !message.attachmentNames.isEmpty {
+                let attachments = "📎 " + message.attachmentNames.joined(separator: ", ")
+                text = text.isEmpty ? attachments : text + "\n" + attachments
+            }
+            return ChatTurn(
+                id: message.messageId,
+                role: message.role,
+                text: text,
+                components: message.components)
+        }
+        activeChatId = snapshot.chatId
+        turns = restoredTurns
+        canvas = snapshot.canvasComponents
+        transientTurns = []
+        transientCanvas = nil
+        pendingCanvas = []
+        canvasHistory = []
+        viewingIndex = nil
+        turnActive = false
+        pendingReplace = false
+        liveOpsThisTurn = false
+        statusText = nil
+        stepTrail = []
+        asyncDetached = false
+        pendingCommitRequestGeneration = nil
+    }
+
+    /// Feature 060 render frames are previews. A valid, strictly sequenced
+    /// scope may update only the disposable overlay; committed state changes
+    /// exclusively through a complete conversation_snapshot.
+    /// A chat-target preview turn, shaped exactly like the committed path
+    /// (`reduceUiRender`): the chat column is TEXT, so components are flattened
+    /// into it and never carried alongside. Carrying both rendered every
+    /// text-only answer twice — once as markdown, once as a duplicate card.
+    private func chatPreviewTurn(
+        _ components: [AstralComponent], frame: InboundFrame
+    ) -> ChatTurn? {
+        let text = flattenText(components)
+        guard !text.isEmpty else { return nil }
+        return ChatTurn(
+            id: "preview-\(frame.payload["frame_sequence"]?.numberValue ?? 0)",
+            role: "assistant",
+            text: text,
+            components: [])
+    }
+
+    /// Canvas-target preview components, filtered exactly like the committed
+    /// path (`reduceUiRender`): reasoning, doc cards and skeletons are chat /
+    /// loading artifacts and never belong on the canvas.
+    private func canvasPreviewComponents(
+        _ components: [AstralComponent]
+    ) -> [AstralComponent] {
+        components.filter {
+            !isReasoning($0) && !isDocCard($0.componentId) && !isSkeleton($0)
+        }
+    }
+
+    private func reduceTransient(_ frame: InboundFrame) {
+        guard continuity.acceptTransient(frame) else { return }
+        switch frame.name {
+        case "ui_render", "ui_update":
+            let components = frame.renderComponents
+            if frame.renderTarget == "chat" {
+                let pendingUsers = transientTurns.filter { $0.role == "user" }
+                let response = chatPreviewTurn(components, frame: frame).map { [$0] } ?? []
+                transientTurns = pendingUsers + response
+            } else {
+                transientCanvas = canvasPreviewComponents(components)
+            }
+        case "ui_append":
+            let components = frame.renderComponents
+            if frame.renderTarget == "chat" {
+                if let turn = chatPreviewTurn(components, frame: frame) {
+                    transientTurns.append(turn)
+                }
+            } else {
+                transientCanvas =
+                    (transientCanvas ?? canvas) + canvasPreviewComponents(components)
+            }
+        case "ui_upsert":
+            transientCanvas = Canvas.apply(transientCanvas ?? canvas, frame.upsertOps)
+        case "ui_stream_data":
+            transientCanvas = Canvas.apply(
+                transientCanvas ?? canvas,
+                streamFrameToOps(frame, activeChat: activeChatId, seqState: &seqState))
+        default:
+            break
+        }
+    }
+
+    private func adoptChat(_ chatId: String) {
+        if let account = conversationAccount {
+            _ = conversationResumeStore.save(chatId: chatId, for: account)
+        }
+        activeChatId = chatId
+        guard let request = pendingCommitRequestGeneration else { return }
+        if openConversationRequest(
+            chatId: chatId,
+            requestGeneration: request,
+            purpose: .commit)
+        {
+            pendingCommitRequestGeneration = nil
+        }
+    }
+
+    private func clearConfirmedDeletion(_ chatId: String) {
+        if let account = conversationAccount {
+            _ = conversationResumeStore.clear(
+                .confirmedDeletion,
+                for: account,
+                chatId: chatId)
+        }
+        guard activeChatId == chatId else { return }
+        clearContinuityChatKeepingConnection()
+        resetChatState()
+    }
+
+    private func clearContinuityChatKeepingConnection() {
+        let connection = continuity.connectionGeneration
+        continuity.clear()
+        if let connection {
+            _ = continuity.beginConnection(connection)
         }
     }
 
@@ -610,7 +1407,27 @@ final class AppModel: NSObject {
     /// up content produced off this socket (background task, another device).
     private func refreshActiveChat() {
         guard let chatId = activeChatId, !chatId.isEmpty else { return }
-        sendEvent("load_chat", .object(["chat_id": .string(chatId)]))
+        let identity = ClientOperationIdentity.fresh()
+        let request = identity.requestGeneration
+        if continuity.connectionGeneration != nil {
+            guard
+                openConversationRequest(
+                    chatId: chatId,
+                    requestGeneration: request,
+                    purpose: .hydration)
+            else { return }
+        }
+        beginLocalOperationSubmission(
+            identity: identity,
+            action: "load_chat",
+            surface: "chat",
+            chatId: chatId)
+        rawSend(
+            Outbound.loadChat(
+                sessionId: activeChatId,
+                chatId: chatId,
+                submissionId: identity.submissionId,
+                requestGeneration: request))
     }
 
     private func reduceUiRender(_ frame: InboundFrame) {
@@ -652,6 +1469,9 @@ final class AppModel: NSObject {
     private func reduceChatLoaded(_ frame: InboundFrame) {
         let chat = frame.payload["chat"]
         activeChatId = chat?["id"]?.stringValue ?? activeChatId
+        if let account = conversationAccount, let activeChatId {
+            _ = conversationResumeStore.save(chatId: activeChatId, for: account)
+        }
         let messages = chat?["messages"]?.arrayValue ?? chat?["history"]?.arrayValue ?? []
         turns = messages.enumerated().map { index, m in
             let content = m["content"]?.stringValue ?? m["text"]?.stringValue ?? ""
@@ -660,9 +1480,17 @@ final class AppModel: NSObject {
             // (duplicate Identifiable ids are undefined behavior in ForEach).
             return ChatTurn(id: "hist-\(index)", role: role, text: content)
         }
-        canvas = []; pendingCanvas = []; canvasHistory = []; viewingIndex = nil
-        turnActive = false; pendingReplace = false; canvasLabel = ""; pendingLabel = ""
-        statusText = nil; stepTrail = []; asyncDetached = false
+        canvas = []
+        pendingCanvas = []
+        canvasHistory = []
+        viewingIndex = nil
+        turnActive = false
+        pendingReplace = false
+        canvasLabel = ""
+        pendingLabel = ""
+        statusText = nil
+        stepTrail = []
+        asyncDetached = false
     }
 
     private func reduceChromeSurface(_ frame: InboundFrame) {
@@ -705,16 +1533,29 @@ final class AppModel: NSObject {
 
     private func reduceError(_ frame: InboundFrame) {
         let code = frame.payload["code"]?.stringValue
-        let message = frame.payload["message"]?.stringValue
+        let message =
+            frame.payload["message"]?.stringValue
             ?? frame.payload["payload"]?["message"]?.stringValue ?? "Something went wrong."
         errorBanner = (code != nil && code != "internal") ? "\(message) (\(code!))" : message
         bannerIsError = true
         turnActive = false
         pendingReplace = false
         pendingCanvas = []
-        agentsLoading = false; historyLoading = false; auditLoading = false
+        transientTurns = []
+        transientCanvas = nil
+        agentsLoading = false
+        historyLoading = false
+        auditLoading = false
         statusText = nil
         asyncDetached = false
+        if code == "chat_not_found" || code == "conversation_not_found" {
+            let deletedChat = nestedChatId(frame) ?? activeChatId
+            if let deletedChat {
+                clearConfirmedDeletion(deletedChat)
+                errorBanner = (code != "internal") ? "\(message) (\(code!))" : message
+                bannerIsError = true
+            }
+        }
     }
 
     private func reduceStatus(_ frame: InboundFrame) {
@@ -723,7 +1564,23 @@ final class AppModel: NSObject {
         let label = (message?.isEmpty == false) ? message : status
         switch status {
         case "done":
-            commitTurn()
+            if continuity.connectionGeneration == nil {
+                commitTurn()
+            } else {
+                turnActive = false
+                statusText = nil
+                stepTrail = []
+                asyncDetached = false
+                // The turn is over, so no further canvas work is coming. A
+                // committed snapshot always precedes `done` ("terminal status
+                // follows the sole committed-state frame"), so releasing the
+                // skeleton here cannot race one. A text-only turn produces no
+                // canvas ops and no snapshot at all, and would otherwise latch
+                // the skeleton forever — hiding a canvas that is already
+                // correct (the previous components, or the welcome).
+                pendingReplace = false
+                liveOpsThisTurn = false
+            }
         case "thinking", "executing", "fixing", "processing_async":
             turnActive = true
             statusText = label
@@ -734,7 +1591,10 @@ final class AppModel: NSObject {
 
     private func commitTurn() {
         if !pendingReplace {
-            turnActive = false; statusText = nil; stepTrail = []; asyncDetached = false
+            turnActive = false
+            statusText = nil
+            stepTrail = []
+            asyncDetached = false
             return
         }
         if pendingCanvas.isEmpty {
@@ -742,8 +1602,11 @@ final class AppModel: NSObject {
             // applied mid-turn) IS the committed state, minus any welcome
             // that resurrected mid-turn (055: `wel_` never survives a turn).
             canvas = canvas.dropWelcome()
-            turnActive = false; pendingReplace = false; statusText = nil
-            stepTrail = []; asyncDetached = false
+            turnActive = false
+            pendingReplace = false
+            statusText = nil
+            stepTrail = []
+            asyncDetached = false
             return
         }
         // 055: `wel_` identities never enter the timeline; a welcome-only
@@ -757,8 +1620,11 @@ final class AppModel: NSObject {
         pendingCanvas = []
         canvasLabel = pendingLabel
         pendingLabel = ""
-        turnActive = false; pendingReplace = false; statusText = nil
-        stepTrail = []; asyncDetached = false
+        turnActive = false
+        pendingReplace = false
+        statusText = nil
+        stepTrail = []
+        asyncDetached = false
     }
 
     /// Identity-keyed ops morph the VISIBLE canvas immediately, even while a
@@ -786,8 +1652,9 @@ final class AppModel: NSObject {
     private func renderToOps(_ components: [AstralComponent]) -> [UpsertOp] {
         components.enumerated().map { i, c in
             let id = c.componentId ?? "xr-\(c.type)-\(i)"
-            return UpsertOp(op: "upsert", componentId: id,
-                            component: c.componentId == nil ? c.withComponentId(id) : c)
+            return UpsertOp(
+                op: "upsert", componentId: id,
+                component: c.componentId == nil ? c.withComponentId(id) : c)
         }
     }
 
@@ -803,8 +1670,10 @@ final class AppModel: NSObject {
         for row in frame.payload["new_components"]?.arrayValue ?? [] {
             guard let comp = row["component_data"].flatMap({ AstralComponent(json: $0) }) else { continue }
             let cid = comp.componentId ?? row["id"]?.stringValue ?? "combined-\(ops.count)"
-            ops.append(UpsertOp(op: "upsert", componentId: cid,
-                                component: comp.componentId == nil ? comp.withComponentId(cid) : comp))
+            ops.append(
+                UpsertOp(
+                    op: "upsert", componentId: cid,
+                    component: comp.componentId == nil ? comp.withComponentId(cid) : comp))
         }
         return ops
     }
@@ -836,8 +1705,7 @@ final class AppModel: NSObject {
     }
 
     private func isReasoning(_ c: AstralComponent) -> Bool {
-        c.type.lowercased() == "collapsible" &&
-            (c.raw["title"]?.stringValue ?? "").lowercased() == "reasoning"
+        c.type.lowercased() == "collapsible" && (c.raw["title"]?.stringValue ?? "").lowercased() == "reasoning"
     }
 
     private func isDocCard(_ id: String?) -> Bool { id?.hasPrefix("doc_") ?? false }
@@ -853,7 +1721,8 @@ final class AppModel: NSObject {
 
     private func noticeText(_ components: [AstralComponent]) -> String {
         components.map { c in
-            let own = c.raw["message"]?.stringValue ?? c.raw["content"]?.stringValue
+            let own =
+                c.raw["message"]?.stringValue ?? c.raw["content"]?.stringValue
                 ?? c.raw["text"]?.stringValue ?? ""
             return (own + "\n" + noticeText(c.children)).trimmingCharacters(in: .whitespacesAndNewlines)
         }.joined(separator: "\n").trimmingCharacters(in: .whitespacesAndNewlines)
@@ -870,10 +1739,107 @@ final class AppModel: NSObject {
 
     private func resetChatState() {
         activeChatId = nil
-        turns = []; canvas = []; pendingCanvas = []; canvasHistory = []
-        viewingIndex = nil; turnActive = false; pendingReplace = false
-        canvasLabel = ""; pendingLabel = ""; staged = []
-        statusText = nil; errorBanner = nil; stepTrail = []; asyncDetached = false
+        turns = []
+        canvas = []
+        transientTurns = []
+        transientCanvas = nil
+        pendingCanvas = []
+        canvasHistory = []
+        viewingIndex = nil
+        turnActive = false
+        pendingReplace = false
+        canvasLabel = ""
+        pendingLabel = ""
+        staged = []
+        statusText = nil
+        errorBanner = nil
+        stepTrail = []
+        asyncDetached = false
+        pendingCommitRequestGeneration = nil
+    }
+
+    private func beginLocalOperationSubmission(
+        identity: ClientOperationIdentity,
+        action: String,
+        surface: String,
+        chatId: String?,
+        exposeStatus: Bool = true
+    ) {
+        guard let connectionGeneration = continuity.connectionGeneration,
+            let submission = LocalOperationSubmission(
+                identity: identity,
+                action: action,
+                surface: surface,
+                chatId: chatId,
+                connectionGeneration: connectionGeneration)
+        else { return }
+        localOperationSubmissions[submission.submissionId] = submission
+        if exposeStatus { statusText = submission.label }
+    }
+
+    /// Rebind one exact retained UI event to this connection before its bytes
+    /// leave the offline queue.
+    @discardableResult
+    func replayQueuedOperation(_ replay: QueuedOperationReplay) -> Bool {
+        guard let connectionGeneration = continuity.connectionGeneration else { return false }
+        if let purpose = replay.conversationPurpose {
+            if let chatId = replay.chatId {
+                guard
+                    openConversationRequest(
+                        chatId: chatId,
+                        requestGeneration: replay.identity.requestGeneration,
+                        purpose: purpose)
+                else { return false }
+            } else if purpose == .commit {
+                pendingCommitRequestGeneration = replay.identity.requestGeneration
+            } else {
+                return false
+            }
+        }
+        guard
+            let submission = LocalOperationSubmission(
+                identity: replay.identity,
+                action: replay.action,
+                surface: replay.surface,
+                chatId: replay.chatId,
+                connectionGeneration: connectionGeneration)
+        else { return false }
+        localOperationSubmissions[submission.submissionId] = submission
+        statusText = submission.label
+        return true
+    }
+
+    private func clearLocalOperationSubmission(requestGeneration: String) {
+        localOperationSubmissions = localOperationSubmissions.filter {
+            $0.value.requestGeneration != requestGeneration
+        }
+    }
+
+    private func clearPendingOperationSubmissions() {
+        let wasSubmitting = statusText == "Submitting…"
+        localOperationSubmissions.removeAll()
+        if wasSubmitting { statusText = nil }
+    }
+
+    private func operationSurface(action: String, payload: JSONValue) -> String {
+        if let surface = payload["surface"]?.stringValue,
+            surface.range(
+                of: "^[a-z][a-z0-9]*(?:_[a-z0-9]+)*$",
+                options: .regularExpression) != nil
+        {
+            return surface
+        }
+        if action == "chat_message" || action == "load_chat" { return "chat" }
+        return "operation"
+    }
+
+    private func operationChatId(action: String, payload: JSONValue) -> String? {
+        if action == "chat_message" || action == "load_chat"
+            || conversationMutationActions.contains(action)
+        {
+            return payload["chat_id"]?.stringValue ?? activeChatId
+        }
+        return nil
     }
 
     // MARK: actions
@@ -885,17 +1851,46 @@ final class AppModel: NSObject {
         let ready = staged.filter { $0.state == "ready" && $0.attachmentId != nil }
         let trimmed = text.trimmingCharacters(in: .whitespacesAndNewlines)
         if trimmed.isEmpty && ready.isEmpty { return }
-        let bubble = ready.isEmpty ? text :
-            (text + "\n📎 " + ready.map(\.filename).joined(separator: ", ")).trimmingCharacters(in: .whitespaces)
-        appendTurn(role: "user", text: bubble)
+        let identity = ClientOperationIdentity.fresh()
+        let request = identity.requestGeneration
+        if continuity.connectionGeneration != nil {
+            if let chatId = activeChatId {
+                guard
+                    openConversationRequest(
+                        chatId: chatId,
+                        requestGeneration: request,
+                        purpose: .commit)
+                else { return }
+            } else {
+                pendingCommitRequestGeneration = request
+            }
+        }
+        let bubble =
+            ready.isEmpty
+            ? text
+            : (text + "\n📎 " + ready.map(\.filename).joined(separator: ", ")).trimmingCharacters(in: .whitespaces)
+        if continuity.connectionGeneration == nil {
+            appendTurn(role: "user", text: bubble)
+        } else {
+            transientTurns.append(
+                ChatTurn(
+                    id: "pending-user-\(UUID().uuidString.lowercased())",
+                    role: "user",
+                    text: bubble))
+        }
         turnActive = true
         pendingReplace = true
         pendingCanvas = []
         liveOpsThisTurn = false
         // 055 uniform rule: purge the ephemeral welcome (`wel_` identities)
         // from the committed canvas at turn start — the server no longer
-        // sends the blanking `ui_render []` (wire-contract §1).
-        canvas = canvas.dropWelcome()
+        // sends the blanking `ui_render []` (wire-contract §1). Continuity
+        // mode keeps the welcome instead: there the canvas is replaced only by
+        // a committed snapshot, and a turn that never produces one must leave
+        // the run-examples screen exactly as it found it.
+        if continuity.connectionGeneration == nil {
+            canvas = canvas.dropWelcome()
+        }
         pendingLabel = String((text.isEmpty ? (ready.first?.filename ?? "") : text).prefix(80))
         staged = []
         viewingIndex = nil
@@ -904,16 +1899,32 @@ final class AppModel: NSObject {
         stepTrail = []
         asyncDetached = false
 
+        beginLocalOperationSubmission(
+            identity: identity,
+            action: "chat_message",
+            surface: "chat",
+            chatId: activeChatId)
+
         var payload: [String: JSONValue] = ["message": .string(text)]
         if let cid = activeChatId { payload["chat_id"] = .string(cid) }
         if !ready.isEmpty {
-            payload["attachments"] = .array(ready.map { att in
-                .object(["attachment_id": .string(att.attachmentId!),
-                         "filename": .string(att.filename),
-                         "category": .string(att.category)])
-            })
+            payload["attachments"] = .array(
+                ready.map { att in
+                    .object([
+                        "attachment_id": .string(att.attachmentId!),
+                        "filename": .string(att.filename),
+                        "category": .string(att.category),
+                    ])
+                })
         }
-        rawSend(Outbound.uiEvent(action: "chat_message", sessionId: activeChatId, payload: .object(payload)))
+        rawSend(
+            Outbound.uiEvent(
+                action: "chat_message",
+                sessionId: activeChatId,
+                payload: .object(payload),
+                submissionId: identity.submissionId,
+                requestGeneration: request,
+                snapshotPurpose: .commit))
     }
 
     func sendEvent(_ action: String, _ payload: JSONValue = .object([:])) {
@@ -932,13 +1943,154 @@ final class AppModel: NSObject {
             pendingReplace = true
             pendingCanvas = []
             liveOpsThisTurn = false
-            canvas = canvas.dropWelcome()   // 055: same turn-start purge as sendChat
+            if continuity.connectionGeneration == nil {
+                canvas = canvas.dropWelcome()  // 055: same turn-start purge as sendChat
+            }
             viewingIndex = nil
             errorBanner = nil
             stepTrail = []
             asyncDetached = false
         }
-        rawSend(Outbound.uiEvent(action: action, sessionId: activeChatId, payload: payload))
+        if action == "chat_message" {
+            let identity = ClientOperationIdentity.fresh()
+            let request = identity.requestGeneration
+            if let chatId = activeChatId, continuity.connectionGeneration != nil {
+                guard
+                    openConversationRequest(
+                        chatId: chatId,
+                        requestGeneration: request,
+                        purpose: .commit)
+                else { return }
+            } else if activeChatId == nil {
+                pendingCommitRequestGeneration = request
+            }
+            beginLocalOperationSubmission(
+                identity: identity,
+                action: action,
+                surface: "chat",
+                chatId: activeChatId)
+            rawSend(
+                Outbound.uiEvent(
+                    action: action,
+                    sessionId: activeChatId,
+                    payload: payload,
+                    submissionId: identity.submissionId,
+                    requestGeneration: request,
+                    snapshotPurpose: .commit))
+            return
+        }
+        if action == "load_chat", let chatId = payload["chat_id"]?.stringValue {
+            let identity = ClientOperationIdentity.fresh()
+            if continuity.connectionGeneration != nil {
+                guard
+                    openConversationRequest(
+                        chatId: chatId,
+                        requestGeneration: identity.requestGeneration,
+                        purpose: .hydration)
+                else { return }
+            }
+            beginLocalOperationSubmission(
+                identity: identity,
+                action: action,
+                surface: "chat",
+                chatId: chatId)
+            rawSend(
+                Outbound.loadChat(
+                    sessionId: chatId,
+                    chatId: chatId,
+                    submissionId: identity.submissionId,
+                    requestGeneration: identity.requestGeneration))
+            return
+        }
+
+        let identity = ClientOperationIdentity.fresh()
+        let chatId = operationChatId(action: action, payload: payload)
+        beginLocalOperationSubmission(
+            identity: identity,
+            action: action,
+            surface: operationSurface(action: action, payload: payload),
+            chatId: chatId)
+        rawSend(
+            Outbound.uiEvent(
+                action: action,
+                sessionId: chatId,
+                payload: payload,
+                submissionId: identity.submissionId,
+                requestGeneration: identity.requestGeneration))
+    }
+
+    /// Submit one server-authored ParamPicker action. Provider Save is the one
+    /// specialization: its client UUIDs and local `submitting` projection are
+    /// created synchronously before the socket send, while every other action
+    /// keeps the generic event path.
+    @discardableResult
+    func submitParamPicker(
+        action: String,
+        fields: [String: JSONValue],
+        payload: [String: JSONValue]
+    ) -> Bool {
+        var submittedPayload = payload
+        submittedPayload["fields"] = .object(fields)
+        guard action == "chrome_llm_save" else {
+            emit(action, payload: submittedPayload)
+            return true
+        }
+
+        if let current = llmFirstLoginOperation,
+            !current.isAuthoritativelyTerminal
+        {
+            if current.state == .unconfirmed {
+                Task { await self.reconcileLLMFirstLoginOperation() }
+            } else if !current.phaseVisible {
+                var focused = current
+                focused.phaseVisible = true
+                llmFirstLoginOperation = focused
+            }
+            return false
+        }
+        guard let connectionGeneration = continuity.connectionGeneration else {
+            bannerIsError = true
+            errorBanner = "Reconnect before saving your provider settings."
+            return false
+        }
+
+        let identity = ClientOperationIdentity.fresh()
+        let submissionId = identity.submissionId
+        let requestGeneration = identity.requestGeneration
+        llmFirstLoginOperation = LLMFirstLoginOperation(
+            submissionId: submissionId,
+            requestGeneration: requestGeneration,
+            connectionGeneration: connectionGeneration,
+            requiresAdvance: mandatorySurface && pendingSurfaceKey == "llm",
+            operationId: nil,
+            sequence: nil,
+            state: .submitting,
+            phase: "submitting",
+            label: "Submitting…",
+            retryable: false,
+            errorCode: nil,
+            errorMessage: nil,
+            phaseVisible: false,
+            isAuthoritativelyTerminal: false,
+            didAdvance: false)
+        armLLMFirstLoginTimers(submissionId: submissionId)
+
+        beginLocalOperationSubmission(
+            identity: identity,
+            action: action,
+            surface: "llm_settings",
+            chatId: nil,
+            exposeStatus: false)
+
+        submittedPayload["surface"] = .string("llm_settings")
+        rawSend(
+            Outbound.uiEvent(
+                action: action,
+                sessionId: nil,
+                payload: .object(submittedPayload),
+                submissionId: submissionId,
+                requestGeneration: requestGeneration))
+        return true
     }
 
     /// Bridge for the component renderer's `emit(action, payload)` callback.
@@ -958,10 +2110,12 @@ final class AppModel: NSObject {
     func refineComponent(_ componentId: String, instruction: String) {
         let trimmed = instruction.trimmingCharacters(in: .whitespacesAndNewlines)
         guard !componentId.isEmpty, !trimmed.isEmpty else { return }
-        sendEvent("component_refine", .object([
-            "component_id": .string(componentId),
-            "instruction": .string(trimmed),
-        ]))
+        sendEvent(
+            "component_refine",
+            .object([
+                "component_id": .string(componentId),
+                "instruction": .string(trimmed),
+            ]))
     }
 
     /// 055 US5: CSV export URL for one table component, chat-scoped per the
@@ -981,15 +2135,43 @@ final class AppModel: NSObject {
     }
 
     func newChat() {
-        if mandatorySurface { return }   // 054: navigation pinned (sign-out only)
+        if mandatorySurface { return }  // 054: navigation pinned (sign-out only)
+        if let account = conversationAccount {
+            _ = conversationResumeStore.clear(.newChat, for: account)
+        }
         seqState.removeAll()
+        clearContinuityChatKeepingConnection()
         resetChatState()
         screen = .chat
         sendEvent("new_chat")
     }
 
     func openChat(_ chatId: String) {
-        sendEvent("load_chat", .object(["chat_id": .string(chatId)]))
+        if let account = conversationAccount {
+            guard conversationResumeStore.save(chatId: chatId, for: account) else { return }
+        }
+        activeChatId = chatId
+        let identity = ClientOperationIdentity.fresh()
+        let request = identity.requestGeneration
+        if continuity.connectionGeneration != nil {
+            guard
+                openConversationRequest(
+                    chatId: chatId,
+                    requestGeneration: request,
+                    purpose: .hydration)
+            else { return }
+        }
+        beginLocalOperationSubmission(
+            identity: identity,
+            action: "load_chat",
+            surface: "chat",
+            chatId: chatId)
+        rawSend(
+            Outbound.loadChat(
+                sessionId: chatId,
+                chatId: chatId,
+                submissionId: identity.submissionId,
+                requestGeneration: request))
         screen = .chat
         viewingIndex = nil
     }
@@ -997,16 +2179,16 @@ final class AppModel: NSObject {
     /// FR-011: history offers open AND delete (server-side via REST, like the
     /// Android/Windows twins), then refreshes the list.
     func deleteChat(_ chatId: String) {
-        history.removeAll { $0.id == chatId }
-        if activeChatId == chatId { resetChatState() }
         Task {
-            _ = try? await rest.deleteChat(id: chatId)
+            guard (try? await rest.deleteChat(id: chatId)) == true else { return }
+            history.removeAll { $0.id == chatId }
+            clearConfirmedDeletion(chatId)
             sendEvent("get_history")
         }
     }
 
     func goTo(_ target: Screen) {
-        if mandatorySurface { return }   // 054: navigation pinned (sign-out only)
+        if mandatorySurface { return }  // 054: navigation pinned (sign-out only)
         screen = target
         agentsLoading = target == .agents || agentsLoading
         historyLoading = target == .history || historyLoading
@@ -1022,7 +2204,7 @@ final class AppModel: NSObject {
     func openMenuItem(_ item: ChromeMenuItem) { openSurface(item.surface, params: item.params) }
 
     func openSurface(_ surface: String, params: JSONValue = .object([:])) {
-        if mandatorySurface { return }   // 054: the pinned surface can't be replaced client-side
+        if mandatorySurface { return }  // 054: the pinned surface can't be replaced client-side
         switch surface {
         case "agents": goTo(.agents)
         case "audit": goTo(.audit)
@@ -1040,10 +2222,28 @@ final class AppModel: NSObject {
         sendEvent("chrome_open", .object(["surface": .string(pendingSurfaceKey), "params": pendingSurfaceParams]))
     }
 
+    /// Dismiss the open settings surface — the native twin of web's
+    /// `astral-modal-close` ✕ (`client.js closeModal()`) and Android's system
+    /// Back. Both are LOCAL dismissals, so this sends no frame; the server
+    /// keeps no per-socket surface state to release. Refused while the 054
+    /// mandatory pin is set, exactly as web's `data-mandatory` card refuses
+    /// every dismissal affordance (FR-013: sign-out stays the one escape).
+    func closeSurface() {
+        if mandatorySurface { return }
+        guard screen == .surface else { return }
+        screen = .chat
+        pendingSurface = nil
+        pendingSurfaceKey = ""
+        pendingSurfaceParams = .object([:])
+    }
+
     func setToolEnabled(_ agent: Agent, tool: String, enabled: Bool) {
         patchAgent(agent.id) { a in
-            var perms = a.permissions; perms[tool] = enabled
-            var copy = a; copy.permissions = perms; return copy
+            var perms = a.permissions
+            perms[tool] = enabled
+            var copy = a
+            copy.permissions = perms
+            return copy
         }
         let kind = agent.toolScopeMap[tool] ?? "tools:read"
         Task {
@@ -1063,11 +2263,13 @@ final class AppModel: NSObject {
         for k in kinds { scopes[k] = .bool(enabled) }
         var overrides: [String: JSONValue] = [:]
         for t in agent.tools { overrides[t] = .bool(enabled) }
-        sendEvent("set_agent_permissions", .object([
-            "agent_id": .string(agent.id),
-            "scopes": .object(scopes),
-            "tool_overrides": .object(overrides),
-        ]))
+        sendEvent(
+            "set_agent_permissions",
+            .object([
+                "agent_id": .string(agent.id),
+                "scopes": .object(scopes),
+                "tool_overrides": .object(overrides),
+            ]))
         sendEvent("discover_agents")
     }
 
@@ -1099,8 +2301,10 @@ final class AppModel: NSObject {
     func stageAttachment(filename: String, mimeType: String?, data: Data) {
         attachSeq += 1
         let uid = attachSeq
-        staged.append(StagedAttachment(uid: uid, filename: filename, category: "file",
-                                       attachmentId: nil, state: "uploading", note: nil))
+        staged.append(
+            StagedAttachment(
+                uid: uid, filename: filename, category: "file",
+                attachmentId: nil, state: "uploading", note: nil))
         Task {
             let up = await rest.uploadAttachment(filename: filename, mimeType: mimeType, data: data)
             staged = staged.map { a in
@@ -1141,11 +2345,12 @@ final class AppModel: NSObject {
         guard let id = payload["attachment_id"]?.stringValue, !id.isEmpty else { return false }
         if staged.contains(where: { $0.attachmentId == id }) { return true }
         attachSeq += 1
-        staged.append(StagedAttachment(
-            uid: attachSeq,
-            filename: payload["filename"]?.stringValue ?? "attachment",
-            category: payload["category"]?.stringValue ?? "file",
-            attachmentId: id, state: "ready", note: nil))
+        staged.append(
+            StagedAttachment(
+                uid: attachSeq,
+                filename: payload["filename"]?.stringValue ?? "attachment",
+                category: payload["category"]?.stringValue ?? "file",
+                attachmentId: id, state: "ready", note: nil))
         return true
     }
 
@@ -1157,14 +2362,30 @@ final class AppModel: NSObject {
     }
 }
 
+private actor AppRegistrationResumeState {
+    private var next: Bool
+
+    init(initial: Bool) {
+        next = initial
+    }
+
+    func consume() -> Bool {
+        let value = next
+        next = true
+        return value
+    }
+}
+
 extension AppModel: ASWebAuthenticationPresentationContextProviding {
     nonisolated func presentationAnchor(for session: ASWebAuthenticationSession) -> ASPresentationAnchor {
-        #if os(macOS)
-        return NSApplication.shared.mainWindow ?? ASPresentationAnchor()
-        #else
-        return UIApplication.shared.connectedScenes
-            .compactMap { ($0 as? UIWindowScene)?.keyWindow }
-            .first ?? ASPresentationAnchor()
-        #endif
+        MainActor.assumeIsolated {
+            #if os(macOS)
+                NSApplication.shared.mainWindow ?? ASPresentationAnchor()
+            #else
+                UIApplication.shared.connectedScenes
+                    .compactMap { ($0 as? UIWindowScene)?.keyWindow }
+                    .first ?? ASPresentationAnchor()
+            #endif
+        }
     }
 }

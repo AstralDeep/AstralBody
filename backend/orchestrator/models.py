@@ -400,6 +400,7 @@ class DashboardResponse(BaseModel):
     """System configuration and dashboard data."""
     agents: List[AgentInfo]
     total_tools: int
+    capabilities: Dict[str, Any]
 
 
 # =============================================================================

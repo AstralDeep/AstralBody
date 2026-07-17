@@ -3,8 +3,8 @@
 // back to plain `text`. Never re-speaks a turn; navigation/stop obeys
 // immediately; system silent/DND is honored by the platform audio session.
 import AVFoundation
-import Observation
 import AstralCore
+import Observation
 
 // The core package names the rendition `Speech`; alias locally so it can
 // never collide with Apple's Speech framework module in app targets.
@@ -27,8 +27,8 @@ final class Speaker: NSObject {
         super.init()
         synthesizer.delegate = self
         #if os(watchOS)
-        // Ambient: mixes politely and honors the system silent/DND state.
-        try? AVAudioSession.sharedInstance().setCategory(.ambient, options: [.duckOthers])
+            // Ambient: mixes politely and honors the system silent/DND state.
+            try? AVAudioSession.sharedInstance().setCategory(.ambient, options: [.duckOthers])
         #endif
     }
 
@@ -59,7 +59,8 @@ final class Speaker: NSObject {
     private func utter(_ payload: SpeechPayload) {
         let utterance: AVSpeechUtterance
         if !payload.ssml.isEmpty,
-           let ssml = AVSpeechUtterance(ssmlRepresentation: payload.ssml) {
+            let ssml = AVSpeechUtterance(ssmlRepresentation: payload.ssml)
+        {
             utterance = ssml
         } else if !payload.text.isEmpty {
             utterance = AVSpeechUtterance(string: payload.text)
@@ -72,13 +73,17 @@ final class Speaker: NSObject {
 }
 
 extension Speaker: AVSpeechSynthesizerDelegate {
-    func speechSynthesizer(_ synthesizer: AVSpeechSynthesizer,
-                           didFinish utterance: AVSpeechUtterance) {
+    func speechSynthesizer(
+        _ synthesizer: AVSpeechSynthesizer,
+        didFinish utterance: AVSpeechUtterance
+    ) {
         isSpeaking = false
     }
 
-    func speechSynthesizer(_ synthesizer: AVSpeechSynthesizer,
-                           didCancel utterance: AVSpeechUtterance) {
+    func speechSynthesizer(
+        _ synthesizer: AVSpeechSynthesizer,
+        didCancel utterance: AVSpeechUtterance
+    ) {
         isSpeaking = false
     }
 }

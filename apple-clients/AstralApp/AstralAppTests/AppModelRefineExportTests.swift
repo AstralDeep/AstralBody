@@ -1,3 +1,4 @@
+import AstralCore
 // Feature 055 (US4/US5) — send-side tests for the refine affordance and the
 // export menu entries. The context menu's "Refine…" sheet lands in
 // `refineComponent` (trim + guard + `component_refine` ui_event, wire-contract
@@ -7,7 +8,7 @@
 // (chat-scoped per contracts/rest-endpoints.md). Outbound frames are observed
 // via the model's `outboundTap` seam.
 import XCTest
-import AstralCore
+
 @testable import AstralDeep
 
 @MainActor
@@ -67,9 +68,11 @@ final class AppModelRefineExportTests: XCTestCase {
         model.handleFrame(InboundFrame.parse(#"{"type":"workspace_timeline_mode","active":true}"#)!)
         let log = record(model)
         model.refineComponent("wc_budget", instruction: "sort it")
-        model.sendEvent("component_restore", .object([
-            "component_id": .string("wc_budget"), "version_no": .number(2),
-        ]))
+        model.sendEvent(
+            "component_restore",
+            .object([
+                "component_id": .string("wc_budget"), "version_no": .number(2),
+            ]))
         XCTAssertTrue(log.frames.isEmpty)
         // Leaving the timeline view unblocks the same call.
         model.handleFrame(InboundFrame.parse(#"{"type":"workspace_timeline_mode","active":false}"#)!)
@@ -83,16 +86,18 @@ final class AppModelRefineExportTests: XCTestCase {
         let model = AppModel()
         model.serverBaseText = "https://astral.example"
         model.activeChatId = "chat-9"
-        XCTAssertEqual(model.exportComponentURL("wc_tbl")?.absoluteString,
-                       "https://astral.example/api/export/component/wc_tbl.csv?chat_id=chat-9")
+        XCTAssertEqual(
+            model.exportComponentURL("wc_tbl")?.absoluteString,
+            "https://astral.example/api/export/component/wc_tbl.csv?chat_id=chat-9")
     }
 
     func testExportCanvasURL() {
         let model = AppModel()
         model.serverBaseText = "https://astral.example"
         model.activeChatId = "chat-9"
-        XCTAssertEqual(model.exportCanvasURL()?.absoluteString,
-                       "https://astral.example/api/export/canvas/chat-9.html")
+        XCTAssertEqual(
+            model.exportCanvasURL()?.absoluteString,
+            "https://astral.example/api/export/canvas/chat-9.html")
     }
 
     func testExportURLsNilWithoutActiveChat() {

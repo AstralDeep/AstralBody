@@ -22,20 +22,140 @@ before dispatch.
 """
 from __future__ import annotations
 
+import asyncio
+import contextvars
 import json
 import logging
-from typing import Any, Awaitable, Callable, Dict, Optional
+import time
+from contextlib import contextmanager
+from dataclasses import dataclass, field
+from datetime import datetime
+from typing import Any, Awaitable, Callable, Dict, Iterator, Optional
 
 from audit.recorder import Recorder
+from orchestrator.work_admission import OperationState, StaleExecutionFenceError
 
 from .audit_events import record_llm_config_change
 from .probe import probe_chat_completion
 from .providers import get_preset, resolve_base_url
-from .user_store import UserLLMConfigStore
+from .user_store import LLMConfigCommitDeadlineExceeded, UserLLMConfigStore
 
 logger = logging.getLogger("LLMConfig.WSHandlers")
 
 SafeSend = Callable[[Any, str], Awaitable[None]]
+PhaseEmitter = Callable[[str, str, str], Awaitable[None]]
+UnlockCallback = Callable[[], Awaitable[bool]]
+
+LLM_CREDENTIAL_ATTEMPT_TIMEOUT_SECONDS = 10.0
+
+
+@dataclass(slots=True)
+class LLMConfigOperationContext:
+    """Task-local authority for one admitted credential-save execution."""
+
+    coordinator: Any
+    fence: Any
+    deadline_at_monotonic: float
+    deadline_at_utc: datetime
+    emit_phase: PhaseEmitter
+    unlock_after_save: UnlockCallback
+    failure: "LLMConfigOperationFailure | None" = field(
+        default=None, init=False
+    )
+    completed_operation: Any | None = field(default=None, init=False)
+
+    def remember_failure(
+        self, failure: "LLMConfigOperationFailure"
+    ) -> "LLMConfigOperationFailure":
+        # The legacy chrome dispatcher converts handler exceptions into a UI
+        # notice.  Retaining the typed outcome here lets the outer durable
+        # operation wrapper observe and terminalize that same failure.
+        self.failure = failure
+        return failure
+
+    async def ensure_live(self) -> None:
+        if time.monotonic() >= self.deadline_at_monotonic:
+            raise self.remember_failure(LLMConfigOperationFailure.deadline())
+        await asyncio.to_thread(
+            self.coordinator.assert_current_execution, self.fence
+        )
+
+    async def phase(self, state: str, phase: str, label: str) -> None:
+        await self.ensure_live()
+        operation = await asyncio.to_thread(
+            self.coordinator.update_phase, self.fence, phase
+        )
+        if time.monotonic() >= self.deadline_at_monotonic:
+            raise self.remember_failure(LLMConfigOperationFailure.deadline())
+        await self.emit_phase(state, phase, label)
+        # The callback is delivery-only.  The durable revision above remains
+        # authoritative when its socket disappears or the frame is lost.
+        if operation.phase_code != phase:  # pragma: no cover - coordinator invariant
+            raise StaleExecutionFenceError("operation phase update was not retained")
+
+
+class LLMConfigOperationFailure(RuntimeError):
+    """Safe terminal outcome that the operation wrapper must durably commit."""
+
+    def __init__(
+        self,
+        *,
+        state: OperationState,
+        code: str,
+        safe_summary: str,
+        retry_after_ms: int | None = None,
+    ) -> None:
+        super().__init__(safe_summary)
+        self.state = state
+        self.code = code
+        self.safe_summary = safe_summary
+        self.retry_after_ms = retry_after_ms
+
+    @classmethod
+    def deadline(cls) -> "LLMConfigOperationFailure":
+        return cls(
+            state=OperationState.RETRYABLE,
+            code="deadline_exceeded",
+            safe_summary="Credential save timed out",
+        )
+
+
+_ACTIVE_LLM_CONFIG_OPERATION: contextvars.ContextVar[
+    LLMConfigOperationContext | None
+] = contextvars.ContextVar("active_llm_config_operation", default=None)
+
+
+@contextmanager
+def active_llm_config_operation(
+    operation: LLMConfigOperationContext,
+) -> Iterator[None]:
+    """Bind the admitted execution across the existing chrome/WS router."""
+
+    token = _ACTIVE_LLM_CONFIG_OPERATION.set(operation)
+    try:
+        yield
+    finally:
+        _ACTIVE_LLM_CONFIG_OPERATION.reset(token)
+
+
+def _operation_failure(error_class: str | None) -> LLMConfigOperationFailure:
+    if error_class in {"auth_failed", "model_not_found", "contract_violation"}:
+        return LLMConfigOperationFailure(
+            state=OperationState.FAILED,
+            code="validation_failed",
+            safe_summary="The provider credentials or model were rejected",
+        )
+    if error_class == "transport_error":
+        return LLMConfigOperationFailure(
+            state=OperationState.RETRYABLE,
+            code="network_unavailable",
+            safe_summary="The provider could not be reached",
+        )
+    return LLMConfigOperationFailure(
+        state=OperationState.RETRYABLE,
+        code="provider_unavailable",
+        safe_summary="The provider is temporarily unavailable",
+    )
 
 
 def validate_config_submission(config: Dict[str, Any]) -> tuple:
@@ -115,6 +235,7 @@ async def handle_llm_config_set(
 
     Returns ``True`` iff a configuration was persisted.
     """
+    operation = _ACTIVE_LLM_CONFIG_OPERATION.get()
     fields, errors = validate_config_submission(config)
     if errors:
         await _send_invalid(
@@ -122,7 +243,20 @@ async def handle_llm_config_set(
             "; ".join(f"{k}: {v}" for k, v in errors.items()),
             fields=errors,
         )
+        if operation is not None:
+            raise operation.remember_failure(LLMConfigOperationFailure(
+                state=OperationState.FAILED,
+                code="validation_failed",
+                safe_summary="The provider settings are invalid",
+            ))
         return False
+
+    if operation is not None:
+        await operation.phase(
+            "validating",
+            "validating_credentials",
+            "Checking your provider credentials…",
+        )
 
     ok, error_class, upstream = await probe_chat_completion(
         api_key=fields["api_key"], base_url=fields["base_url"], model=fields["model"])
@@ -141,24 +275,64 @@ async def handle_llm_config_set(
     except Exception as exc:  # pragma: no cover — audit is best-effort
         logger.warning(f"llm_config_change(tested) audit failed (non-fatal): {exc}")
     if not ok:
+        failure = _operation_failure(error_class)
         await _send_invalid(
             safe_send, websocket,
-            f"Connection test failed ({error_class}): {upstream or 'no details'}",
+            (
+                failure.safe_summary
+                if operation is not None
+                else f"Connection test failed ({error_class}): {upstream or 'no details'}"
+            ),
             error_class=error_class,
         )
+        if operation is not None:
+            raise operation.remember_failure(failure)
         return False
 
+    if operation is not None:
+        await operation.ensure_live()
     prior = await store.get(actor_user_id)
-    try:
-        await store.set(
-            actor_user_id,
-            provider=fields["provider"],
-            base_url=fields["base_url"],
-            model=fields["model"],
-            api_key=fields["api_key"],
+    if operation is not None:
+        await operation.phase(
+            "persisting",
+            "saving_credentials",
+            "Saving your provider settings…",
         )
+    try:
+        if operation is None:
+            await store.set(
+                actor_user_id,
+                provider=fields["provider"],
+                base_url=fields["base_url"],
+                model=fields["model"],
+                api_key=fields["api_key"],
+            )
+        else:
+            commit = await store.set_fenced(
+                actor_user_id,
+                provider=fields["provider"],
+                base_url=fields["base_url"],
+                model=fields["model"],
+                api_key=fields["api_key"],
+                coordinator=operation.coordinator,
+                fence=operation.fence,
+                deadline_at_monotonic=operation.deadline_at_monotonic,
+                deadline_at_utc=operation.deadline_at_utc,
+            )
+            operation.completed_operation = commit.operation
+    except LLMConfigCommitDeadlineExceeded as exc:
+        failure = LLMConfigOperationFailure.deadline()
+        if operation is not None:
+            failure = operation.remember_failure(failure)
+        raise failure from exc
     except ValueError as exc:
         await _send_invalid(safe_send, websocket, str(exc))
+        if operation is not None:
+            raise operation.remember_failure(LLMConfigOperationFailure(
+                state=OperationState.FAILED,
+                code="validation_failed",
+                safe_summary="The provider settings are invalid",
+            )) from exc
         return False
 
     action = "updated" if prior is not None else "created"
@@ -175,7 +349,16 @@ async def handle_llm_config_set(
     except Exception as exc:  # pragma: no cover — audit is best-effort
         logger.warning(f"llm_config_change audit failed (non-fatal): {exc}")
 
-    await safe_send(websocket, json.dumps({"type": "llm_config_ack", "ok": True}))
+    # The admitted operation commits its credential row and COMPLETED terminal
+    # atomically above. Its outer wrapper alone may now project terminal/UI
+    # state; emitting the legacy ack or unlocking here would recreate a gap in
+    # which a deadline could win after visible success. Non-operation legacy
+    # callers retain their established acknowledgement behavior.
+    if operation is None:
+        await safe_send(
+            websocket,
+            json.dumps({"type": "llm_config_ack", "ok": True}),
+        )
     return True
 
 

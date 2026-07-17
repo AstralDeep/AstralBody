@@ -259,6 +259,26 @@ def test_reconnect_refetches_session_before_register(client_js):
     assert "token = j.access_token" in rt
 
 
+def test_full_shell_load_prefers_current_server_session_over_prior_tab_token(client_js):
+    """A shared tab must not reuse the prior principal after sign-out/login."""
+    bootstrap = re.search(r"var token = ([^;]+);", client_js)
+    assert bootstrap is not None
+    expression = bootstrap.group(1)
+    assert expression.index("window.__ASTRAL_TOKEN__") < expression.index(
+        "sessionStorage.getItem(TOKEN_KEY)"
+    )
+
+
+def test_definitive_sign_out_clears_cached_token_and_account_marker(client_js):
+    start = client_js.index("The local endpoint invalidates the server session")
+    end = client_js.index("// ---- stacked-shell chrome", start)
+    handler = client_js[start:end]
+    assert "token = \"\"" in handler
+    assert "sessionStorage.removeItem(TOKEN_KEY)" in handler
+    assert "sessionStorage.removeItem(ACCOUNT_SESSION_KEY)" in handler
+    assert 'clearActiveChatLocator("definitive_sign_out", activeChatId)' in handler
+
+
 # ---------------------------------------------------------------------------
 # (9) shell.html bootstrap placeholders
 # ---------------------------------------------------------------------------
@@ -309,3 +329,105 @@ def test_fr010_error_pages_offer_no_local_credential_capture(web_auth_src):
         assert "<input" not in low and "<form" not in low, (
             f"{name} must not render local credential inputs"
         )
+
+
+# ---------------------------------------------------------------------------
+# (11) Feature 060 canonical status/lifecycle reduction
+# ---------------------------------------------------------------------------
+
+def test_operation_status_reducer_is_scoped_monotonic_and_first_terminal(client_js):
+    fn = _norm(_js_function(client_js, "reduceOperationStatus"))
+    assert "scopedStatusMatches(frame)" in fn
+    assert "operationStatusById[frame.operation_id]" in fn
+    assert "frame.sequence <= current.sequence" in fn
+    assert "current.terminal" in fn
+    assert "frame.terminal !== expected[0]" in fn
+    assert "frame.retryable !== expected[1]" in fn
+    assert "setStatus((frame.error && frame.error.message) || frame.label, !frame.terminal)" in fn
+    block = _norm(_case_block(client_js, "operation_status"))
+    assert "reduceOperationStatus(data)" in block
+
+
+def test_generic_actions_create_local_operation_identity_before_send(client_js):
+    begin = _norm(_js_function(client_js, "beginOperationSubmission"))
+    assert "randomUuid4()" in begin
+    assert "body.submission_id = submissionId" in begin
+    assert "body.request_generation = requestGeneration" in begin
+    assert 'state: "submitting"' in begin
+    assert 'label: "Submitting…"' in begin
+    assert "operationSubmissionByGeneration[requestGeneration] = local" in begin
+    assert "operationSubmissionById[submissionId] = local" in begin
+    assert "setStatus(local.label, true)" in begin
+
+    action = _norm(_js_function(client_js, "action"))
+    assert "beginOperationSubmission(name, payload, suppliedGeneration)" in action
+    assert "submission_id: submission.submissionId" in action
+    assert "request_generation: submission.requestGeneration" in action
+    assert "payload: submission.payload" in action
+
+    chat = _norm(_js_function(client_js, "sendChat"))
+    assert 'beginOperationSubmission("chat_message", payload, requestState.generation)' in chat
+    assert "submission_id: submission.submissionId" in chat
+
+
+def test_surface_status_and_refusal_correlate_to_local_submission(client_js):
+    scope = _norm(_js_function(client_js, "scopedStatusMatches"))
+    assert "operationSubmissionByGeneration[frame.request_generation]" in scope
+    assert "if (pending) return frame.chat_id == null || frame.chat_id === activeChatId" in scope
+
+    refusal = _norm(_js_function(client_js, "reduceAdmissionRefusal"))
+    assert "frame.accepted !== false" in refusal
+    assert "operationSubmissionById[frame.submission_id]" in refusal
+    assert "finishOperationSubmission(local.request_generation)" in refusal
+    assert "setStatus(errorMessage(frame), false)" in refusal
+
+    block = _norm(_case_block(client_js, "error"))
+    assert "reduceAdmissionRefusal(data)" in block
+
+
+def test_surface_operation_scope_does_not_require_an_active_chat(client_js):
+    fn = _norm(_js_function(client_js, "scopedStatusMatches"))
+    assert "frame.connection_generation !== connectionGeneration" in fn
+    assert "frame.request_generation !== requestState.generation" in fn
+    assert "frame.chat_id == null ||" in fn
+
+
+def test_agent_lifecycle_reducer_uses_lexicographic_pair_and_visible_fallback(client_js):
+    fn = _norm(_js_function(client_js, "reduceAgentLifecycle"))
+    assert "agentLifecycleById[frame.agent_id]" in fn
+    assert "frame.lifecycle_generation < current.lifecycle_generation" in fn
+    assert "frame.lifecycle_generation === current.lifecycle_generation" in fn
+    assert "frame.state_revision <= current.state_revision" in fn
+    assert "renderAgentLifecycle(frame)" in fn
+    render = _norm(_js_function(client_js, "renderAgentLifecycle"))
+    assert 'document.querySelectorAll("[data-agent-id]")' in render
+    assert 'badge.setAttribute("role", "status")' in render
+    assert 'badge.setAttribute("aria-live", "polite")' in render
+    assert "badge.textContent = frame.label" in render
+    assert "if (!matched)" in render
+    assert "setStatus(frame.label)" in render
+    assert 'showToast(frame.label, frame.state === "failed" ? "error" : "info")' in render
+    assert "isCanonicalUuid4(frame.revision_id)" in fn
+    assert "isCanonicalUuid4(frame.runtime_instance_id)" in fn
+    assert "reasonCodes[frame.reason_code]" in fn
+    block = _norm(_case_block(client_js, "agent_lifecycle"))
+    assert "reduceAgentLifecycle(data)" in block
+
+
+def test_status_projections_are_cleared_on_account_change_or_sign_out(client_js):
+    fn = _norm(_js_function(client_js, "clearCommittedConversationView"))
+    assert "operationStatusById = Object.create(null)" in fn
+    assert "operationSubmissionByGeneration = Object.create(null)" in fn
+    assert "operationSubmissionById = Object.create(null)" in fn
+    assert "agentLifecycleById = Object.create(null)" in fn
+
+
+def test_author_only_browser_explicitly_ignores_host_control_frames(client_js):
+    no_op_cases = re.compile(
+        r'case "agent_host_inventory_reconciled":\s*'
+        r'case "agent_host_registration_refused":\s*'
+        r'case "agent_host_registered":\s*'
+        r'// host-only; the browser is author-only\s*'
+        r'case "system_config":'
+    )
+    assert no_op_cases.search(client_js)

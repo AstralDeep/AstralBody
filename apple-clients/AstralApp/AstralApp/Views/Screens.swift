@@ -1,10 +1,10 @@
+import AstralCore
 // Feature 051 — the native settings surfaces reached from the top-bar gear /
 // server chrome, 1:1 with the Android Screens.kt: Agents (per-agent + per-tool
 // permission toggles, "Enable recommended"), Audit (the hash-chained event log),
 // and the SDUI Surface screen (chrome_surface rendered natively, with a load
 // timeout + Retry). Plus the shared skeleton list.
 import SwiftUI
-import AstralCore
 
 // MARK: - Agents
 
@@ -52,7 +52,9 @@ private struct AgentCard: View {
     var body: some View {
         VStack(alignment: .leading, spacing: 8) {
             HStack(alignment: .top, spacing: 8) {
-                Button { withAnimation { expanded.toggle() } } label: {
+                Button {
+                    withAnimation { expanded.toggle() }
+                } label: {
                     VStack(alignment: .leading, spacing: 2) {
                         Text((expanded ? "▼ " : "▶ ") + agent.name)
                             .font(.headline).foregroundStyle(p.text)
@@ -61,15 +63,25 @@ private struct AgentCard: View {
                         }
                         Text("\(agent.enabledCount) / \(agent.tools.count) tools enabled")
                             .font(.caption2).foregroundStyle(p.muted)
+                        if let lifecycle = model.agentLifecycles[agent.id] {
+                            Text(lifecycle.label)
+                                .font(.caption2.weight(.semibold))
+                                .foregroundStyle(lifecycle.state == "failed" ? p.error : p.muted)
+                                .accessibilityLabel("\(agent.name) status: \(lifecycle.label)")
+                                .accessibilityAddTraits(.updatesFrequently)
+                        }
                     }
                     .frame(maxWidth: .infinity, alignment: .leading)
                 }
                 .buttonStyle(.plain)
-                Toggle("", isOn: Binding(
-                    get: { agent.anyEnabled },
-                    set: { model.setAgentEnabled(agent, enabled: $0) }))
-                    .labelsHidden().tint(p.primary)
-                    .accessibilityLabel("Enable \(agent.name)")
+                Toggle(
+                    "",
+                    isOn: Binding(
+                        get: { agent.anyEnabled },
+                        set: { model.setAgentEnabled(agent, enabled: $0) })
+                )
+                .labelsHidden().tint(p.primary)
+                .accessibilityLabel("Enable \(agent.name)")
             }
             if expanded {
                 if agent.tools.isEmpty {
@@ -84,11 +96,14 @@ private struct AgentCard: View {
                             }
                         }
                         .frame(maxWidth: .infinity, alignment: .leading)
-                        Toggle("", isOn: Binding(
-                            get: { agent.permissions[tool] ?? false },
-                            set: { model.setToolEnabled(agent, tool: tool, enabled: $0) }))
-                            .labelsHidden().tint(p.primary)
-                            .accessibilityLabel("Enable \(tool) for \(agent.name)")
+                        Toggle(
+                            "",
+                            isOn: Binding(
+                                get: { agent.permissions[tool] ?? false },
+                                set: { model.setToolEnabled(agent, tool: tool, enabled: $0) })
+                        )
+                        .labelsHidden().tint(p.primary)
+                        .accessibilityLabel("Enable \(tool) for \(agent.name)")
                     }
                 }
             }
@@ -137,7 +152,9 @@ private struct AuditCard: View {
     private var p: AstralPalette { theme.palette }
 
     var body: some View {
-        Button { withAnimation { expanded.toggle() } } label: {
+        Button {
+            withAnimation { expanded.toggle() }
+        } label: {
             VStack(alignment: .leading, spacing: 4) {
                 Text([event.eventClass, event.action].compactMap { $0 }.joined(separator: " · "))
                     .font(.subheadline.weight(.semibold)).foregroundStyle(p.text)
@@ -172,8 +189,27 @@ struct SurfaceView: View {
             if let surface = model.pendingSurface {
                 ScrollView {
                     LazyVStack(alignment: .leading, spacing: 12) {
-                        Text(surface.title.isEmpty ? "Settings" : surface.title)
-                            .font(.title2.bold()).foregroundStyle(p.text)
+                        HStack(alignment: .firstTextBaseline) {
+                            Text(surface.title.isEmpty ? "Settings" : surface.title)
+                                .font(.title2.bold()).foregroundStyle(p.text)
+                            Spacer()
+                            // Web has the modal ✕ and Android the system Back;
+                            // without this the surface could only be left via
+                            // the top bar. Hidden while the 054 pin is set —
+                            // the same refusal web's `data-mandatory` card makes.
+                            if !model.mandatorySurface {
+                                Button {
+                                    model.closeSurface()
+                                } label: {
+                                    Image(systemName: "xmark")
+                                        .font(.system(size: 15, weight: .semibold))
+                                        .foregroundStyle(p.muted)
+                                        .padding(6)
+                                }
+                                .buttonStyle(.plain)
+                                .accessibilityLabel("Close")
+                            }
+                        }
                         ForEach(Array(surface.components.enumerated()), id: \.offset) { _, comp in
                             ComponentView(component: comp)
                         }

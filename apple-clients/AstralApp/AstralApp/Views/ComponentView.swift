@@ -1,12 +1,13 @@
+import AstralCore
 // Feature 051 — the iOS/macOS SDUI renderer (FR-004/FR-025). Native views for
 // the full astralprims vocabulary, styled from the shared AstralDeep palette
 // (parity with web/Android/Windows), with `emit(action,payload)` round-trips
 // for interactive components (buttons, inputs, tables, forms, theme). Anything
 // unknown falls back to readable text with a type badge (FR-003).
 import SwiftUI
-import AstralCore
+
 #if os(macOS)
-import AppKit
+    import AppKit
 #endif
 
 struct ComponentView: View {
@@ -259,9 +260,10 @@ struct ComponentView: View {
     private func heroBackground(_ variant: String) -> AnyShapeStyle {
         switch variant {
         case "gradient":
-            return AnyShapeStyle(LinearGradient(
-                colors: [p.primary.opacity(0.18), p.secondary.opacity(0.08)],
-                startPoint: .topLeading, endPoint: .bottomTrailing))
+            return AnyShapeStyle(
+                LinearGradient(
+                    colors: [p.primary.opacity(0.18), p.secondary.opacity(0.08)],
+                    startPoint: .topLeading, endPoint: .bottomTrailing))
         case "subtle":
             return AnyShapeStyle(p.text.opacity(0.02))
         default:
@@ -384,7 +386,8 @@ struct ComponentView: View {
                 .frame(maxHeight: 360)
                 .clipShape(RoundedRectangle(cornerRadius: AstralRadius.md))
                 if let caption = component.raw["caption"]?.stringValue ?? component.raw["alt"]?.stringValue,
-                   !caption.isEmpty {
+                    !caption.isEmpty
+                {
                     Text(caption).font(.caption).foregroundStyle(p.muted)
                 }
             }
@@ -506,9 +509,11 @@ struct ComponentView: View {
             if let label = component.label ?? component.title, !label.isEmpty {
                 markdown(label).foregroundStyle(p.text)
             }
-            Label("Attach files with the paperclip in the chat input",
-                  systemImage: "paperclip")
-                .font(.caption).foregroundStyle(p.muted)
+            Label(
+                "Attach files with the paperclip in the chat input",
+                systemImage: "paperclip"
+            )
+            .font(.caption).foregroundStyle(p.muted)
         }
         .padding(12)
         .frame(maxWidth: .infinity, alignment: .leading)
@@ -546,18 +551,21 @@ struct AstralButtonStyle: ButtonStyle {
             .padding(.horizontal, 14).padding(.vertical, 9)
         switch variant {
         case "secondary", "ghost":
-            return AnyView(label.foregroundStyle(palette.text)
-                .background(palette.surface.opacity(0.5), in: RoundedRectangle(cornerRadius: AstralRadius.sm))
-                .overlay(RoundedRectangle(cornerRadius: AstralRadius.sm).stroke(palette.border))
-                .opacity(configuration.isPressed ? 0.7 : 1))
+            return AnyView(
+                label.foregroundStyle(palette.text)
+                    .background(palette.surface.opacity(0.5), in: RoundedRectangle(cornerRadius: AstralRadius.sm))
+                    .overlay(RoundedRectangle(cornerRadius: AstralRadius.sm).stroke(palette.border))
+                    .opacity(configuration.isPressed ? 0.7 : 1))
         case "danger":
-            return AnyView(label.foregroundStyle(.white)
-                .background(palette.error, in: RoundedRectangle(cornerRadius: AstralRadius.sm))
-                .opacity(configuration.isPressed ? 0.8 : 1))
+            return AnyView(
+                label.foregroundStyle(.white)
+                    .background(palette.error, in: RoundedRectangle(cornerRadius: AstralRadius.sm))
+                    .opacity(configuration.isPressed ? 0.8 : 1))
         default:
-            return AnyView(label.foregroundStyle(.white)
-                .background(palette.gradient, in: RoundedRectangle(cornerRadius: AstralRadius.sm))
-                .opacity(configuration.isPressed ? 0.85 : 1))
+            return AnyView(
+                label.foregroundStyle(.white)
+                    .background(palette.gradient, in: RoundedRectangle(cornerRadius: AstralRadius.sm))
+                    .opacity(configuration.isPressed ? 0.85 : 1))
         }
     }
 }
@@ -606,9 +614,11 @@ struct DownloadComponent: View {
                     .font(.caption).foregroundStyle(p.muted)
                     .fixedSize(horizontal: false, vertical: true)
             }
-            let meta = [component.raw["version"]?.stringValue,
-                        component.raw["platform"]?.stringValue]
-                .compactMap { $0 }.filter { !$0.isEmpty }
+            let meta = [
+                component.raw["version"]?.stringValue,
+                component.raw["platform"]?.stringValue,
+            ]
+            .compactMap { $0 }.filter { !$0.isEmpty }
             if !meta.isEmpty {
                 Text(meta.joined(separator: " • "))
                     .font(.caption2).foregroundStyle(p.muted)
@@ -630,22 +640,23 @@ struct DownloadComponent: View {
                 }
             case .done(let file):
                 #if os(macOS)
-                HStack(spacing: 8) {
-                    Image(systemName: "checkmark.circle.fill").foregroundStyle(p.success)
-                    Text("Saved \(file.lastPathComponent)")
-                        .font(.callout).foregroundStyle(p.text)
-                    Button("Show in Finder") {
-                        NSWorkspace.shared.activateFileViewerSelecting([file])
+                    HStack(spacing: 8) {
+                        Image(systemName: "checkmark.circle.fill").foregroundStyle(p.success)
+                        Text("Saved \(file.lastPathComponent)")
+                            .font(.callout).foregroundStyle(p.text)
+                        Button("Show in Finder") {
+                            NSWorkspace.shared.activateFileViewerSelecting([file])
+                        }
+                        .font(.callout)
+                        .tint(p.primary)
                     }
-                    .font(.callout)
-                    .tint(p.primary)
-                }
                 #else
-                ShareLink(item: file) {
-                    Label("Save or share \(file.lastPathComponent)",
-                          systemImage: "square.and.arrow.up")
-                }
-                .buttonStyle(AstralButtonStyle(palette: p, variant: "primary"))
+                    ShareLink(item: file) {
+                        Label(
+                            "Save or share \(file.lastPathComponent)",
+                            systemImage: "square.and.arrow.up")
+                    }
+                    .buttonStyle(AstralButtonStyle(palette: p, variant: "primary"))
                 #endif
             case .failed(let why):
                 HStack(spacing: 8) {
@@ -657,8 +668,9 @@ struct DownloadComponent: View {
                 }
             }
             if urlString == nil,
-               let page = component.raw["html_url"]?.stringValue,
-               let pageURL = URL(string: page), !page.isEmpty {
+                let page = component.raw["html_url"]?.stringValue,
+                let pageURL = URL(string: page), !page.isEmpty
+            {
                 Link("Open the releases page", destination: pageURL)
                     .font(.caption).tint(p.primary)
             }
@@ -672,8 +684,9 @@ struct DownloadComponent: View {
         let suggested = filename
         Task {
             do {
-                let file = try await rest.downloadFile(from: urlString,
-                                                       suggestedFilename: suggested)
+                let file = try await rest.downloadFile(
+                    from: urlString,
+                    suggestedFilename: suggested)
                 await MainActor.run { finish(with: file) }
             } catch {
                 await MainActor.run {
@@ -686,24 +699,24 @@ struct DownloadComponent: View {
     @MainActor
     private func finish(with file: URL) {
         #if os(macOS)
-        let panel = NSSavePanel()
-        panel.nameFieldStringValue = file.lastPathComponent
-        panel.canCreateDirectories = true
-        if panel.runModal() == .OK, let destination = panel.url {
-            do {
-                if FileManager.default.fileExists(atPath: destination.path) {
-                    try FileManager.default.removeItem(at: destination)
+            let panel = NSSavePanel()
+            panel.nameFieldStringValue = file.lastPathComponent
+            panel.canCreateDirectories = true
+            if panel.runModal() == .OK, let destination = panel.url {
+                do {
+                    if FileManager.default.fileExists(atPath: destination.path) {
+                        try FileManager.default.removeItem(at: destination)
+                    }
+                    try FileManager.default.copyItem(at: file, to: destination)
+                    phase = .done(destination)
+                } catch {
+                    phase = .failed(error.localizedDescription)
                 }
-                try FileManager.default.copyItem(at: file, to: destination)
-                phase = .done(destination)
-            } catch {
-                phase = .failed(error.localizedDescription)
+            } else {
+                phase = .idle  // user cancelled the save panel
             }
-        } else {
-            phase = .idle   // user cancelled the save panel
-        }
         #else
-        phase = .done(file)
+            phase = .done(file)
         #endif
     }
 }
@@ -749,7 +762,8 @@ struct TableComponent: View {
     @ViewBuilder
     private var pager: some View {
         if let total = component.raw["total_rows"]?.numberValue,
-           let size = component.raw["page_size"]?.numberValue, size > 0 {
+            let size = component.raw["page_size"]?.numberValue, size > 0
+        {
             let offset = component.raw["page_offset"]?.numberValue ?? 0
             let start = Int(offset) + 1
             let end = min(Int(offset + size), Int(total))
@@ -770,10 +784,12 @@ struct TableComponent: View {
 
     private func paginate(offset: Double, size: Double) {
         guard let cid = component.componentId else { return }
-        model.emit("table_paginate", payload: [
-            "component_id": .string(cid),
-            "params": .object(["page_offset": .number(offset), "page_size": .number(size)]),
-        ])
+        model.emit(
+            "table_paginate",
+            payload: [
+                "component_id": .string(cid),
+                "params": .object(["page_offset": .number(offset), "page_size": .number(size)]),
+            ])
     }
 }
 
@@ -822,11 +838,19 @@ struct ParamPickerComponent: View {
     private var p: AstralPalette { theme.palette }
 
     private var fields: [JSONValue] { component.raw["fields"]?.arrayValue ?? [] }
+    private var actions: [JSONValue] { component.raw["actions"]?.arrayValue ?? [] }
+    private var hasLLMSave: Bool {
+        component.raw["submit_action"]?.stringValue == "chrome_llm_save"
+            || actions.contains { $0["action"]?.stringValue == "chrome_llm_save" }
+    }
 
     var body: some View {
         VStack(alignment: .leading, spacing: 8) {
             if let title = component.title, !title.isEmpty {
-                Text(InlineMarkdown.attributed(title)).font(.headline).foregroundStyle(p.text)
+                Text(InlineMarkdown.attributed(title))
+                    .font(.headline).foregroundStyle(p.text)
+                    .accessibilityIdentifier(
+                        hasLLMSave ? "llm-provider-form-title" : "param-picker-form-title")
             }
             // The form's operative instructions live here (web parity).
             if let desc = component.raw["description"]?.stringValue, !desc.isEmpty {
@@ -837,8 +861,45 @@ struct ParamPickerComponent: View {
             ForEach(Array(fields.enumerated()), id: \.offset) { _, field in
                 fieldView(field)
             }
-            Button(component.raw["submit_label"]?.stringValue ?? "Submit", action: submit)
-                .buttonStyle(AstralButtonStyle(palette: p, variant: "primary"))
+            if actions.isEmpty {
+                let action = component.raw["submit_action"]?.stringValue
+                paramButton(
+                    label: component.raw["submit_label"]?.stringValue ?? "Submit",
+                    action: action,
+                    variant: "primary",
+                    payload: component.raw["submit_payload"]?.objectValue ?? [:])
+            } else {
+                HStack(spacing: 8) {
+                    ForEach(Array(actions.enumerated()), id: \.offset) { _, definition in
+                        paramButton(
+                            label: definition["label"]?.stringValue ?? "Submit",
+                            action: definition["action"]?.stringValue,
+                            variant: definition["variant"]?.stringValue ?? "secondary",
+                            payload: definition["payload"]?.objectValue ?? [:])
+                    }
+                }
+            }
+            if hasLLMSave, let operation = model.llmFirstLoginOperation {
+                HStack(alignment: .firstTextBaseline, spacing: 8) {
+                    if operation.isLoading {
+                        ProgressView().controlSize(.small).tint(p.primary)
+                            .accessibilityHidden(true)
+                    }
+                    // The accessibility contract lives on the Text itself, with
+                    // no `.accessibilityElement(children:)` wrapper: wrapping —
+                    // even a Text — mints a generic AXGroup, and macOS AXGroups
+                    // drop AXValue, so XCUIElement.value (and VoiceOver's value
+                    // readout) read as empty on macOS.
+                    Text(operation.presentedLabel)
+                        .font(.caption)
+                        .foregroundStyle(operation.errorCode == nil ? p.muted : p.error)
+                        .fixedSize(horizontal: false, vertical: true)
+                        .accessibilityIdentifier("llm-save-status")
+                        .accessibilityLabel("AI provider setup status")
+                        .accessibilityValue(operation.presentedLabel)
+                        .accessibilityAddTraits(.updatesFrequently)
+                }
+            }
         }
         .padding(14)
         .frame(maxWidth: .infinity, alignment: .leading)
@@ -855,63 +916,152 @@ struct ParamPickerComponent: View {
             Text(label).font(.caption).foregroundStyle(p.muted)
             switch kind {
             case "boolean", "checkbox":
-                Toggle("", isOn: Binding(
-                    get: { flags[name] ?? (field["default"]?.boolValue ?? false) },
-                    set: { flags[name] = $0 })).labelsHidden().tint(p.primary)
+                Toggle(
+                    "",
+                    isOn: Binding(
+                        get: { flags[name] ?? (field["default"]?.boolValue ?? false) },
+                        set: { flags[name] = $0 })
+                )
+                .labelsHidden().tint(p.primary)
+                .accessibilityIdentifier("param-field-\(name)")
+                .accessibilityLabel(label)
+                .accessibilityValue(
+                    flags[name] ?? (field["default"]?.boolValue ?? false)
+                        ? "Enabled" : "Disabled")
             case "select":
-                let options = field["options"]?.arrayValue?.compactMap { $0.stringValue ?? $0["value"]?.stringValue } ?? []
-                Picker(label, selection: Binding(
-                    get: { values[name] ?? options.first ?? "" },
-                    set: { values[name] = $0 })) {
+                let options =
+                    field["options"]?.arrayValue?.compactMap { $0.stringValue ?? $0["value"]?.stringValue } ?? []
+                Picker(
+                    label,
+                    selection: Binding(
+                        get: { values[name] ?? options.first ?? "" },
+                        set: { values[name] = $0 })
+                ) {
                     ForEach(options, id: \.self) { Text($0).tag($0) }
-                }.pickerStyle(.menu).tint(p.primary)
+                }
+                .pickerStyle(.menu).tint(p.primary)
+                .accessibilityIdentifier("param-field-\(name)")
+                .accessibilityLabel(label)
+                .accessibilityValue(values[name] ?? options.first ?? "Not selected")
             case "checklist":
-                let options = field["options"]?.arrayValue?.compactMap { $0.stringValue ?? $0["value"]?.stringValue } ?? []
+                let options =
+                    field["options"]?.arrayValue?.compactMap { $0.stringValue ?? $0["value"]?.stringValue } ?? []
                 ForEach(options, id: \.self) { option in
-                    Toggle(option, isOn: Binding(
-                        get: { flags["\(name).\(option)"] ?? false },
-                        set: { flags["\(name).\(option)"] = $0 }))
-                        .font(.callout).tint(p.primary)
+                    Toggle(
+                        option,
+                        isOn: Binding(
+                            get: { flags["\(name).\(option)"] ?? false },
+                            set: { flags["\(name).\(option)"] = $0 })
+                    )
+                    .font(.callout).tint(p.primary)
+                    .accessibilityIdentifier("param-field-\(name)-\(option)")
+                    .accessibilityLabel(option)
+                    .accessibilityValue(
+                        flags["\(name).\(option)"] == true ? "Selected" : "Not selected")
                 }
             case "number":
-                TextField(field["help"]?.stringValue ?? "", text: Binding(
-                    get: { values[name] ?? (field["default"]?.stringValue
-                        ?? field["default"]?.numberValue.map { String($0) } ?? "") },
-                    set: { values[name] = $0 }))
-                    .textFieldStyle(.roundedBorder)
-                    #if os(iOS)
+                TextField(
+                    field["help"]?.stringValue ?? "",
+                    text: Binding(
+                        get: {
+                            values[name]
+                                ?? (field["default"]?.stringValue
+                                    ?? field["default"]?.numberValue.map { String($0) } ?? "")
+                        },
+                        set: { values[name] = $0 })
+                )
+                .textFieldStyle(.roundedBorder)
+                #if os(iOS)
                     .keyboardType(.decimalPad)
-                    #endif
+                #endif
+                .accessibilityIdentifier("param-field-\(name)")
+                .accessibilityLabel(label)
+            case "password":
+                SecureField(
+                    field["help"]?.stringValue ?? "",
+                    text: Binding(
+                        get: { values[name] ?? "" },
+                        set: { values[name] = $0 })
+                )
+                .textFieldStyle(.roundedBorder)
+                .accessibilityIdentifier("param-field-\(name)")
+                .accessibilityLabel(label)
+            case "textarea":
+                TextEditor(
+                    text: Binding(
+                        get: { values[name] ?? (field["default"]?.stringValue ?? "") },
+                        set: { values[name] = $0 })
+                )
+                .frame(minHeight: 80)
+                .accessibilityIdentifier("param-field-\(name)")
+                .accessibilityLabel(label)
             default:
-                TextField(field["help"]?.stringValue ?? "", text: Binding(
-                    get: { values[name] ?? (field["default"]?.stringValue ?? "") },
-                    set: { values[name] = $0 })).textFieldStyle(.roundedBorder)
+                TextField(
+                    field["help"]?.stringValue ?? "",
+                    text: Binding(
+                        get: { values[name] ?? (field["default"]?.stringValue ?? "") },
+                        set: { values[name] = $0 })
+                )
+                .textFieldStyle(.roundedBorder)
+                .accessibilityIdentifier("param-field-\(name)")
+                .accessibilityLabel(label)
             }
         }
     }
 
-    private func submit() {
+    @ViewBuilder
+    private func paramButton(
+        label: String,
+        action: String?,
+        variant: String,
+        payload: [String: JSONValue]
+    ) -> some View {
+        Button(label) {
+            submit(action: action, payload: payload)
+        }
+        .buttonStyle(AstralButtonStyle(palette: p, variant: variant))
+        .disabled(
+            action == "chrome_llm_save"
+                && (model.llmFirstLoginOperation?.isLoading ?? false)
+        )
+        .accessibilityIdentifier(
+            action == "chrome_llm_save" ? "llm-save-button" : "param-action-\(action ?? "message")"
+        )
+        .accessibilityLabel(label)
+        .accessibilityValue(
+            action == "chrome_llm_save" && (model.llmFirstLoginOperation?.isLoading ?? false)
+                ? "Submitting"
+                : "Ready")
+    }
+
+    private func submit(action: String?, payload: [String: JSONValue]) {
         var collected: [String: JSONValue] = [:]
         for field in fields {
             guard let name = field["name"]?.stringValue else { continue }
             let kind = field["kind"]?.stringValue ?? field["type"]?.stringValue ?? "text"
             if kind == "checklist" {
-                let options = field["options"]?.arrayValue?.compactMap { $0.stringValue ?? $0["value"]?.stringValue } ?? []
+                let options =
+                    field["options"]?.arrayValue?.compactMap { $0.stringValue ?? $0["value"]?.stringValue } ?? []
                 let chosen = options.filter { flags["\(name).\($0)"] == true }
                 collected[name] = .array(chosen.map { .string($0) })
-            } else if let flag = flags[name] { collected[name] = .bool(flag) }
-            else if let value = values[name] { collected[name] = .string(value) }
-            else if let def = field["default"] { collected[name] = def }
+            } else if let flag = flags[name] {
+                collected[name] = .bool(flag)
+            } else if let value = values[name] {
+                collected[name] = .string(value)
+            } else if let def = field["default"] {
+                collected[name] = def
+            }
         }
-        if let action = component.raw["submit_action"]?.stringValue {
-            model.emit(action, payload: ["fields": .object(collected)])
+        if let action {
+            _ = model.submitParamPicker(action: action, fields: collected, payload: payload)
         } else if let template = component.raw["submit_message_template"]?.stringValue {
             var message = template
             // Whole-form placeholder first (web parity: client.js substitutes
             // {__values_json__} with the full state) — the classify training
             // template relies on it; per-field {key} replacement can't fill it.
             if message.contains("{__values_json__}") {
-                let json = (try? JSONValue.object(collected).encoded())
+                let json =
+                    (try? JSONValue.object(collected).encoded())
                     .flatMap { String(data: $0, encoding: .utf8) } ?? "{}"
                 message = message.replacingOccurrences(of: "{__values_json__}", with: json)
             }
@@ -974,9 +1124,11 @@ struct CollapsibleComponent: View {
                     Image(systemName: expanded ? "chevron.down" : "chevron.right").foregroundStyle(p.muted)
                     // astralprims always serializes `title` (default "") — treat
                     // empty as missing like the web does, never a blank header.
-                    Text(InlineMarkdown.attributed(
-                        (component.title?.isEmpty == false) ? component.title! : "Details"))
-                        .font(.headline).foregroundStyle(p.text)
+                    Text(
+                        InlineMarkdown.attributed(
+                            (component.title?.isEmpty == false) ? component.title! : "Details")
+                    )
+                    .font(.headline).foregroundStyle(p.text)
                     Spacer(minLength: 0)
                 }
             }
@@ -1023,8 +1175,13 @@ struct ColorPickerComponent: View {
     private func choose(_ hex: String) {
         guard let key = component.raw["color_key"]?.stringValue else { return }
         theme.apply(spec: .object(["color_key": .string(key), "color_value": .string(hex)]))
-        model.emit("save_theme", payload: ["theme": .object([
-            "color_key": .string(key), "color_value": .string(hex)])])
+        model.emit(
+            "save_theme",
+            payload: [
+                "theme": .object([
+                    "color_key": .string(key), "color_value": .string(hex),
+                ])
+            ])
     }
 }
 
@@ -1113,9 +1270,11 @@ struct ChartComponent: View {
                                 let lower = min(max(min(fraction, baseline), 0), 1)
                                 let upper = min(max(max(fraction, baseline), 0), 1)
                                 RoundedRectangle(cornerRadius: 3)
-                                    .fill(series.count > 1
-                                          ? AnyShapeStyle(seriesColors[s % seriesColors.count])
-                                          : AnyShapeStyle(p.gradient))
+                                    .fill(
+                                        series.count > 1
+                                            ? AnyShapeStyle(seriesColors[s % seriesColors.count])
+                                            : AnyShapeStyle(p.gradient)
+                                    )
                                     .frame(height: max(geo.size.height * CGFloat(upper - lower), 1))
                                     .padding(.bottom, geo.size.height * CGFloat(lower))
                                     .frame(maxWidth: .infinity)
@@ -1140,17 +1299,19 @@ struct ChartComponent: View {
             ForEach(Array(series.enumerated()), id: \.offset) { s, trace in
                 Path { path in
                     for (i, v) in trace.values.enumerated() {
-                        let x = trace.values.count > 1
+                        let x =
+                            trace.values.count > 1
                             ? geo.size.width * CGFloat(i) / CGFloat(trace.values.count - 1) : 0
-                        let y = range > 0
+                        let y =
+                            range > 0
                             ? geo.size.height * (1 - CGFloat((v - minV) / range))
                             : geo.size.height / 2
-                        if i == 0 { path.move(to: CGPoint(x: x, y: y)) }
-                        else { path.addLine(to: CGPoint(x: x, y: y)) }
+                        if i == 0 { path.move(to: CGPoint(x: x, y: y)) } else { path.addLine(to: CGPoint(x: x, y: y)) }
                     }
                 }
-                .stroke(series.count > 1 ? seriesColors[s % seriesColors.count] : p.primary,
-                        style: StrokeStyle(lineWidth: 2, lineJoin: .round))
+                .stroke(
+                    series.count > 1 ? seriesColors[s % seriesColors.count] : p.primary,
+                    style: StrokeStyle(lineWidth: 2, lineJoin: .round))
             }
         }
     }
@@ -1167,8 +1328,9 @@ struct ChartComponent: View {
                 let sweep = Angle.degrees(360 * v / total)
                 var path = Path()
                 path.move(to: center)
-                path.addArc(center: center, radius: radius, startAngle: start,
-                            endAngle: start + sweep, clockwise: false)
+                path.addArc(
+                    center: center, radius: radius, startAngle: start,
+                    endAngle: start + sweep, clockwise: false)
                 context.fill(path, with: .color(colors[i % colors.count]))
                 start = start + sweep
             }

@@ -333,10 +333,24 @@ class WireTest {
 
     @Test
     fun encodes_chat_message() {
-        val o = Json.parseToJsonElement(Wire.encodeChatMessage("hello", "chatA")).jsonObject
+        val submission = "0cf52102-cffc-4f3a-9867-8dc744593a55"
+        val request = "b1876d0c-7401-47fa-8c78-8cdedba692a8"
+        val o =
+            Json.parseToJsonElement(
+                Wire.encodeChatMessage(
+                    message = "hello",
+                    chatId = "chatA",
+                    requestGeneration = request,
+                    submissionId = submission,
+                ),
+            ).jsonObject
         assertEquals("ui_event", o["type"]?.jsonPrimitive?.contentOrNull)
         assertEquals("chat_message", o["action"]?.jsonPrimitive?.contentOrNull)
         assertEquals("hello", o["payload"]!!.jsonObject["message"]?.jsonPrimitive?.contentOrNull)
         assertEquals("chatA", o["payload"]!!.jsonObject["chat_id"]?.jsonPrimitive?.contentOrNull)
+        assertEquals(submission, o["submission_id"]?.jsonPrimitive?.contentOrNull)
+        assertEquals(request, o["request_generation"]?.jsonPrimitive?.contentOrNull)
+        assertEquals(submission, o["payload"]!!.jsonObject["submission_id"]?.jsonPrimitive?.contentOrNull)
+        assertEquals(request, o["payload"]!!.jsonObject["request_generation"]?.jsonPrimitive?.contentOrNull)
     }
 }

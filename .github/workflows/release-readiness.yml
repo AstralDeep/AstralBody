@@ -1,0 +1,1339 @@
+# Spec 060 (T107/T119) — the same-candidate release-readiness evidence matrix.
+# One staging deployment (stage-deploy, left running) feeds eight platform
+# evidence producers that all test the SAME candidate SHA and the SAME staged
+# artifacts; the protected trusted builder attests reconstructed identities;
+# the protected-decision job re-validates everything with the PINNED policy
+# copy and emits the only trusted release decision. Candidate-facing jobs are
+# read-only; the sole OIDC/attest authority is the trusted-builder call.
+#
+# Required check (rulesets, T120): "release-readiness / protected-decision" —
+# produced when ci.yml's caller job id is `release-readiness`.
+name: release-readiness
+
+run-name: release-readiness ${{ inputs.request_id }}
+
+on:
+  workflow_call:
+    inputs:
+      candidate_sha:
+        description: Exact candidate commit every producer must test
+        required: true
+        type: string
+      base_sha:
+        description: Verified comparison base for the changed-code gate
+        required: true
+        type: string
+      request_id:
+        description: Unique request id embedded in the run-name
+        required: false
+        type: string
+        default: ""
+  workflow_dispatch:
+    inputs:
+      candidate_sha:
+        description: Exact candidate commit every producer must test
+        required: true
+        type: string
+      base_sha:
+        description: Verified comparison base for the changed-code gate
+        required: true
+        type: string
+      request_id:
+        description: Unique request id embedded in the run-name
+        required: false
+        type: string
+        default: ""
+
+permissions:
+  contents: read
+
+concurrency:
+  group: release-readiness-${{ inputs.candidate_sha }}
+  cancel-in-progress: false
+
+jobs:
+  # ── The staged image is the EXACT ci.yml build artifact pushed under an
+  #    immutable digest-qualified reference — never rebuilt. On dispatch the
+  #    candidate tag must already exist from a prior ci.yml call. This job is
+  #    the only packages-write authority in the pipeline. ──
+  publish-candidate:
+    runs-on: ubuntu-latest
+    timeout-minutes: 30
+    permissions:
+      contents: read
+      packages: write
+    outputs:
+      candidate_image: ${{ steps.digest.outputs.candidate_image }}
+    steps:
+      - uses: docker/login-action@c94ce9fb468520275223c153574b00df6fe4bcc9 # v3.7.0
+        with:
+          registry: ghcr.io
+          username: ${{ github.actor }}
+          password: ${{ secrets.GITHUB_TOKEN }}
+      - name: Push the shared-run image under the immutable candidate tag
+        if: github.event_name != 'workflow_dispatch'
+        uses: actions/download-artifact@d3f86a106a0bac45b974a628896c90dbdf5c8093 # v4.3.0
+        with:
+          name: image
+          path: /tmp
+      - name: Load, tag, and push the exact built image
+        if: github.event_name != 'workflow_dispatch'
+        run: |
+          set -euo pipefail
+          docker load -i /tmp/astraldeep.tar
+          REPO_LC=$(echo "${{ github.repository }}" | tr '[:upper:]' '[:lower:]')
+          docker tag astraldeep:ci "ghcr.io/$REPO_LC:candidate-${{ inputs.candidate_sha }}"
+          docker push "ghcr.io/$REPO_LC:candidate-${{ inputs.candidate_sha }}"
+      - name: Resolve the immutable candidate image digest
+        id: digest
+        run: |
+          set -euo pipefail
+          REPO_LC=$(echo "${{ github.repository }}" | tr '[:upper:]' '[:lower:]')
+          TAG="ghcr.io/$REPO_LC:candidate-${{ inputs.candidate_sha }}"
+          if ! DIGEST=$(docker buildx imagetools inspect "$TAG" --format '{{.Manifest.Digest}}'); then
+            echo "::error::no candidate image for ${{ inputs.candidate_sha }} — run the ci.yml build (which calls this workflow) for the candidate first" >&2
+            exit 1
+          fi
+          echo "candidate_image=ghcr.io/$REPO_LC@$DIGEST" >> "$GITHUB_OUTPUT"
+
+  # ── Qualifying staging deployment.
+  #    IMPORTANT: this job requires an EXTERNAL, persistent staging host that
+  #    stays reachable at ASTRAL_STAGING_ENDPOINT for the WHOLE matrix — the
+  #    Windows/Android/Apple/web producers each run on their own fresh runner
+  #    and must reach the same deployment. A GitHub-hosted runner's local stack
+  #    is torn down when this job ends, so it cannot host the shared endpoint by
+  #    itself. The originally intended host was a dedicated persistent staging
+  #    runner; the project has decided NOT to provision one ("won't set up"), so
+  #    this qualifying matrix stays INACTIVE (vars.RELEASE_READINESS_ACTIVE is
+  #    not 'true') and tasks T111/T125/T128 are deferred until an external
+  #    staging host + ASTRAL_STAGING_ENDPOINT exist. The local pre-push
+  #    diagnostic (scripts/prepare_release_evidence.py) needs none of this.
+  #    Env gate mirrors scripts/run_candidate_staging.py::_required_environment.
+  stage-deploy:
+    needs: publish-candidate
+    runs-on: ubuntu-latest
+    timeout-minutes: 45
+    env:
+      ASTRAL_STAGING_RUNNER_TRUSTED: "true"
+      ASTRAL_STAGING_ENDPOINT: ${{ secrets.ASTRAL_STAGING_ENDPOINT }}
+      ASTRAL_STAGING_PROBE_TOKEN: ${{ secrets.ASTRAL_STAGING_PROBE_TOKEN }}
+      STAGING_POSTGRES_IMAGE: ${{ secrets.STAGING_POSTGRES_IMAGE }}
+      STAGING_KEYCLOAK_IMAGE: ${{ secrets.STAGING_KEYCLOAK_IMAGE }}
+      STAGING_SCHEMA_BASELINE_IMAGE: ${{ secrets.STAGING_SCHEMA_BASELINE_IMAGE }}
+      STAGING_RUNTIME_ENV_FILE: ${{ secrets.STAGING_RUNTIME_ENV_FILE }}
+      STAGING_DB_USER: ${{ secrets.STAGING_DB_USER }}
+      STAGING_DB_PASSWORD: ${{ secrets.STAGING_DB_PASSWORD }}
+      STAGING_DB_NAME: ${{ secrets.STAGING_DB_NAME }}
+      STAGING_KEYCLOAK_DB_USER: ${{ secrets.STAGING_KEYCLOAK_DB_USER }}
+      STAGING_KEYCLOAK_DB_PASSWORD: ${{ secrets.STAGING_KEYCLOAK_DB_PASSWORD }}
+      STAGING_KEYCLOAK_DB_NAME: ${{ secrets.STAGING_KEYCLOAK_DB_NAME }}
+      STAGING_KEYCLOAK_ADMIN_USER: ${{ secrets.STAGING_KEYCLOAK_ADMIN_USER }}
+      STAGING_KEYCLOAK_ADMIN_PASSWORD: ${{ secrets.STAGING_KEYCLOAK_ADMIN_PASSWORD }}
+      STAGING_BIND_PORT: ${{ secrets.STAGING_BIND_PORT }}
+      RELEASE_TRUSTED_BUILDER_SHA: ${{ vars.RELEASE_TRUSTED_BUILDER_SHA }}
+      RELEASE_TRUSTED_BUILDER_IDENTITY: ${{ vars.RELEASE_TRUSTED_BUILDER_IDENTITY }}
+      ASTRAL_STAGE_OUTPUTS_ARTIFACT_NAME: stage-outputs-${{ inputs.request_id || github.run_id }}
+      ASTRAL_CANDIDATE_IMAGE: ${{ needs.publish-candidate.outputs.candidate_image }}
+      STAGING_ENVIRONMENT_ID: rr-${{ github.run_id }}-${{ github.run_attempt }}
+    outputs:
+      endpoint: ${{ steps.stage.outputs.endpoint }}
+      environment_id: ${{ steps.stage.outputs.environment_id }}
+      artifact_id: ${{ steps.upload.outputs.artifact-id }}
+    steps:
+      - name: Check out the exact candidate
+        uses: actions/checkout@93cb6efe18208431cddfb8368fd83d5badbf9bfd # v5.0.1
+        with:
+          ref: ${{ inputs.candidate_sha }}
+          persist-credentials: false
+      - name: Validate the tracked staging fixture set
+        run: python3 scripts/run_candidate_staging.py validate-fixtures --manifest backend/tests/fixtures/runtime_reliability_060/staging/fixture-manifest.json
+      - name: Deploy the candidate namespace and leave it running
+        id: stage
+        run: |
+          set -euo pipefail
+          mkdir -p build/060
+          python3 scripts/run_candidate_staging.py deploy \
+            --candidate-sha "${{ inputs.candidate_sha }}" \
+            --candidate-image "$ASTRAL_CANDIDATE_IMAGE" \
+            --fixture-manifest backend/tests/fixtures/runtime_reliability_060/staging/fixture-manifest.json \
+            --environment-id "$STAGING_ENVIRONMENT_ID" \
+            --outputs build/060/staging-outputs.json \
+            --trusted-manifest build/060/trusted-stage-deploy.json \
+            --leave-running
+          python3 - <<'PY' >> "$GITHUB_OUTPUT"
+          import json
+          outputs = json.load(open("build/060/staging-outputs.json", encoding="utf-8"))
+          print(f"endpoint={outputs['endpoint']}")
+          print(f"environment_id={outputs['environment_id']}")
+          PY
+      - name: Archive the trusted stage outputs
+        id: upload
+        uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4.6.2
+        with:
+          name: stage-outputs-${{ inputs.request_id || github.run_id }}
+          path: |
+            build/060/staging-outputs.json
+            build/060/trusted-stage-deploy.json
+          if-no-files-found: error
+          retention-days: 14
+
+  # ── Build-once Windows candidate (feature 068 reusable workflow); its exact
+  #    artifact id / executable digest feed the windows producer and, later,
+  #    the bridge signer. ──
+  windows-candidate:
+    needs: stage-deploy
+    uses: ./.github/workflows/build-windows-candidate.yml
+    with:
+      candidate_sha: ${{ inputs.candidate_sha }}
+    secrets:
+      staging_access_token: ${{ secrets.ASTRAL_WINDOWS_SMOKE_TOKEN }}
+
+  backend-producer:
+    needs: [stage-deploy, publish-candidate]
+    runs-on: ubuntu-latest
+    timeout-minutes: 60
+    services:
+      postgres:
+        image: postgres:17-alpine
+        env:
+          POSTGRES_USER: astral
+          POSTGRES_PASSWORD: astral_ci
+          POSTGRES_DB: astraldeep
+        ports:
+          - "5432:5432"
+        options: >-
+          --health-cmd "pg_isready -U astral -d astraldeep"
+          --health-interval 5s
+          --health-timeout 5s
+          --health-retries 10
+    env:
+      ASTRAL_STAGING_PROBE_TOKEN: ${{ secrets.ASTRAL_STAGING_PROBE_TOKEN }}
+    steps:
+      - name: Check out the exact candidate
+        uses: actions/checkout@93cb6efe18208431cddfb8368fd83d5badbf9bfd # v5.0.1
+        with:
+          ref: ${{ inputs.candidate_sha }}
+          persist-credentials: false
+      - uses: actions/download-artifact@d3f86a106a0bac45b974a628896c90dbdf5c8093 # v4.3.0
+        with:
+          name: stage-outputs-${{ inputs.request_id || github.run_id }}
+          path: build/060/stage
+      - name: Pull the exact staged candidate image by digest
+        run: docker pull "${{ needs.publish-candidate.outputs.candidate_image }}"
+      # The producer module re-executes the admission/scheduler/migration
+      # suites, so it runs INSIDE the candidate container against a real
+      # Postgres — the same recipe as the ci.yml test job.
+      - name: Produce backend release evidence inside the candidate container
+        run: |
+          set -euo pipefail
+          mkdir -p build/060/release-evidence
+          docker run --rm --network host \
+            -v "$PWD/backend:/app/backend" \
+            -v "$PWD/scripts:/app/scripts:ro" \
+            -v "$PWD/specs:/app/specs:ro" \
+            -v "$PWD/tooling/python-ci:/ci/python:ro" \
+            -v "$PWD/build:/app/build" \
+            -e ASTRAL_ENV=development \
+            -e DB_HOST=localhost \
+            -e DB_PORT=5432 \
+            -e DB_NAME=astraldeep \
+            -e DB_USER=astral \
+            -e DB_PASSWORD=astral_ci \
+            -e AGENT_API_KEY=ci-release-agent-key \
+            -e AUDIT_HMAC_SECRET=ci-release-hmac-secret \
+            -e LOOP_GUARD_ENFORCE=1 \
+            -e ASTRAL_STAGING_URL="${{ needs.stage-deploy.outputs.endpoint }}" \
+            -e ASTRAL_RELEASE_EVIDENCE_OUTPUT=/app/build/060/release-evidence/backend.json \
+            -e ASTRAL_RELEASE_STAGING_FILE=/app/build/060/stage/staging-outputs.json \
+            -e ASTRAL_RELEASE_CANDIDATE_SHA="${{ inputs.candidate_sha }}" \
+            -e ASTRAL_RELEASE_ID="release-060-${{ inputs.candidate_sha }}" \
+            -e ASTRAL_RELEASE_VERSION="${{ vars.RELEASE_CANDIDATE_VERSION || '0.4.0' }}" \
+            -e ASTRAL_STAGING_PROBE_TOKEN \
+            -e ASTRAL_RUNNER_ENVIRONMENT=github_hosted \
+            -e ASTRAL_RUNNER_IMAGE="${ImageOS:-ubuntu}-${ImageVersion:-hosted}" \
+            -e GITHUB_JOB -e GITHUB_RUN_ID -e GITHUB_RUN_ATTEMPT -e GITHUB_WORKFLOW \
+            -e RUNNER_ARCH -e RUNNER_NAME -e RUNNER_OS \
+            -w /app/backend --entrypoint bash \
+            "${{ needs.publish-candidate.outputs.candidate_image }}" \
+            -c "python -m pip install --require-hashes -r /ci/python/requirements.lock.txt && python -m pytest tests/perf/release_backend_060.py -q -m perf"
+      - uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4.6.2
+        with:
+          name: evidence-backend
+          path: build/060/release-evidence/
+          if-no-files-found: error
+          retention-days: 14
+
+  web-producer:
+    needs: stage-deploy
+    runs-on: ubuntu-latest
+    timeout-minutes: 45
+    env:
+      ASTRAL_RELEASE_USERNAME: ${{ secrets.ASTRAL_RELEASE_USERNAME }}
+      ASTRAL_RELEASE_PASSWORD: ${{ secrets.ASTRAL_RELEASE_PASSWORD }}
+      ASTRAL_RELEASE_ID: release-060-${{ inputs.candidate_sha }}
+      ASTRAL_RELEASE_VERSION: ${{ vars.RELEASE_CANDIDATE_VERSION || '0.4.0' }}
+      ASTRAL_RELEASE_LIFECYCLE_AGENT_ID: ${{ vars.RELEASE_LIFECYCLE_AGENT_ID || 'dice-roller-1' }}
+      ASTRAL_RELEASE_LIFECYCLE_STATES: ${{ vars.RELEASE_LIFECYCLE_STATES || 'starting,online' }}
+    steps:
+      - name: Check out the exact candidate
+        uses: actions/checkout@93cb6efe18208431cddfb8368fd83d5badbf9bfd # v5.0.1
+        with:
+          ref: ${{ inputs.candidate_sha }}
+          persist-credentials: false
+      - uses: actions/download-artifact@d3f86a106a0bac45b974a628896c90dbdf5c8093 # v4.3.0
+        with:
+          name: stage-outputs-${{ inputs.request_id || github.run_id }}
+          path: build/060/stage
+      - name: Run the browser release lane in the digest-pinned image
+        run: |
+          set -euo pipefail
+          PLAYWRIGHT_IMAGE="$(tr -d '\n' < tooling/web-ci/playwright-image.txt)"
+          test "${PLAYWRIGHT_IMAGE#*@sha256:}" != "$PLAYWRIGHT_IMAGE"
+          docker pull "$PLAYWRIGHT_IMAGE"
+          mkdir -p build/060/release-evidence/coverage
+          docker run --rm -v "$PWD:/work" -w /work/tooling/web-ci \
+            -e ASTRAL_PLAYWRIGHT_IMAGE="$PLAYWRIGHT_IMAGE" \
+            -e ASTRAL_RELEASE_USERNAME -e ASTRAL_RELEASE_PASSWORD \
+            -e ASTRAL_RELEASE_ID -e ASTRAL_RELEASE_VERSION \
+            -e ASTRAL_RELEASE_STAGING_FILE=/work/build/060/stage/staging-outputs.json \
+            -e ASTRAL_RELEASE_LIFECYCLE_AGENT_ID -e ASTRAL_RELEASE_LIFECYCLE_STATES \
+            -e ASTRAL_RUNNER_ENVIRONMENT=github_hosted \
+            -e GITHUB_JOB -e GITHUB_RUN_ID -e GITHUB_RUN_ATTEMPT -e GITHUB_WORKFLOW \
+            -e RUNNER_ARCH -e RUNNER_NAME -e RUNNER_OS \
+            "$PLAYWRIGHT_IMAGE" sh -lc \
+            'test "$(corepack npm --version)" = "11.16.0" && corepack npm ci --ignore-scripts && corepack npm run check:package-manager && corepack npm run browser:release -- --base-url "${{ needs.stage-deploy.outputs.endpoint }}" --candidate-sha "${{ inputs.candidate_sha }}" --output /work/build/060/release-evidence/web.json --coverage-output /work/build/060/release-evidence/coverage/web-v8.json --coverage-istanbul-output /work/build/060/release-evidence/coverage/web-istanbul.json'
+      - uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4.6.2
+        with:
+          name: evidence-web
+          path: build/060/release-evidence/
+          if-no-files-found: error
+          retention-days: 14
+
+  windows-producer:
+    needs: [stage-deploy, windows-candidate]
+    runs-on: windows-latest
+    timeout-minutes: 60
+    env:
+      ASTRAL_WINDOWS_EXE_SHA256: ${{ needs.windows-candidate.outputs.executable_sha256 }}
+      ASTRAL_WINDOWS_ARTIFACT_ID: ${{ needs.windows-candidate.outputs.artifact_id }}
+      ASTRAL_WINDOWS_SMOKE_TOKEN: ${{ secrets.ASTRAL_WINDOWS_SMOKE_TOKEN }}
+      ASTRAL_STAGING_URL: ${{ needs.stage-deploy.outputs.endpoint }}
+      ASTRAL_RELEASE_CANDIDATE_SHA: ${{ inputs.candidate_sha }}
+      ASTRAL_RELEASE_ID: release-060-${{ inputs.candidate_sha }}
+      ASTRAL_RELEASE_VERSION: ${{ vars.RELEASE_CANDIDATE_VERSION || '0.4.0' }}
+      ASTRAL_RELEASE_LIFECYCLE_AGENT_ID: ${{ vars.RELEASE_LIFECYCLE_AGENT_ID || 'dice-roller-1' }}
+      ASTRAL_RELEASE_LIFECYCLE_STATES: ${{ vars.RELEASE_LIFECYCLE_STATES || 'starting,online' }}
+      ASTRAL_RUNNER_ENVIRONMENT: github_hosted
+      PYTHONUTF8: "1"
+    steps:
+      - name: Check out the exact candidate
+        uses: actions/checkout@93cb6efe18208431cddfb8368fd83d5badbf9bfd # v5.0.1
+        with:
+          ref: ${{ inputs.candidate_sha }}
+          persist-credentials: false
+      - uses: actions/setup-python@ece7cb06caefa5fff74198d8649806c4678c61a1 # v6.3.0
+        with:
+          python-version: "3.11"
+          cache: pip
+          cache-dependency-path: |
+            windows-client/requirements-release.lock.txt
+            tooling/python-ci/requirements.lock.txt
+      - name: Install hash-locked client runtime requirements
+        run: python -m pip install --require-hashes -r windows-client/requirements-release.lock.txt
+      - name: Install hash-locked CI-only Python tooling
+        run: python -m pip install --require-hashes -r tooling/python-ci/requirements.lock.txt
+      - uses: actions/download-artifact@d3f86a106a0bac45b974a628896c90dbdf5c8093 # v4.3.0
+        with:
+          name: stage-outputs-${{ inputs.request_id || github.run_id }}
+          path: build/060/stage
+      - name: Download the build-once candidate by exact artifact id
+        uses: actions/download-artifact@d3f86a106a0bac45b974a628896c90dbdf5c8093 # v4.3.0
+        with:
+          artifact-ids: ${{ needs.windows-candidate.outputs.artifact_id }}
+          path: build/windows-candidate-download
+      - name: Re-hash the exact archived executable
+        shell: pwsh
+        run: |
+          $ErrorActionPreference = "Stop"
+          $exe = Get-ChildItem -Recurse build\windows-candidate-download -Filter AstralDeep.exe | Select-Object -First 1
+          if (-not $exe) { throw "downloaded candidate artifact lacks AstralDeep.exe" }
+          $digest = (Get-FileHash $exe.FullName -Algorithm SHA256).Hash.ToLowerInvariant()
+          if ($digest -ne $env:ASTRAL_WINDOWS_EXE_SHA256) {
+            throw "downloaded executable digest $digest differs from the recorded executable_sha256"
+          }
+          "ASTRAL_WINDOWS_EXE=$($exe.FullName)" >> $env:GITHUB_ENV
+          "ASTRAL_WINDOWS_CANDIDATE_DIR=$($exe.DirectoryName)" >> $env:GITHUB_ENV
+      - name: Produce Windows release evidence against staging
+        shell: pwsh
+        env:
+          ASTRAL_RELEASE_EVIDENCE_OUTPUT: ${{ github.workspace }}/build/060/release-evidence/windows.json
+          ASTRAL_RELEASE_STAGING_FILE: ${{ github.workspace }}/build/060/stage/staging-outputs.json
+        run: |
+          $ErrorActionPreference = "Stop"
+          $PSNativeCommandUseErrorActionPreference = $true
+          New-Item -ItemType Directory -Force build\060\release-evidence | Out-Null
+          python -m pytest windows-client/tests/release_evidence_060.py -q
+      - uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4.6.2
+        with:
+          name: evidence-windows
+          path: build/060/release-evidence/
+          if-no-files-found: error
+          retention-days: 14
+
+  android-producer:
+    needs: stage-deploy
+    runs-on: ubuntu-latest
+    timeout-minutes: 60
+    env:
+      ASTRAL_STAGING_URL: ${{ needs.stage-deploy.outputs.endpoint }}
+      ASTRAL_STAGING_ACCESS_TOKEN: ${{ secrets.ASTRAL_STAGING_ACCESS_TOKEN }}
+      ASTRAL_RELEASE_CANDIDATE_SHA: ${{ inputs.candidate_sha }}
+      ASTRAL_RELEASE_ID: release-060-${{ inputs.candidate_sha }}
+      ASTRAL_RELEASE_VERSION: ${{ vars.RELEASE_CANDIDATE_VERSION || '0.4.0' }}
+      ASTRAL_RELEASE_LIFECYCLE_AGENT_ID: ${{ vars.RELEASE_LIFECYCLE_AGENT_ID || 'dice-roller-1' }}
+      ASTRAL_RELEASE_LIFECYCLE_STATES: ${{ vars.RELEASE_LIFECYCLE_STATES || 'starting,online' }}
+    steps:
+      - name: Check out the exact candidate
+        uses: actions/checkout@93cb6efe18208431cddfb8368fd83d5badbf9bfd # v5.0.1
+        with:
+          ref: ${{ inputs.candidate_sha }}
+          persist-credentials: false
+      - uses: actions/setup-java@c1e323688fd81a25caa38c78aa6df2d33d3e20d9 # v4.8.0
+        with:
+          distribution: temurin
+          java-version: "17"
+      - name: Resolve Gradle version from the committed wrapper
+        id: wrapper
+        working-directory: android-client
+        run: |
+          v=$(sed -n 's/^distributionUrl=.*gradle-\([0-9][0-9.]*\)-\(bin\|all\)\.zip$/\1/p' gradle/wrapper/gradle-wrapper.properties)
+          test -n "$v" || { echo "could not parse Gradle version from wrapper properties" >&2; exit 1; }
+          echo "version=$v" >> "$GITHUB_OUTPUT"
+      - uses: gradle/actions/setup-gradle@ed408507eac070d1f99cc633dbcf757c94c7933a # v4.4.3
+        with:
+          gradle-version: ${{ steps.wrapper.outputs.version }}
+      - uses: actions/download-artifact@d3f86a106a0bac45b974a628896c90dbdf5c8093 # v4.3.0
+        with:
+          name: stage-outputs-${{ inputs.request_id || github.run_id }}
+          path: build/060/stage
+      # The toolchain canary is a reached fail-closed diagnostic; its JSON is
+      # handed to the instrumented producer as a base64 argument.
+      - name: Run the Android next-major readiness canary diagnostic
+        run: >-
+          python3 scripts/run_android_next_major_canary.py
+          android-client/gradle/next-major-canary.properties
+          --allow-unreleased
+          --verify-official-availability
+          --output build/060/android-next-major-readiness.json
+      - name: Encode staging and canary inputs for instrumentation
+        run: |
+          set -euo pipefail
+          echo "STAGING_B64=$(base64 -w0 build/060/stage/staging-outputs.json)" >> "$GITHUB_ENV"
+          echo "CANARY_B64=$(base64 -w0 build/060/android-next-major-readiness.json)" >> "$GITHUB_ENV"
+      - name: Enable KVM
+        run: |
+          echo 'KERNEL=="kvm", GROUP="kvm", MODE="0666", OPTIONS+="static_node=kvm"' | sudo tee /etc/udev/rules.d/99-kvm4all.rules
+          sudo udevadm control --reload-rules
+          sudo udevadm trigger --name-match=kvm
+      - name: Produce Android release evidence on the emulator
+        uses: reactivecircus/android-emulator-runner@a421e43855164a8197daf9d8d40fe71c6996bb0d # v2.38.0
+        with:
+          api-level: 34
+          arch: x86_64
+          working-directory: android-client
+          script: |
+            gradle :app:connectedDebugAndroidTest --no-daemon --stacktrace \
+              -Pandroid.testInstrumentationRunnerArguments.class=com.personalailabs.astraldeep.app.ReleaseEvidenceInstrumentedTest \
+              -Pandroid.testInstrumentationRunnerArguments.astralStagingUrl="$ASTRAL_STAGING_URL" \
+              -Pandroid.testInstrumentationRunnerArguments.astralAccessToken="$ASTRAL_STAGING_ACCESS_TOKEN" \
+              -Pandroid.testInstrumentationRunnerArguments.astralCandidateSha="$ASTRAL_RELEASE_CANDIDATE_SHA" \
+              -Pandroid.testInstrumentationRunnerArguments.astralReleaseId="$ASTRAL_RELEASE_ID" \
+              -Pandroid.testInstrumentationRunnerArguments.astralReleaseVersion="$ASTRAL_RELEASE_VERSION" \
+              -Pandroid.testInstrumentationRunnerArguments.astralLifecycleAgentId="$ASTRAL_RELEASE_LIFECYCLE_AGENT_ID" \
+              -Pandroid.testInstrumentationRunnerArguments.astralLifecycleStates="$ASTRAL_RELEASE_LIFECYCLE_STATES" \
+              -Pandroid.testInstrumentationRunnerArguments.astralStagingEnvironmentB64="$STAGING_B64" \
+              -Pandroid.testInstrumentationRunnerArguments.astralToolchainCanaryB64="$CANARY_B64" \
+              -Pandroid.testInstrumentationRunnerArguments.astralRunnerImage="${ImageOS:-ubuntu}-${ImageVersion:-hosted}" \
+              -Pandroid.testInstrumentationRunnerArguments.astralRunnerName="$RUNNER_NAME" \
+              -Pandroid.testInstrumentationRunnerArguments.astralRunnerArch="$RUNNER_ARCH" \
+              -Pandroid.testInstrumentationRunnerArguments.astralRunnerEnvironment=github_hosted \
+              -Pandroid.testInstrumentationRunnerArguments.astralWorkflowName="$GITHUB_WORKFLOW" \
+              -Pandroid.testInstrumentationRunnerArguments.astralRunId="$GITHUB_RUN_ID" \
+              -Pandroid.testInstrumentationRunnerArguments.astralRunAttempt="$GITHUB_RUN_ATTEMPT" \
+              -Pandroid.testInstrumentationRunnerArguments.astralJobId="$GITHUB_JOB"
+            device_path="$(adb logcat -d | sed -n 's/.*release_evidence_output=\(\S*\).*/\1/p' | tail -n 1)"
+            test -n "$device_path" || { echo "instrumented producer logged no release_evidence_output" >&2; exit 1; }
+            mkdir -p ../build/060/release-evidence
+            adb pull "$device_path" ../build/060/release-evidence-device
+            cp -R ../build/060/release-evidence-device/. ../build/060/release-evidence/
+            test -f ../build/060/release-evidence/android.json
+      # The report references the exact tested APK bytes as
+      # bundle://android/app-debug.apk — place them at that member path.
+      - name: Bundle the tested APK bytes and Kover coverage inputs
+        working-directory: android-client
+        run: |
+          set -euo pipefail
+          mkdir -p ../build/060/release-evidence/android ../build/060/release-evidence/coverage
+          cp app/build/outputs/apk/debug/app-debug.apk ../build/060/release-evidence/android/app-debug.apk
+          gradle :app:koverXmlReport :core:koverXmlReport --no-daemon --stacktrace
+          cp app/build/reports/kover/report.xml ../build/060/release-evidence/coverage/android-app.xml
+          cp core/build/reports/kover/report.xml ../build/060/release-evidence/coverage/android-core.xml
+      - uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4.6.2
+        with:
+          name: evidence-android
+          path: build/060/release-evidence/
+          if-no-files-found: error
+          retention-days: 14
+
+  macos-producer:
+    needs: stage-deploy
+    runs-on: macos-26
+    timeout-minutes: 90
+    env:
+      XCODE_VERSION: "26.6"
+      XCODE_BUILD: "17F113"
+      APP_PROJECT: apple-clients/AstralApp/AstralApp.xcodeproj
+      DESTINATION: platform=macOS
+      PRODUCER_PLATFORM: macos
+      PRODUCER_ONLY_TESTING: AstralAppUITests/ReleaseEvidenceUITests
+      PRODUCER_SCHEME: AstralApp
+    steps:
+      - name: Check out the exact candidate
+        uses: actions/checkout@93cb6efe18208431cddfb8368fd83d5badbf9bfd # v5.0.1
+        with:
+          ref: ${{ inputs.candidate_sha }}
+          persist-credentials: false
+      - name: Select exact Xcode
+        shell: bash
+        run: |
+          set -euo pipefail
+          selected=""
+          for candidate in /Applications/Xcode_26.6.app /Applications/Xcode_26.6*.app /Applications/Xcode.app; do
+            [[ -d "$candidate" ]] || continue
+            if [[ "$("$candidate/Contents/Developer/usr/bin/xcodebuild" -version | sed -n '1p')" == "Xcode ${XCODE_VERSION}" ]] && \
+               [[ "$("$candidate/Contents/Developer/usr/bin/xcodebuild" -version | sed -n '2p')" == "Build version ${XCODE_BUILD}" ]]; then
+              selected="$candidate"
+              break
+            fi
+          done
+          [[ -n "$selected" ]] || { echo "Xcode ${XCODE_VERSION} (${XCODE_BUILD}) is required" >&2; exit 1; }
+          sudo xcode-select --switch "$selected/Contents/Developer"
+      - uses: actions/download-artifact@d3f86a106a0bac45b974a628896c90dbdf5c8093 # v4.3.0
+        with:
+          name: stage-outputs-${{ inputs.request_id || github.run_id }}
+          path: build/060/stage
+      - name: Materialize the staging capability file from stage outputs
+        run: |
+          set -euo pipefail
+          python3 - <<'PY'
+          import json, pathlib
+          stage = json.load(open("build/060/stage/staging-outputs.json", encoding="utf-8"))
+          capability = {"macos_personal_agent_host": stage["macos_personal_agent_host"]}
+          out = pathlib.Path("build/060/stage/capability.json")
+          out.write_text(json.dumps(capability, indent=2, sort_keys=True) + "\n", encoding="utf-8")
+          PY
+      - name: Build for testing and digest the exact tested app
+        shell: bash
+        run: |
+          set -euo pipefail
+          xcodebuild -project "${APP_PROJECT}" -scheme "${PRODUCER_SCHEME}" \
+            -destination "${DESTINATION}" -configuration Debug \
+            CODE_SIGNING_ALLOWED=NO -derivedDataPath build/060/dd build-for-testing
+          APP="$(/usr/bin/find build/060/dd/Build/Products -maxdepth 2 -name '*.app' -print | sort | head -n 1)"
+          test -n "$APP"
+          mkdir -p "build/060/release-evidence/${PRODUCER_PLATFORM}"
+          /usr/bin/ditto -c -k --sequesterRsrc --keepParent "$APP" "build/060/release-evidence/${PRODUCER_PLATFORM}/AstralApp.app.zip"
+          DIGEST=$(shasum -a 256 "build/060/release-evidence/${PRODUCER_PLATFORM}/AstralApp.app.zip" | cut -d ' ' -f 1)
+          echo "ARTIFACT_SHA256=$DIGEST" >> "$GITHUB_ENV"
+      - name: Produce macOS release evidence against staging
+        shell: bash
+        env:
+          TEST_RUNNER_ASTRAL_STAGING_URL: ${{ needs.stage-deploy.outputs.endpoint }}
+          TEST_RUNNER_ASTRAL_RELEASE_PLATFORM: macos
+          TEST_RUNNER_ASTRAL_RELEASE_CANDIDATE_SHA: ${{ inputs.candidate_sha }}
+          TEST_RUNNER_ASTRAL_RELEASE_ID: release-060-${{ inputs.candidate_sha }}
+          TEST_RUNNER_ASTRAL_RELEASE_VERSION: ${{ vars.RELEASE_CANDIDATE_VERSION || '0.4.0' }}
+          TEST_RUNNER_ASTRAL_RELEASE_USERNAME: ${{ secrets.ASTRAL_RELEASE_USERNAME }}
+          TEST_RUNNER_ASTRAL_RELEASE_PASSWORD: ${{ secrets.ASTRAL_RELEASE_PASSWORD }}
+          TEST_RUNNER_ASTRAL_RELEASE_LIFECYCLE_AGENT_ID: ${{ vars.RELEASE_LIFECYCLE_AGENT_ID || 'dice-roller-1' }}
+          TEST_RUNNER_ASTRAL_RUNNER_ENVIRONMENT: github_hosted
+          TEST_RUNNER_ASTRAL_RUNNER_IMAGE: macos-26
+        run: |
+          set -euo pipefail
+          mkdir -p build/060/release-evidence/coverage
+          export TEST_RUNNER_ASTRAL_RELEASE_EVIDENCE_OUTPUT="$PWD/build/060/release-evidence/macos.json"
+          export TEST_RUNNER_ASTRAL_RELEASE_STAGING_FILE="$PWD/build/060/stage/staging-outputs.json"
+          export TEST_RUNNER_ASTRAL_STAGING_CAPABILITY_FILE="$PWD/build/060/stage/capability.json"
+          export TEST_RUNNER_ASTRAL_RELEASE_ARTIFACT_REFERENCE="bundle://${PRODUCER_PLATFORM}/AstralApp.app.zip"
+          export TEST_RUNNER_ASTRAL_RELEASE_ARTIFACT_SHA256="$ARTIFACT_SHA256"
+          export TEST_RUNNER_GITHUB_JOB="$GITHUB_JOB" TEST_RUNNER_GITHUB_RUN_ID="$GITHUB_RUN_ID"
+          export TEST_RUNNER_GITHUB_RUN_ATTEMPT="$GITHUB_RUN_ATTEMPT" TEST_RUNNER_GITHUB_WORKFLOW="$GITHUB_WORKFLOW"
+          export TEST_RUNNER_RUNNER_OS="$RUNNER_OS" TEST_RUNNER_RUNNER_ARCH="$RUNNER_ARCH" TEST_RUNNER_RUNNER_NAME="$RUNNER_NAME"
+          result="build/060/coverage-result.xcresult"
+          rm -rf "$result"
+          set +e
+          xcodebuild -project "${APP_PROJECT}" -scheme "${PRODUCER_SCHEME}" \
+            -destination "${DESTINATION}" -configuration Debug \
+            CODE_SIGNING_ALLOWED=NO -enableCodeCoverage YES \
+            -derivedDataPath build/060/dd \
+            -resultBundlePath "$result" \
+            -only-testing:${PRODUCER_ONLY_TESTING} \
+            test-without-building
+          status=$?
+          set -e
+          if [[ -d "$result" ]]; then
+            xcrun xccov view --archive --json "$result" > "build/060/release-evidence/coverage/apple-${PRODUCER_PLATFORM}-xccov.json"
+          fi
+          exit "$status"
+      - uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4.6.2
+        with:
+          name: evidence-macos
+          path: build/060/release-evidence/
+          if-no-files-found: error
+          retention-days: 14
+
+  ios-producer:
+    needs: stage-deploy
+    runs-on: macos-26
+    timeout-minutes: 90
+    env:
+      XCODE_VERSION: "26.6"
+      XCODE_BUILD: "17F113"
+      IOS_RUNTIME: "26.5"
+      APP_PROJECT: apple-clients/AstralApp/AstralApp.xcodeproj
+      DESTINATION: platform=iOS Simulator,name=iPhone 17 Pro,OS=26.5
+      PRODUCER_PLATFORM: ios
+      PRODUCER_ONLY_TESTING: AstralAppUITests/ReleaseEvidenceUITests
+      PRODUCER_SCHEME: AstralApp
+    steps:
+      - name: Check out the exact candidate
+        uses: actions/checkout@93cb6efe18208431cddfb8368fd83d5badbf9bfd # v5.0.1
+        with:
+          ref: ${{ inputs.candidate_sha }}
+          persist-credentials: false
+      - name: Select exact Xcode
+        shell: bash
+        run: |
+          set -euo pipefail
+          selected=""
+          for candidate in /Applications/Xcode_26.6.app /Applications/Xcode_26.6*.app /Applications/Xcode.app; do
+            [[ -d "$candidate" ]] || continue
+            if [[ "$("$candidate/Contents/Developer/usr/bin/xcodebuild" -version | sed -n '1p')" == "Xcode ${XCODE_VERSION}" ]] && \
+               [[ "$("$candidate/Contents/Developer/usr/bin/xcodebuild" -version | sed -n '2p')" == "Build version ${XCODE_BUILD}" ]]; then
+              selected="$candidate"
+              break
+            fi
+          done
+          [[ -n "$selected" ]] || { echo "Xcode ${XCODE_VERSION} (${XCODE_BUILD}) is required" >&2; exit 1; }
+          sudo xcode-select --switch "$selected/Contents/Developer"
+      - name: Require the supported iOS runtime
+        shell: bash
+        run: |
+          set -euo pipefail
+          xcrun simctl list runtimes available | grep -F "iOS ${IOS_RUNTIME}"
+          xcrun simctl list devicetypes | grep -F "iPhone 17 Pro"
+      - uses: actions/download-artifact@d3f86a106a0bac45b974a628896c90dbdf5c8093 # v4.3.0
+        with:
+          name: stage-outputs-${{ inputs.request_id || github.run_id }}
+          path: build/060/stage
+      - name: Build for testing and digest the exact tested app
+        shell: bash
+        run: |
+          set -euo pipefail
+          xcodebuild -project "${APP_PROJECT}" -scheme "${PRODUCER_SCHEME}" \
+            -destination "${DESTINATION}" -configuration Debug \
+            CODE_SIGNING_ALLOWED=NO -derivedDataPath build/060/dd build-for-testing
+          APP="$(/usr/bin/find build/060/dd/Build/Products -maxdepth 2 -name '*.app' -print | sort | head -n 1)"
+          test -n "$APP"
+          mkdir -p "build/060/release-evidence/${PRODUCER_PLATFORM}"
+          /usr/bin/ditto -c -k --sequesterRsrc --keepParent "$APP" "build/060/release-evidence/${PRODUCER_PLATFORM}/AstralApp.app.zip"
+          DIGEST=$(shasum -a 256 "build/060/release-evidence/${PRODUCER_PLATFORM}/AstralApp.app.zip" | cut -d ' ' -f 1)
+          echo "ARTIFACT_SHA256=$DIGEST" >> "$GITHUB_ENV"
+      - name: Produce iOS release evidence against staging
+        shell: bash
+        env:
+          TEST_RUNNER_ASTRAL_STAGING_URL: ${{ needs.stage-deploy.outputs.endpoint }}
+          TEST_RUNNER_ASTRAL_RELEASE_PLATFORM: ios
+          TEST_RUNNER_ASTRAL_RELEASE_CANDIDATE_SHA: ${{ inputs.candidate_sha }}
+          TEST_RUNNER_ASTRAL_RELEASE_ID: release-060-${{ inputs.candidate_sha }}
+          TEST_RUNNER_ASTRAL_RELEASE_VERSION: ${{ vars.RELEASE_CANDIDATE_VERSION || '0.4.0' }}
+          TEST_RUNNER_ASTRAL_RELEASE_USERNAME: ${{ secrets.ASTRAL_RELEASE_USERNAME }}
+          TEST_RUNNER_ASTRAL_RELEASE_PASSWORD: ${{ secrets.ASTRAL_RELEASE_PASSWORD }}
+          TEST_RUNNER_ASTRAL_RELEASE_LIFECYCLE_AGENT_ID: ${{ vars.RELEASE_LIFECYCLE_AGENT_ID || 'dice-roller-1' }}
+          TEST_RUNNER_ASTRAL_RUNNER_ENVIRONMENT: github_hosted
+          TEST_RUNNER_ASTRAL_RUNNER_IMAGE: macos-26
+        run: |
+          set -euo pipefail
+          mkdir -p build/060/release-evidence/coverage
+          export TEST_RUNNER_ASTRAL_RELEASE_EVIDENCE_OUTPUT="$PWD/build/060/release-evidence/ios.json"
+          export TEST_RUNNER_ASTRAL_RELEASE_STAGING_FILE="$PWD/build/060/stage/staging-outputs.json"
+          export TEST_RUNNER_ASTRAL_RELEASE_ARTIFACT_REFERENCE="bundle://${PRODUCER_PLATFORM}/AstralApp.app.zip"
+          export TEST_RUNNER_ASTRAL_RELEASE_ARTIFACT_SHA256="$ARTIFACT_SHA256"
+          export TEST_RUNNER_GITHUB_JOB="$GITHUB_JOB" TEST_RUNNER_GITHUB_RUN_ID="$GITHUB_RUN_ID"
+          export TEST_RUNNER_GITHUB_RUN_ATTEMPT="$GITHUB_RUN_ATTEMPT" TEST_RUNNER_GITHUB_WORKFLOW="$GITHUB_WORKFLOW"
+          export TEST_RUNNER_RUNNER_OS="$RUNNER_OS" TEST_RUNNER_RUNNER_ARCH="$RUNNER_ARCH" TEST_RUNNER_RUNNER_NAME="$RUNNER_NAME"
+          result="build/060/coverage-result.xcresult"
+          rm -rf "$result"
+          set +e
+          xcodebuild -project "${APP_PROJECT}" -scheme "${PRODUCER_SCHEME}" \
+            -destination "${DESTINATION}" -configuration Debug \
+            CODE_SIGNING_ALLOWED=NO -enableCodeCoverage YES \
+            -derivedDataPath build/060/dd \
+            -resultBundlePath "$result" \
+            -only-testing:${PRODUCER_ONLY_TESTING} \
+            test-without-building
+          status=$?
+          set -e
+          if [[ -d "$result" ]]; then
+            xcrun xccov view --archive --json "$result" > "build/060/release-evidence/coverage/apple-${PRODUCER_PLATFORM}-xccov.json"
+          fi
+          exit "$status"
+      - uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4.6.2
+        with:
+          name: evidence-ios
+          path: build/060/release-evidence/
+          if-no-files-found: error
+          retention-days: 14
+
+  watchos-producer:
+    needs: stage-deploy
+    runs-on: macos-26
+    timeout-minutes: 90
+    env:
+      XCODE_VERSION: "26.6"
+      XCODE_BUILD: "17F113"
+      WATCHOS_RUNTIME: "26.5"
+      APP_PROJECT: apple-clients/AstralApp/AstralApp.xcodeproj
+      PRODUCER_PLATFORM: watchos
+    steps:
+      - name: Check out the exact candidate
+        uses: actions/checkout@93cb6efe18208431cddfb8368fd83d5badbf9bfd # v5.0.1
+        with:
+          ref: ${{ inputs.candidate_sha }}
+          persist-credentials: false
+      - name: Select exact Xcode
+        shell: bash
+        run: |
+          set -euo pipefail
+          selected=""
+          for candidate in /Applications/Xcode_26.6.app /Applications/Xcode_26.6*.app /Applications/Xcode.app; do
+            [[ -d "$candidate" ]] || continue
+            if [[ "$("$candidate/Contents/Developer/usr/bin/xcodebuild" -version | sed -n '1p')" == "Xcode ${XCODE_VERSION}" ]] && \
+               [[ "$("$candidate/Contents/Developer/usr/bin/xcodebuild" -version | sed -n '2p')" == "Build version ${XCODE_BUILD}" ]]; then
+              selected="$candidate"
+              break
+            fi
+          done
+          [[ -n "$selected" ]] || { echo "Xcode ${XCODE_VERSION} (${XCODE_BUILD}) is required" >&2; exit 1; }
+          sudo xcode-select --switch "$selected/Contents/Developer"
+      - name: Require and boot the supported watchOS simulator
+        shell: bash
+        run: |
+          set -euo pipefail
+          xcrun simctl list runtimes available | grep -F "watchOS ${WATCHOS_RUNTIME}"
+          xcrun simctl list devicetypes | grep -F "Apple Watch Series 11 (46mm)"
+          if ! xcrun simctl list devices available | grep -F "Apple Watch Series 11 (46mm)"; then
+            runtime_id="$(xcrun simctl list runtimes available | sed -n "s/.*watchOS ${WATCHOS_RUNTIME}.*- \(com\.apple\.CoreSimulator\.SimRuntime\.[A-Za-z0-9.-]*\)$/\1/p" | head -n 1)"
+            [[ -n "$runtime_id" ]] || { echo "watchOS ${WATCHOS_RUNTIME} runtime identifier not found" >&2; exit 1; }
+            xcrun simctl create "Apple Watch Series 11 (46mm)" "Apple Watch Series 11 (46mm)" "$runtime_id"
+          fi
+          xcrun simctl boot "Apple Watch Series 11 (46mm)" || true
+          xcrun simctl bootstatus "Apple Watch Series 11 (46mm)" -b
+      - uses: actions/download-artifact@d3f86a106a0bac45b974a628896c90dbdf5c8093 # v4.3.0
+        with:
+          name: stage-outputs-${{ inputs.request_id || github.run_id }}
+          path: build/060/stage
+      - name: Build for testing and digest the exact tested watch app
+        shell: bash
+        run: |
+          set -euo pipefail
+          xcodebuild -project "${APP_PROJECT}" -scheme AstralWatch \
+            -destination "platform=watchOS Simulator,name=Apple Watch Series 11 (46mm),OS=${WATCHOS_RUNTIME}" \
+            -configuration Debug CODE_SIGNING_ALLOWED=NO \
+            -derivedDataPath build/060/dd build-for-testing
+          APP="$(/usr/bin/find build/060/dd/Build/Products -maxdepth 2 -name '*.app' -print | sort | head -n 1)"
+          test -n "$APP"
+          mkdir -p "build/060/release-evidence/${PRODUCER_PLATFORM}"
+          /usr/bin/ditto -c -k --sequesterRsrc --keepParent "$APP" "build/060/release-evidence/${PRODUCER_PLATFORM}/AstralWatch.app.zip"
+          DIGEST=$(shasum -a 256 "build/060/release-evidence/${PRODUCER_PLATFORM}/AstralWatch.app.zip" | cut -d ' ' -f 1)
+          echo "ARTIFACT_SHA256=$DIGEST" >> "$GITHUB_ENV"
+      - name: Produce watchOS release evidence against staging
+        shell: bash
+        env:
+          TEST_RUNNER_ASTRAL_STAGING_URL: ${{ needs.stage-deploy.outputs.endpoint }}
+          TEST_RUNNER_ASTRAL_RELEASE_PLATFORM: watchos
+          TEST_RUNNER_ASTRAL_RELEASE_CANDIDATE_SHA: ${{ inputs.candidate_sha }}
+          TEST_RUNNER_ASTRAL_RELEASE_ID: release-060-${{ inputs.candidate_sha }}
+          TEST_RUNNER_ASTRAL_RELEASE_VERSION: ${{ vars.RELEASE_CANDIDATE_VERSION || '0.4.0' }}
+          TEST_RUNNER_ASTRAL_RELEASE_LIFECYCLE_AGENT_ID: ${{ vars.RELEASE_LIFECYCLE_AGENT_ID || 'dice-roller-1' }}
+          TEST_RUNNER_ASTRAL_RUNNER_ENVIRONMENT: github_hosted
+          TEST_RUNNER_ASTRAL_RUNNER_IMAGE: macos-26
+        run: |
+          set -euo pipefail
+          mkdir -p build/060/release-evidence/coverage
+          export TEST_RUNNER_ASTRAL_RELEASE_EVIDENCE_OUTPUT="$PWD/build/060/release-evidence/watchos.json"
+          export TEST_RUNNER_ASTRAL_RELEASE_STAGING_FILE="$PWD/build/060/stage/staging-outputs.json"
+          export TEST_RUNNER_ASTRAL_RELEASE_ARTIFACT_REFERENCE="bundle://${PRODUCER_PLATFORM}/AstralWatch.app.zip"
+          export TEST_RUNNER_ASTRAL_RELEASE_ARTIFACT_SHA256="$ARTIFACT_SHA256"
+          export TEST_RUNNER_GITHUB_JOB="$GITHUB_JOB" TEST_RUNNER_GITHUB_RUN_ID="$GITHUB_RUN_ID"
+          export TEST_RUNNER_GITHUB_RUN_ATTEMPT="$GITHUB_RUN_ATTEMPT" TEST_RUNNER_GITHUB_WORKFLOW="$GITHUB_WORKFLOW"
+          export TEST_RUNNER_RUNNER_OS="$RUNNER_OS" TEST_RUNNER_RUNNER_ARCH="$RUNNER_ARCH" TEST_RUNNER_RUNNER_NAME="$RUNNER_NAME"
+          result="build/060/coverage-result.xcresult"
+          rm -rf "$result"
+          set +e
+          xcodebuild -project "${APP_PROJECT}" -scheme AstralWatch \
+            -destination "platform=watchOS Simulator,name=Apple Watch Series 11 (46mm),OS=${WATCHOS_RUNTIME}" \
+            -configuration Debug CODE_SIGNING_ALLOWED=NO -enableCodeCoverage YES \
+            -derivedDataPath build/060/dd \
+            -resultBundlePath "$result" \
+            -only-testing:AstralWatchTests/ReleaseEvidenceTests \
+            test-without-building
+          status=$?
+          set -e
+          if [[ -d "$result" ]]; then
+            xcrun xccov view --archive --json "$result" > "build/060/release-evidence/coverage/apple-${PRODUCER_PLATFORM}-xccov.json"
+          fi
+          exit "$status"
+      - uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4.6.2
+        with:
+          name: evidence-watchos
+          path: build/060/release-evidence/
+          if-no-files-found: error
+          retention-days: 14
+
+  docs-producer:
+    needs: stage-deploy
+    runs-on: ubuntu-latest
+    timeout-minutes: 15
+    steps:
+      - name: Check out the exact candidate
+        uses: actions/checkout@93cb6efe18208431cddfb8368fd83d5badbf9bfd # v5.0.1
+        with:
+          ref: ${{ inputs.candidate_sha }}
+          persist-credentials: false
+      - uses: actions/setup-python@ece7cb06caefa5fff74198d8649806c4678c61a1 # v6.3.0
+        with:
+          python-version: "3.11"
+      - name: Validate tracked documentation links
+        run: |
+          set -euo pipefail
+          mkdir -p build/060/release-evidence/docs-raw
+          python3 scripts/check_doc_links.py | tee build/060/release-evidence/docs-raw/documentation_links.txt
+      # The apply-config operator contract is checked by inspection (grep),
+      # never by executing compose against the producer runner.
+      - name: Verify the Makefile apply-config contract by inspection
+        run: |
+          set -euo pipefail
+          grep -F -- '--force-recreate' Makefile | tee build/060/release-evidence/docs-raw/apply_config_reload.txt
+          grep -F 'docker compose up' Makefile >> build/060/release-evidence/docs-raw/apply_config_reload.txt
+          grep -F 'FF_BYO_AGENTS' Makefile >> build/060/release-evidence/docs-raw/apply_config_reload.txt
+      - name: Write and schema-validate the docs evidence report
+        env:
+          CANDIDATE_SHA: ${{ inputs.candidate_sha }}
+          ASTRAL_RELEASE_ID: release-060-${{ inputs.candidate_sha }}
+          ASTRAL_RELEASE_VERSION: ${{ vars.RELEASE_CANDIDATE_VERSION || '0.4.0' }}
+        run: |
+          set -euo pipefail
+          mkdir -p build/060/release-evidence/docs
+          git archive --format=tar "$CANDIDATE_SHA" > build/060/release-evidence/docs/source-tree.tar
+          python3 - <<'PY'
+          import hashlib, importlib.util, json, os, pathlib, sys, uuid
+          from datetime import datetime, timezone
+
+          spec = importlib.util.spec_from_file_location(
+              "astral_release_evidence_validator", "scripts/validate_release_evidence.py"
+          )
+          validator = importlib.util.module_from_spec(spec)
+          sys.modules[spec.name] = validator
+          spec.loader.exec_module(validator)
+
+          root = pathlib.Path("build/060/release-evidence")
+          candidate = os.environ["CANDIDATE_SHA"]
+          now = datetime.now(timezone.utc).isoformat().replace("+00:00", "Z")
+
+          def raw_reference(name: str) -> dict:
+              path = root / "docs-raw" / f"{name}.txt"
+              return {
+                  "name": f"{name}.txt",
+                  "kind": "log",
+                  "immutable_reference": f"bundle://docs-raw/{name}.txt",
+                  "sha256": hashlib.sha256(path.read_bytes()).hexdigest(),
+              }
+
+          def check(check_id: str) -> dict:
+              return {
+                  "id": check_id,
+                  "outcome": "passed",
+                  "duration_ms": 1,
+                  "detail_code": None,
+                  "applicability_reason": None,
+                  "measurements": [],
+                  "evidence_artifacts": [raw_reference(check_id)],
+              }
+
+          tree = root / "docs" / "source-tree.tar"
+          report = {
+              "document_type": "platform_evidence",
+              "schema_version": 1,
+              "evidence_id": str(uuid.uuid5(
+                  uuid.NAMESPACE_URL, f"astraldeep:060:docs-evidence:{candidate}"
+              )),
+              "candidate_sha": candidate,
+              "release_id": os.environ["ASTRAL_RELEASE_ID"],
+              "release_version": os.environ["ASTRAL_RELEASE_VERSION"],
+              "platform": "docs",
+              "target_description": "Tracked documentation and operator contract of the exact candidate source tree",
+              "artifact": {
+                  "name": "astraldeep-source-tree",
+                  "kind": "source_tree",
+                  "immutable_reference": "bundle://docs/source-tree.tar",
+                  "sha256": hashlib.sha256(tree.read_bytes()).hexdigest(),
+                  "build_identity": f"source-tree:{candidate}",
+              },
+              "staging_environment": None,
+              "runner": {
+                  "os": "linux",
+                  "architecture": "x86_64",
+                  "runner_image": f"{os.environ.get('ImageOS', 'ubuntu')}-{os.environ.get('ImageVersion', 'hosted')}",
+                  "runner_name": os.environ.get("RUNNER_NAME", "unknown"),
+                  "runner_environment": "github_hosted",
+              },
+              "workflow": {
+                  "name": os.environ.get("GITHUB_WORKFLOW", "release-readiness"),
+                  "run_id": os.environ.get("GITHUB_RUN_ID", "1"),
+                  "run_attempt": int(os.environ.get("GITHUB_RUN_ATTEMPT", "1")),
+                  "job_id": os.environ.get("GITHUB_JOB", "docs-producer"),
+              },
+              "started_at": now,
+              "completed_at": now,
+              "outcome": "passed",
+              "unavailable_reason": None,
+              "unavailability_observation": None,
+              "checks": [check("documentation_links"), check("apply_config_reload")],
+          }
+          schema = validator.load_json_document(
+              "specs/060-runtime-reliability-hardening/contracts/release-evidence.schema.json"
+          )
+          validator.validate_document(report, schema)
+          out = root / "docs.json"
+          out.write_text(json.dumps(report, indent=2, sort_keys=True) + "\n", encoding="utf-8")
+          print(f"wrote schema-valid {out}")
+          PY
+          test -f build/060/release-evidence/docs.json
+      - uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4.6.2
+        with:
+          name: evidence-docs
+          path: build/060/release-evidence/
+          if-no-files-found: error
+          retention-days: 14
+
+  # ── The ONLY OIDC/attest authority in the pipeline: the protected reusable
+  #    trusted builder reconstructs producer identities from the shared run's
+  #    API state and attests one manifest per producer plus the stage manifest. ──
+  trusted-builder:
+    needs:
+      - stage-deploy
+      - backend-producer
+      - web-producer
+      - windows-producer
+      - android-producer
+      - macos-producer
+      - ios-producer
+      - watchos-producer
+      - docs-producer
+    if: always()
+    permissions:
+      id-token: write
+      attestations: write
+      actions: read
+      contents: read
+    uses: ./.github/workflows/release-trusted-builder.yml
+    with:
+      candidate_sha: ${{ inputs.candidate_sha }}
+      request_id: ${{ inputs.request_id }}
+
+  # ── The protected decision. Job id is EXACTLY protected-decision — the
+  #    validator refuses --decision-output from any other job, and the ruleset
+  #    required check name is "release-readiness / protected-decision". ──
+  protected-decision:
+    needs:
+      - trusted-builder
+      - backend-producer
+      - web-producer
+      - windows-producer
+      - android-producer
+      - macos-producer
+      - ios-producer
+      - watchos-producer
+      - docs-producer
+    runs-on: ubuntu-latest
+    timeout-minutes: 60
+    permissions:
+      contents: read
+      actions: read
+    env:
+      GH_TOKEN: ${{ github.token }}
+      RELEASE_TRUSTED_BUILDER_SHA: ${{ vars.RELEASE_TRUSTED_BUILDER_SHA }}
+      RELEASE_TRUSTED_BUILDER_IDENTITY: ${{ vars.RELEASE_TRUSTED_BUILDER_IDENTITY }}
+      CANDIDATE_SHA: ${{ inputs.candidate_sha }}
+      BASE_SHA: ${{ inputs.base_sha }}
+    steps:
+      - name: Check out the exact candidate with full history
+        uses: actions/checkout@93cb6efe18208431cddfb8368fd83d5badbf9bfd # v5.0.1
+        with:
+          ref: ${{ inputs.candidate_sha }}
+          fetch-depth: 0
+          persist-credentials: false
+      - name: Download every run input by exact artifact id
+        shell: bash
+        run: |
+          set -euo pipefail
+          mkdir -p build/060/api build/060/release-evidence build/060/coverage-inputs \
+            build/060/trust/approvals build/060/trust/resolutions \
+            build/060/attestation-verification build/060/protected-decision \
+            build/060/exception-ledger
+          # The backend/tooling coverage artifacts come from the SHARED ci.yml
+          # run; producers may still be uploading, so poll briefly.
+          for _ in $(seq 1 40); do
+            gh api "repos/$GITHUB_REPOSITORY/actions/runs/$GITHUB_RUN_ID/artifacts?per_page=100" \
+              --paginate --jq '.artifacts[]' > build/060/api/artifacts.ndjson
+            if grep -q '"name":"coverage"' build/060/api/artifacts.ndjson \
+               && grep -q '"name":"tooling-python-coverage"' build/060/api/artifacts.ndjson; then
+              break
+            fi
+            [ "${GITHUB_EVENT_NAME:-}" = "workflow_dispatch" ] && break
+            sleep 30
+          done
+          python3 - <<'PY'
+          import json, os, pathlib, subprocess
+
+          lines = pathlib.Path("build/060/api/artifacts.ndjson").read_text(encoding="utf-8")
+          artifacts = [json.loads(line) for line in lines.splitlines() if line.strip()]
+          repo = os.environ["GITHUB_REPOSITORY"]
+
+          def wanted(name: str) -> str | None:
+              if name.startswith("evidence-"):
+                  return "build/060/release-evidence"
+              if name.startswith("stage-outputs-"):
+                  return "build/060/stage"
+              if name == "trusted-manifests":
+                  return "build/060/trust"
+              if name.startswith("windows-unsigned-"):
+                  return "build/060/coverage-inputs/windows"
+              if name == "coverage":
+                  return "build/060/coverage-inputs/backend"
+              if name == "tooling-python-coverage":
+                  return "build/060/coverage-inputs/tooling"
+              return None
+
+          listing = {}
+          for artifact in artifacts:
+              target = wanted(artifact["name"])
+              if target is None:
+                  continue
+              listing.setdefault(artifact["name"], []).append(artifact["id"])
+              zip_path = pathlib.Path(f"build/060/api/{artifact['id']}.zip")
+              with zip_path.open("wb") as handle:
+                  subprocess.run(
+                      ["gh", "api", f"repos/{repo}/actions/artifacts/{artifact['id']}/zip"],
+                      check=True, stdout=handle,
+                  )
+              pathlib.Path(target).mkdir(parents=True, exist_ok=True)
+              subprocess.run(["unzip", "-o", "-q", str(zip_path), "-d", target], check=True)
+          for name in ("trusted-manifests", "coverage", "tooling-python-coverage"):
+              if name not in listing:
+                  raise SystemExit(f"required run artifact is missing: {name}")
+              if len(listing[name]) != 1:
+                  raise SystemExit(f"ambiguous run artifact name: {name}")
+          pathlib.Path("build/060/api/selected.json").write_text(
+              json.dumps(listing, indent=2, sort_keys=True), encoding="utf-8"
+          )
+          PY
+      # The protected debt-ledger branch is created at the T120 bootstrap; an
+      # absent ref FAILS this job by design — never tolerated silently.
+      - name: Read the protected debt-ledger head (before evaluation)
+        shell: bash
+        run: |
+          set -euo pipefail
+          LEDGER_SHA="$(gh api "repos/$GITHUB_REPOSITORY/git/ref/heads/release-evidence-debt" --jq .object.sha)"
+          test "${#LEDGER_SHA}" -eq 40
+          echo "LEDGER_SHA=$LEDGER_SHA" >> "$GITHUB_ENV"
+          git fetch --no-tags origin "+refs/heads/release-evidence-debt:refs/remotes/origin/release-evidence-debt"
+          git archive "$LEDGER_SHA" | tar -x -C build/060/exception-ledger
+      - name: Verify every trusted-manifest attestation
+        shell: bash
+        run: |
+          set -euo pipefail
+          for manifest in build/060/trust/producers/*.json build/060/trust/stage/*.json; do
+            receipt="build/060/api/attest-$(basename "$manifest").json"
+            gh attestation verify "$manifest" \
+              --repo "$GITHUB_REPOSITORY" \
+              --signer-workflow "$GITHUB_REPOSITORY/.github/workflows/release-trusted-builder.yml" \
+              --format json > "$receipt"
+          done
+          python3 - <<'PY'
+          import hashlib, json, os, pathlib
+          from datetime import datetime, timezone
+
+          repo = os.environ["GITHUB_REPOSITORY"]
+          run_id = os.environ["GITHUB_RUN_ID"]
+          run_attempt = int(os.environ["GITHUB_RUN_ATTEMPT"])
+          listing = json.loads(pathlib.Path("build/060/api/selected.json").read_text(encoding="utf-8"))
+          trust_artifact_id = str(listing["trusted-manifests"][0])
+          now = datetime.now(timezone.utc).isoformat().replace("+00:00", "Z")
+          for directory, role in (("producers", "producer"), ("stage", "stage_deploy")):
+              for path in sorted(pathlib.Path(f"build/060/trust/{directory}").glob("*.json")):
+                  document = json.loads(path.read_text(encoding="utf-8"))
+                  manifest_id = document["manifest_id"]
+                  member = f"{directory}/{path.name}"
+                  receipt = {
+                      "manifest_id": manifest_id,
+                      "role": role,
+                      "verification_outcome": "passed",
+                      "repository": repo,
+                      "candidate_sha": os.environ["CANDIDATE_SHA"],
+                      "protected_builder_sha": os.environ["RELEASE_TRUSTED_BUILDER_SHA"],
+                      "protected_builder_identity": os.environ["RELEASE_TRUSTED_BUILDER_IDENTITY"],
+                      "manifest_artifact": {
+                          "kind": "github_actions_artifact_member",
+                          "repository": repo,
+                          "run_id": run_id,
+                          "run_attempt": run_attempt,
+                          "artifact_id": trust_artifact_id,
+                          "artifact_name": "trusted-manifests",
+                          "member": member,
+                          "immutable_reference": (
+                              f"gh://{repo}/runs/{run_id}/attempts/{run_attempt}"
+                              f"/artifacts/{trust_artifact_id}/members/{member}"
+                          ),
+                          "sha256": hashlib.sha256(path.read_bytes()).hexdigest(),
+                      },
+                      "verified_at": now,
+                  }
+                  out = pathlib.Path(f"build/060/attestation-verification/{manifest_id}.json")
+                  out.write_text(json.dumps(receipt, indent=2, sort_keys=True) + "\n", encoding="utf-8")
+          PY
+      # The policy copy comes from the PINNED protected commit — never the
+      # candidate checkout. Its tar digest is the --protected-policy-sha.
+      - name: Extract the pinned protected policy
+        shell: bash
+        run: |
+          set -euo pipefail
+          test -n "$RELEASE_TRUSTED_BUILDER_SHA"
+          git archive "$RELEASE_TRUSTED_BUILDER_SHA" \
+            scripts/validate_release_evidence.py \
+            scripts/check_changed_coverage.py \
+            specs/060-runtime-reliability-hardening/contracts/windows-deployment-profile.schema.json \
+            specs/060-runtime-reliability-hardening/contracts/release-evidence.schema.json \
+            specs/060-runtime-reliability-hardening/contracts/release-trust.schema.json \
+            > build/060/protected-policy.tar
+          PROTECTED_POLICY_SHA256="$(sha256sum build/060/protected-policy.tar | cut -d ' ' -f 1)"
+          test "${#PROTECTED_POLICY_SHA256}" -eq 64
+          echo "PROTECTED_POLICY_SHA256=$PROTECTED_POLICY_SHA256" >> "$GITHUB_ENV"
+          mkdir -p build/060/protected-policy
+          tar -xf build/060/protected-policy.tar -C build/060/protected-policy
+          test -z "$(find build/060/protected-policy -type l -print -quit)"
+      - name: Run the protected changed-code coverage gate
+        shell: bash
+        run: |
+          set -euo pipefail
+          sed -i 's|/app/backend|backend|g' build/060/coverage-inputs/backend/coverage.xml
+          WINDOWS_COVERAGE="$(find build/060/coverage-inputs/windows -name windows-coverage.xml -print -quit)"
+          test -n "$WINDOWS_COVERAGE"
+          python3 build/060/protected-policy/scripts/check_changed_coverage.py \
+            --repo . \
+            --event-name "${GITHUB_EVENT_NAME/workflow_dispatch/manual}" \
+            --base-sha "$BASE_SHA" \
+            --candidate-sha "$CANDIDATE_SHA" \
+            --backend-python build/060/coverage-inputs/backend/coverage.xml \
+            --tooling-python build/060/coverage-inputs/tooling/tooling-python.xml \
+            --windows-python "$WINDOWS_COVERAGE" \
+            --javascript build/060/release-evidence/coverage/web-istanbul.json \
+            --android-app build/060/release-evidence/coverage/android-app.xml \
+            --android-core build/060/release-evidence/coverage/android-core.xml \
+            --apple build/060/release-evidence/coverage/apple-ios-xccov.json \
+            --apple build/060/release-evidence/coverage/apple-macos-xccov.json \
+            --apple build/060/release-evidence/coverage/apple-watchos-xccov.json \
+            --fail-under 90 \
+            --output build/060/release-evidence/coverage/changed-code.json
+          COVERAGE_PERCENT="$(python3 -c "import json; print(json.load(open('build/060/release-evidence/coverage/changed-code.json'))['combined']['percent'])")"
+          echo "COVERAGE_PERCENT=$COVERAGE_PERCENT" >> "$GITHUB_ENV"
+      # Mechanical canonical assembly (content-derived UUIDv5); every claim in
+      # the assembled set is still re-validated by the protected policy below.
+      - name: Assemble the canonical evidence set
+        shell: bash
+        run: |
+          set -euo pipefail
+          python3 - <<'PY'
+          import importlib.util, json, pathlib, sys
+          from datetime import datetime, timezone
+
+          spec = importlib.util.spec_from_file_location(
+              "astral_prepare_release_evidence", "scripts/prepare_release_evidence.py"
+          )
+          prepare = importlib.util.module_from_spec(spec)
+          sys.modules[spec.name] = prepare
+          spec.loader.exec_module(prepare)
+
+          root = pathlib.Path("build/060/release-evidence")
+          reports, requests = [], []
+          for path in sorted(root.glob("*.json")):
+              document = json.loads(path.read_text(encoding="utf-8"))
+              if document.get("document_type") == "platform_evidence":
+                  reports.append(document)
+              elif document.get("document_type") == "evidence_exception_request":
+                  requests.append(document)
+              elif document.get("document_type") == "release_evidence_set":
+                  raise SystemExit("producers must not upload a pre-assembled evidence set")
+          evidence_set = prepare.assemble_evidence_set(
+              reports, requests, now=datetime.now(timezone.utc)
+          )
+          out = root / "release-evidence-set.json"
+          out.write_text(
+              json.dumps(evidence_set, indent=2, sort_keys=True) + "\n", encoding="utf-8"
+          )
+          print(f"assembled {out} for {len(reports)} platform reports")
+          PY
+      - name: Upload the canonical evidence bundle
+        id: evidence-upload
+        uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4.6.2
+        with:
+          name: release-evidence
+          path: build/060/release-evidence/
+          if-no-files-found: error
+          retention-days: 90
+      - name: Bind the exact evidence-set and coverage artifact members
+        shell: bash
+        env:
+          EVIDENCE_ARTIFACT_ID: ${{ steps.evidence-upload.outputs.artifact-id }}
+        run: |
+          set -euo pipefail
+          python3 - <<'PY'
+          import hashlib, json, os, pathlib
+
+          repo = os.environ["GITHUB_REPOSITORY"]
+          run_id = os.environ["GITHUB_RUN_ID"]
+          run_attempt = int(os.environ["GITHUB_RUN_ATTEMPT"])
+          artifact_id = os.environ["EVIDENCE_ARTIFACT_ID"]
+
+          def member_record(member: str, path: str) -> dict:
+              digest = hashlib.sha256(pathlib.Path(path).read_bytes()).hexdigest()
+              return {
+                  "kind": "github_actions_artifact_member",
+                  "repository": repo,
+                  "run_id": run_id,
+                  "run_attempt": run_attempt,
+                  "artifact_id": str(artifact_id),
+                  "artifact_name": "release-evidence",
+                  "member": member,
+                  "immutable_reference": (
+                      f"gh://{repo}/runs/{run_id}/attempts/{run_attempt}"
+                      f"/artifacts/{artifact_id}/members/{member}"
+                  ),
+                  "sha256": digest,
+              }
+
+          out = pathlib.Path("build/060/protected-decision")
+          out.joinpath("evidence-set-artifact.json").write_text(
+              json.dumps(member_record(
+                  "release-evidence-set.json",
+                  "build/060/release-evidence/release-evidence-set.json",
+              ), indent=2, sort_keys=True) + "\n", encoding="utf-8",
+          )
+          out.joinpath("coverage-artifact.json").write_text(
+              json.dumps(member_record(
+                  "coverage/changed-code.json",
+                  "build/060/release-evidence/coverage/changed-code.json",
+              ), indent=2, sort_keys=True) + "\n", encoding="utf-8",
+          )
+          PY
+      - name: Run the protected release-evidence policy and emit the decision
+        shell: bash
+        run: |
+          set -euo pipefail
+          VALID_UNTIL="$(date -u -d '+20 hours' +%Y-%m-%dT%H:%M:%SZ)"
+          python3 build/060/protected-policy/scripts/validate_release_evidence.py \
+            --schema build/060/protected-policy/specs/060-runtime-reliability-hardening/contracts/release-evidence.schema.json \
+            --trust-schema build/060/protected-policy/specs/060-runtime-reliability-hardening/contracts/release-trust.schema.json \
+            --deployment-profile-schema build/060/protected-policy/specs/060-runtime-reliability-hardening/contracts/windows-deployment-profile.schema.json \
+            --evidence-dir build/060/release-evidence \
+            --base-sha "$BASE_SHA" \
+            --candidate-sha "$CANDIDATE_SHA" \
+            --repository "$GITHUB_REPOSITORY" \
+            --trusted-provenance-dir build/060/trust/producers \
+            --trusted-stage-deploy build/060/trust/stage/trusted-stage-deploy.json \
+            --trusted-approvals-dir build/060/trust/approvals \
+            --trusted-debt-resolutions-dir build/060/trust/resolutions \
+            --attestation-verification-dir build/060/attestation-verification \
+            --protected-builder-sha "$RELEASE_TRUSTED_BUILDER_SHA" \
+            --protected-builder-identity "$RELEASE_TRUSTED_BUILDER_IDENTITY" \
+            --protected-policy-sha "$PROTECTED_POLICY_SHA256" \
+            --exception-ledger-repository "$GITHUB_REPOSITORY" \
+            --exception-ledger-ref refs/heads/release-evidence-debt \
+            --exception-ledger-commit "$LEDGER_SHA" \
+            --exception-ledger-checkout build/060/exception-ledger \
+            --coverage-percent "$COVERAGE_PERCENT" \
+            --coverage-artifact build/060/protected-decision/coverage-artifact.json \
+            --evidence-set-artifact build/060/protected-decision/evidence-set-artifact.json \
+            --protected-workflow-ref "$GITHUB_REPOSITORY/.github/workflows/release-trusted-builder.yml@$RELEASE_TRUSTED_BUILDER_SHA" \
+            --valid-until "$VALID_UNTIL" \
+            --decision-output build/060/protected-decision/trusted-release-decision.json
+      - name: Re-read the protected debt-ledger head (after evaluation)
+        shell: bash
+        run: |
+          set -euo pipefail
+          AFTER="$(gh api "repos/$GITHUB_REPOSITORY/git/ref/heads/release-evidence-debt" --jq .object.sha)"
+          test "$AFTER" = "$LEDGER_SHA" || { echo "::error::debt ledger moved during evaluation" >&2; exit 1; }
+      - name: Upload the trusted release decision
+        uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4.6.2
+        with:
+          name: trusted-release-decision
+          path: build/060/protected-decision/
+          if-no-files-found: error
+          retention-days: 90
+
+  stage-cleanup:
+    if: always()
+    needs:
+      - stage-deploy
+      - windows-candidate
+      - backend-producer
+      - web-producer
+      - windows-producer
+      - android-producer
+      - macos-producer
+      - ios-producer
+      - watchos-producer
+      - docs-producer
+      - trusted-builder
+      - protected-decision
+    # Runs against the same external staging host as stage-deploy (see the
+    # note there); a dedicated persistent staging runner is not provisioned.
+    runs-on: ubuntu-latest
+    timeout-minutes: 20
+    env:
+      ASTRAL_STAGING_RUNNER_TRUSTED: "true"
+      ASTRAL_STAGING_ENDPOINT: ${{ secrets.ASTRAL_STAGING_ENDPOINT }}
+      ASTRAL_STAGING_PROBE_TOKEN: ${{ secrets.ASTRAL_STAGING_PROBE_TOKEN }}
+      STAGING_POSTGRES_IMAGE: ${{ secrets.STAGING_POSTGRES_IMAGE }}
+      STAGING_KEYCLOAK_IMAGE: ${{ secrets.STAGING_KEYCLOAK_IMAGE }}
+      STAGING_SCHEMA_BASELINE_IMAGE: ${{ secrets.STAGING_SCHEMA_BASELINE_IMAGE }}
+      STAGING_RUNTIME_ENV_FILE: ${{ secrets.STAGING_RUNTIME_ENV_FILE }}
+      STAGING_DB_USER: ${{ secrets.STAGING_DB_USER }}
+      STAGING_DB_PASSWORD: ${{ secrets.STAGING_DB_PASSWORD }}
+      STAGING_DB_NAME: ${{ secrets.STAGING_DB_NAME }}
+      STAGING_KEYCLOAK_DB_USER: ${{ secrets.STAGING_KEYCLOAK_DB_USER }}
+      STAGING_KEYCLOAK_DB_PASSWORD: ${{ secrets.STAGING_KEYCLOAK_DB_PASSWORD }}
+      STAGING_KEYCLOAK_DB_NAME: ${{ secrets.STAGING_KEYCLOAK_DB_NAME }}
+      STAGING_KEYCLOAK_ADMIN_USER: ${{ secrets.STAGING_KEYCLOAK_ADMIN_USER }}
+      STAGING_KEYCLOAK_ADMIN_PASSWORD: ${{ secrets.STAGING_KEYCLOAK_ADMIN_PASSWORD }}
+      STAGING_BIND_PORT: ${{ secrets.STAGING_BIND_PORT }}
+      STAGING_ENVIRONMENT_ID: rr-${{ github.run_id }}-${{ github.run_attempt }}
+    steps:
+      - name: Check out the exact candidate
+        uses: actions/checkout@93cb6efe18208431cddfb8368fd83d5badbf9bfd # v5.0.1
+        with:
+          ref: ${{ inputs.candidate_sha }}
+          persist-credentials: false
+      - name: Tear down the staging namespace
+        run: python3 scripts/run_candidate_staging.py cleanup --environment-id "$STAGING_ENVIRONMENT_ID"

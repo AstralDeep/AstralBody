@@ -77,16 +77,28 @@ public enum AstralPrims {
         // Swift keeps the per-type inits tight and chains these instead).
 
         @discardableResult
-        public func css(_ css: [String: String]) -> Self { self.css = css; return self }
+        public func css(_ css: [String: String]) -> Self {
+            self.css = css
+            return self
+        }
 
         @discardableResult
-        public func id(_ id: String) -> Self { self.id = id; return self }
+        public func id(_ id: String) -> Self {
+            self.id = id
+            return self
+        }
 
         @discardableResult
-        public func className(_ name: String) -> Self { self.className = name; return self }
+        public func className(_ name: String) -> Self {
+            self.className = name
+            return self
+        }
 
         @discardableResult
-        public func tooltip(_ tip: String) -> Self { self.tooltip = tip; return self }
+        public func tooltip(_ tip: String) -> Self {
+            self.tooltip = tip
+            return self
+        }
 
         @discardableResult
         public func attributes(_ attrs: [String: JSONValue]) -> Self {
@@ -132,7 +144,7 @@ public enum AstralPrims {
     /// A layout container holding child primitives.
     public final class Container: Primitive {
         public var children: [Primitive]
-        public var direction: String?   // e.g. "row" | "column"
+        public var direction: String?  // e.g. "row" | "column"
 
         public init(children: [Primitive] = [], direction: String? = nil) {
             self.children = children
@@ -148,8 +160,10 @@ public enum AstralPrims {
         }
 
         override public var ownFields: [(String, JSONValue?)] {
-            [("children", .array(children.map { $0.toDict() })),
-             ("direction", direction.map(JSONValue.string))]
+            [
+                ("children", .array(children.map { $0.toDict() })),
+                ("direction", direction.map(JSONValue.string)),
+            ]
         }
     }
 
@@ -173,9 +187,11 @@ public enum AstralPrims {
         }
 
         override public var ownFields: [(String, JSONValue?)] {
-            [("title", .string(title)),
-             ("content", .array(content.map { $0.toDict() })),
-             ("variant", .string(variant))]
+            [
+                ("title", .string(title)),
+                ("content", .array(content.map { $0.toDict() })),
+                ("variant", .string(variant)),
+            ]
         }
     }
 
@@ -199,9 +215,11 @@ public enum AstralPrims {
         }
 
         override public var ownFields: [(String, JSONValue?)] {
-            [("columns", .number(Double(columns))),
-             ("children", .array(children.map { $0.toDict() })),
-             ("gap", .number(Double(gap)))]
+            [
+                ("columns", .number(Double(columns))),
+                ("children", .array(children.map { $0.toDict() })),
+                ("gap", .number(Double(gap))),
+            ]
         }
     }
 
@@ -242,8 +260,10 @@ public enum AstralPrims {
         }
 
         override public var ownFields: [(String, JSONValue?)] {
-            [("tabs", .array(tabs.map { $0.toDict() })),
-             ("variant", .string(variant))]
+            [
+                ("tabs", .array(tabs.map { $0.toDict() })),
+                ("variant", .string(variant)),
+            ]
         }
     }
 
@@ -261,9 +281,11 @@ public enum AstralPrims {
         }
 
         override public var ownFields: [(String, JSONValue?)] {
-            [("title", .string(title)),
-             ("content", .array(content.map { $0.toDict() })),
-             ("default_open", .bool(defaultOpen))]
+            [
+                ("title", .string(title)),
+                ("content", .array(content.map { $0.toDict() })),
+                ("default_open", .bool(defaultOpen)),
+            ]
         }
     }
 
@@ -306,8 +328,10 @@ public enum AstralPrims {
         public var payload: [String: JSONValue]
         public var variant: String
 
-        public init(label: String = "", action: String = "",
-                    payload: [String: JSONValue] = [:], variant: String = "primary") {
+        public init(
+            label: String = "", action: String = "",
+            payload: [String: JSONValue] = [:], variant: String = "primary"
+        ) {
             self.label = label
             self.action = action
             self.payload = payload
@@ -316,10 +340,12 @@ public enum AstralPrims {
         }
 
         override public var ownFields: [(String, JSONValue?)] {
-            [("label", .string(label)),
-             ("action", .string(action)),
-             ("payload", .object(payload)),
-             ("variant", .string(variant))]
+            [
+                ("label", .string(label)),
+                ("action", .string(action)),
+                ("payload", .object(payload)),
+                ("variant", .string(variant)),
+            ]
         }
     }
 
@@ -337,9 +363,11 @@ public enum AstralPrims {
         }
 
         override public var ownFields: [(String, JSONValue?)] {
-            [("placeholder", .string(placeholder)),
-             ("name", .string(name)),
-             ("value", .string(value))]
+            [
+                ("placeholder", .string(placeholder)),
+                ("name", .string(name)),
+                ("value", .string(value)),
+            ]
         }
     }
 
@@ -354,9 +382,11 @@ public enum AstralPrims {
         public var submitLabel: String
         public var submitMessageTemplate: String
 
-        public init(title: String = "", description: String = "",
-                    fields: [JSONValue] = [], submitLabel: String = "Submit",
-                    submitMessageTemplate: String = "") {
+        public init(
+            title: String = "", description: String = "",
+            fields: [JSONValue] = [], submitLabel: String = "Submit",
+            submitMessageTemplate: String = ""
+        ) {
             self.title = title
             self.description = description
             self.fields = fields
@@ -366,11 +396,13 @@ public enum AstralPrims {
         }
 
         override public var ownFields: [(String, JSONValue?)] {
-            [("title", .string(title)),
-             ("description", .string(description)),
-             ("fields", .array(fields)),
-             ("submit_label", .string(submitLabel)),
-             ("submit_message_template", .string(submitMessageTemplate))]
+            [
+                ("title", .string(title)),
+                ("description", .string(description)),
+                ("fields", .array(fields)),
+                ("submit_label", .string(submitLabel)),
+                ("submit_message_template", .string(submitMessageTemplate)),
+            ]
         }
     }
 
@@ -381,8 +413,10 @@ public enum AstralPrims {
         public var width: String?
         public var height: String?
 
-        public init(url: String = "", alt: String? = nil,
-                    width: String? = nil, height: String? = nil) {
+        public init(
+            url: String = "", alt: String? = nil,
+            width: String? = nil, height: String? = nil
+        ) {
             self.url = url
             self.alt = alt
             self.width = width
@@ -391,10 +425,12 @@ public enum AstralPrims {
         }
 
         override public var ownFields: [(String, JSONValue?)] {
-            [("url", .string(url)),
-             ("alt", alt.map(JSONValue.string)),
-             ("width", width.map(JSONValue.string)),
-             ("height", height.map(JSONValue.string))]
+            [
+                ("url", .string(url)),
+                ("alt", alt.map(JSONValue.string)),
+                ("width", width.map(JSONValue.string)),
+                ("height", height.map(JSONValue.string)),
+            ]
         }
     }
 
@@ -404,8 +440,10 @@ public enum AstralPrims {
         public var language: String
         public var showLineNumbers: Bool
 
-        public init(code: String = "", language: String = "text",
-                    showLineNumbers: Bool = false) {
+        public init(
+            code: String = "", language: String = "text",
+            showLineNumbers: Bool = false
+        ) {
             self.code = code
             self.language = language
             self.showLineNumbers = showLineNumbers
@@ -413,9 +451,11 @@ public enum AstralPrims {
         }
 
         override public var ownFields: [(String, JSONValue?)] {
-            [("code", .string(code)),
-             ("language", .string(language)),
-             ("show_line_numbers", .bool(showLineNumbers))]
+            [
+                ("code", .string(code)),
+                ("language", .string(language)),
+                ("show_line_numbers", .bool(showLineNumbers)),
+            ]
         }
     }
 
@@ -433,9 +473,11 @@ public enum AstralPrims {
         }
 
         override public var ownFields: [(String, JSONValue?)] {
-            [("message", .string(message)),
-             ("variant", .string(variant)),
-             ("title", title.map(JSONValue.string))]
+            [
+                ("message", .string(message)),
+                ("variant", .string(variant)),
+                ("title", title.map(JSONValue.string)),
+            ]
         }
     }
 
@@ -446,8 +488,10 @@ public enum AstralPrims {
         public var variant: String
         public var showPercentage: Bool
 
-        public init(value: Double = 0.0, label: String? = nil,
-                    variant: String = "default", showPercentage: Bool = true) {
+        public init(
+            value: Double = 0.0, label: String? = nil,
+            variant: String = "default", showPercentage: Bool = true
+        ) {
             self.value = value
             self.label = label
             self.variant = variant
@@ -456,10 +500,12 @@ public enum AstralPrims {
         }
 
         override public var ownFields: [(String, JSONValue?)] {
-            [("value", .number(value)),
-             ("label", label.map(JSONValue.string)),
-             ("variant", .string(variant)),
-             ("show_percentage", .bool(showPercentage))]
+            [
+                ("value", .number(value)),
+                ("label", label.map(JSONValue.string)),
+                ("variant", .string(variant)),
+                ("show_percentage", .bool(showPercentage)),
+            ]
         }
     }
 
@@ -472,9 +518,11 @@ public enum AstralPrims {
         public var variant: String
         public var progress: Double?
 
-        public init(title: String = "", value: String = "", subtitle: String? = nil,
-                    icon: String? = nil, variant: String = "default",
-                    progress: Double? = nil) {
+        public init(
+            title: String = "", value: String = "", subtitle: String? = nil,
+            icon: String? = nil, variant: String = "default",
+            progress: Double? = nil
+        ) {
             self.title = title
             self.value = value
             self.subtitle = subtitle
@@ -485,12 +533,14 @@ public enum AstralPrims {
         }
 
         override public var ownFields: [(String, JSONValue?)] {
-            [("title", .string(title)),
-             ("value", .string(value)),
-             ("subtitle", subtitle.map(JSONValue.string)),
-             ("icon", icon.map(JSONValue.string)),
-             ("variant", .string(variant)),
-             ("progress", progress.map(JSONValue.number))]
+            [
+                ("title", .string(title)),
+                ("value", .string(value)),
+                ("subtitle", subtitle.map(JSONValue.string)),
+                ("icon", icon.map(JSONValue.string)),
+                ("variant", .string(variant)),
+                ("progress", progress.map(JSONValue.number)),
+            ]
         }
     }
 
@@ -501,8 +551,10 @@ public enum AstralPrims {
         public var ordered: Bool
         public var variant: String
 
-        public init(items: [JSONValue] = [], ordered: Bool = false,
-                    variant: String = "default") {
+        public init(
+            items: [JSONValue] = [], ordered: Bool = false,
+            variant: String = "default"
+        ) {
             self.items = items
             self.ordered = ordered
             self.variant = variant
@@ -510,15 +562,19 @@ public enum AstralPrims {
         }
 
         /// Convenience for the common all-strings case.
-        public convenience init(items: [String], ordered: Bool = false,
-                                variant: String = "default") {
+        public convenience init(
+            items: [String], ordered: Bool = false,
+            variant: String = "default"
+        ) {
             self.init(items: items.map(JSONValue.string), ordered: ordered, variant: variant)
         }
 
         override public var ownFields: [(String, JSONValue?)] {
-            [("items", .array(items)),
-             ("ordered", .bool(ordered)),
-             ("variant", .string(variant))]
+            [
+                ("items", .array(items)),
+                ("ordered", .bool(ordered)),
+                ("variant", .string(variant)),
+            ]
         }
     }
 
@@ -535,11 +591,13 @@ public enum AstralPrims {
         public var sourceAgent: String?
         public var sourceParams: [String: JSONValue]
 
-        public init(headers: [String] = [], rows: [[JSONValue]] = [],
-                    variant: String = "default", totalRows: Int? = nil,
-                    pageSize: Int? = nil, pageOffset: Int? = nil,
-                    pageSizes: [Int] = [], sourceTool: String? = nil,
-                    sourceAgent: String? = nil, sourceParams: [String: JSONValue] = [:]) {
+        public init(
+            headers: [String] = [], rows: [[JSONValue]] = [],
+            variant: String = "default", totalRows: Int? = nil,
+            pageSize: Int? = nil, pageOffset: Int? = nil,
+            pageSizes: [Int] = [], sourceTool: String? = nil,
+            sourceAgent: String? = nil, sourceParams: [String: JSONValue] = [:]
+        ) {
             self.headers = headers
             self.rows = rows
             self.variant = variant
@@ -554,16 +612,18 @@ public enum AstralPrims {
         }
 
         override public var ownFields: [(String, JSONValue?)] {
-            [("headers", AstralPrims.strings(headers)),
-             ("rows", .array(rows.map { .array($0) })),
-             ("variant", .string(variant)),
-             ("total_rows", totalRows.map { .number(Double($0)) }),
-             ("page_size", pageSize.map { .number(Double($0)) }),
-             ("page_offset", pageOffset.map { .number(Double($0)) }),
-             ("page_sizes", .array(pageSizes.map { .number(Double($0)) })),
-             ("source_tool", sourceTool.map(JSONValue.string)),
-             ("source_agent", sourceAgent.map(JSONValue.string)),
-             ("source_params", .object(sourceParams))]
+            [
+                ("headers", AstralPrims.strings(headers)),
+                ("rows", .array(rows.map { .array($0) })),
+                ("variant", .string(variant)),
+                ("total_rows", totalRows.map { .number(Double($0)) }),
+                ("page_size", pageSize.map { .number(Double($0)) }),
+                ("page_offset", pageOffset.map { .number(Double($0)) }),
+                ("page_sizes", .array(pageSizes.map { .number(Double($0)) })),
+                ("source_tool", sourceTool.map(JSONValue.string)),
+                ("source_agent", sourceAgent.map(JSONValue.string)),
+                ("source_params", .object(sourceParams)),
+            ]
         }
     }
 
@@ -604,15 +664,19 @@ public enum AstralPrims {
             super.init(type: "bar_chart")
         }
 
-        public convenience init(title: String = "", labels: [String] = [],
-                                datasets: [ChartDataset]) {
+        public convenience init(
+            title: String = "", labels: [String] = [],
+            datasets: [ChartDataset]
+        ) {
             self.init(title: title, labels: labels, datasets: datasets.map { $0.toDict() })
         }
 
         override public var ownFields: [(String, JSONValue?)] {
-            [("title", .string(title)),
-             ("labels", AstralPrims.strings(labels)),
-             ("datasets", .array(datasets))]
+            [
+                ("title", .string(title)),
+                ("labels", AstralPrims.strings(labels)),
+                ("datasets", .array(datasets)),
+            ]
         }
     }
 
@@ -629,15 +693,19 @@ public enum AstralPrims {
             super.init(type: "line_chart")
         }
 
-        public convenience init(title: String = "", labels: [String] = [],
-                                datasets: [ChartDataset]) {
+        public convenience init(
+            title: String = "", labels: [String] = [],
+            datasets: [ChartDataset]
+        ) {
             self.init(title: title, labels: labels, datasets: datasets.map { $0.toDict() })
         }
 
         override public var ownFields: [(String, JSONValue?)] {
-            [("title", .string(title)),
-             ("labels", AstralPrims.strings(labels)),
-             ("datasets", .array(datasets))]
+            [
+                ("title", .string(title)),
+                ("labels", AstralPrims.strings(labels)),
+                ("datasets", .array(datasets)),
+            ]
         }
     }
 
@@ -648,8 +716,10 @@ public enum AstralPrims {
         public var data: [Double]
         public var colors: [String]
 
-        public init(title: String = "", labels: [String] = [],
-                    data: [Double] = [], colors: [String] = []) {
+        public init(
+            title: String = "", labels: [String] = [],
+            data: [Double] = [], colors: [String] = []
+        ) {
             self.title = title
             self.labels = labels
             self.data = data
@@ -658,10 +728,12 @@ public enum AstralPrims {
         }
 
         override public var ownFields: [(String, JSONValue?)] {
-            [("title", .string(title)),
-             ("labels", AstralPrims.strings(labels)),
-             ("data", AstralPrims.numbers(data)),
-             ("colors", AstralPrims.strings(colors))]
+            [
+                ("title", .string(title)),
+                ("labels", AstralPrims.strings(labels)),
+                ("data", AstralPrims.numbers(data)),
+                ("colors", AstralPrims.strings(colors)),
+            ]
         }
     }
 
@@ -672,8 +744,10 @@ public enum AstralPrims {
         public var layout: [String: JSONValue]
         public var config: [String: JSONValue]
 
-        public init(title: String = "", data: [JSONValue] = [],
-                    layout: [String: JSONValue] = [:], config: [String: JSONValue] = [:]) {
+        public init(
+            title: String = "", data: [JSONValue] = [],
+            layout: [String: JSONValue] = [:], config: [String: JSONValue] = [:]
+        ) {
             self.title = title
             self.data = data
             self.layout = layout
@@ -682,10 +756,12 @@ public enum AstralPrims {
         }
 
         override public var ownFields: [(String, JSONValue?)] {
-            [("title", .string(title)),
-             ("data", .array(data)),
-             ("layout", .object(layout)),
-             ("config", .object(config))]
+            [
+                ("title", .string(title)),
+                ("data", .array(data)),
+                ("layout", .object(layout)),
+                ("config", .object(config)),
+            ]
         }
     }
 
@@ -702,10 +778,12 @@ public enum AstralPrims {
         public var showControls: Bool
         public var description: String?
 
-        public init(src: String = "", contentType: String? = nil,
-                    autoplay: Bool = false, loop: Bool = false,
-                    label: String? = nil, showControls: Bool = true,
-                    description: String? = nil) {
+        public init(
+            src: String = "", contentType: String? = nil,
+            autoplay: Bool = false, loop: Bool = false,
+            label: String? = nil, showControls: Bool = true,
+            description: String? = nil
+        ) {
             self.src = src
             self.contentType = contentType
             self.autoplay = autoplay
@@ -717,13 +795,15 @@ public enum AstralPrims {
         }
 
         override public var ownFields: [(String, JSONValue?)] {
-            [("src", .string(src)),
-             ("contentType", contentType.map(JSONValue.string)),
-             ("autoplay", .bool(autoplay)),
-             ("loop", .bool(loop)),
-             ("label", label.map(JSONValue.string)),
-             ("showControls", .bool(showControls)),
-             ("description", description.map(JSONValue.string))]
+            [
+                ("src", .string(src)),
+                ("contentType", contentType.map(JSONValue.string)),
+                ("autoplay", .bool(autoplay)),
+                ("loop", .bool(loop)),
+                ("label", label.map(JSONValue.string)),
+                ("showControls", .bool(showControls)),
+                ("description", description.map(JSONValue.string)),
+            ]
         }
     }
 
@@ -741,9 +821,11 @@ public enum AstralPrims {
         }
 
         override public var ownFields: [(String, JSONValue?)] {
-            [("label", .string(label)),
-             ("accept", .string(accept)),
-             ("action", .string(action))]
+            [
+                ("label", .string(label)),
+                ("accept", .string(accept)),
+                ("action", .string(action)),
+            ]
         }
     }
 
@@ -761,9 +843,11 @@ public enum AstralPrims {
         }
 
         override public var ownFields: [(String, JSONValue?)] {
-            [("label", .string(label)),
-             ("url", .string(url)),
-             ("filename", filename.map(JSONValue.string))]
+            [
+                ("label", .string(label)),
+                ("url", .string(url)),
+                ("filename", filename.map(JSONValue.string)),
+            ]
         }
     }
 
@@ -784,9 +868,11 @@ public enum AstralPrims {
         }
 
         override public var ownFields: [(String, JSONValue?)] {
-            [("label", .string(label)),
-             ("variant", .string(variant)),
-             ("icon", icon.map(JSONValue.string))]
+            [
+                ("label", .string(label)),
+                ("variant", .string(variant)),
+                ("icon", icon.map(JSONValue.string)),
+            ]
         }
     }
 
@@ -800,8 +886,10 @@ public enum AstralPrims {
         public var variant: String
         public var badges: [String]
 
-        public init(title: String = "", subtitle: String? = nil, eyebrow: String? = nil,
-                    icon: String? = nil, variant: String = "default", badges: [String] = []) {
+        public init(
+            title: String = "", subtitle: String? = nil, eyebrow: String? = nil,
+            icon: String? = nil, variant: String = "default", badges: [String] = []
+        ) {
             self.title = title
             self.subtitle = subtitle
             self.eyebrow = eyebrow
@@ -812,12 +900,14 @@ public enum AstralPrims {
         }
 
         override public var ownFields: [(String, JSONValue?)] {
-            [("title", .string(title)),
-             ("subtitle", subtitle.map(JSONValue.string)),
-             ("eyebrow", eyebrow.map(JSONValue.string)),
-             ("icon", icon.map(JSONValue.string)),
-             ("variant", .string(variant)),
-             ("badges", AstralPrims.strings(badges))]
+            [
+                ("title", .string(title)),
+                ("subtitle", subtitle.map(JSONValue.string)),
+                ("eyebrow", eyebrow.map(JSONValue.string)),
+                ("icon", icon.map(JSONValue.string)),
+                ("variant", .string(variant)),
+                ("badges", AstralPrims.strings(badges)),
+            ]
         }
     }
 
@@ -836,9 +926,11 @@ public enum AstralPrims {
         }
 
         override public var ownFields: [(String, JSONValue?)] {
-            [("title", title.map(JSONValue.string)),
-             ("items", .array(items)),
-             ("columns", .number(Double(columns)))]
+            [
+                ("title", title.map(JSONValue.string)),
+                ("items", .array(items)),
+                ("columns", .number(Double(columns))),
+            ]
         }
     }
 
@@ -857,9 +949,11 @@ public enum AstralPrims {
         }
 
         override public var ownFields: [(String, JSONValue?)] {
-            [("title", title.map(JSONValue.string)),
-             ("items", .array(items)),
-             ("variant", .string(variant))]
+            [
+                ("title", title.map(JSONValue.string)),
+                ("items", .array(items)),
+                ("variant", .string(variant)),
+            ]
         }
     }
 
@@ -871,8 +965,10 @@ public enum AstralPrims {
         public var subtitle: String?
         public var showValue: Bool
 
-        public init(value: Double = 0.0, maxValue: Int = 5, label: String? = nil,
-                    subtitle: String? = nil, showValue: Bool = true) {
+        public init(
+            value: Double = 0.0, maxValue: Int = 5, label: String? = nil,
+            subtitle: String? = nil, showValue: Bool = true
+        ) {
             self.value = value
             self.maxValue = maxValue
             self.label = label
@@ -882,11 +978,13 @@ public enum AstralPrims {
         }
 
         override public var ownFields: [(String, JSONValue?)] {
-            [("value", .number(value)),
-             ("max_value", .number(Double(maxValue))),
-             ("label", label.map(JSONValue.string)),
-             ("subtitle", subtitle.map(JSONValue.string)),
-             ("show_value", .bool(showValue))]
+            [
+                ("value", .number(value)),
+                ("max_value", .number(Double(maxValue))),
+                ("label", label.map(JSONValue.string)),
+                ("subtitle", subtitle.map(JSONValue.string)),
+                ("show_value", .bool(showValue)),
+            ]
         }
     }
 
@@ -904,8 +1002,10 @@ public enum AstralPrims {
         }
 
         override public var ownFields: [(String, JSONValue?)] {
-            [("title", title.map(JSONValue.string)),
-             ("items", .array(items))]
+            [
+                ("title", title.map(JSONValue.string)),
+                ("items", .array(items)),
+            ]
         }
     }
 
@@ -925,9 +1025,11 @@ public enum AstralPrims {
         }
 
         override public var ownFields: [(String, JSONValue?)] {
-            [("label", .string(label)),
-             ("color_key", .string(colorKey)),
-             ("value", .string(value))]
+            [
+                ("label", .string(label)),
+                ("color_key", .string(colorKey)),
+                ("value", .string(value)),
+            ]
         }
     }
 
@@ -939,9 +1041,11 @@ public enum AstralPrims {
         public var colorValue: String?
         public var message: String
 
-        public init(preset: String? = nil, colors: [String: String]? = nil,
-                    colorKey: String? = nil, colorValue: String? = nil,
-                    message: String = "") {
+        public init(
+            preset: String? = nil, colors: [String: String]? = nil,
+            colorKey: String? = nil, colorValue: String? = nil,
+            message: String = ""
+        ) {
             self.preset = preset
             self.colors = colors
             self.colorKey = colorKey
@@ -951,11 +1055,13 @@ public enum AstralPrims {
         }
 
         override public var ownFields: [(String, JSONValue?)] {
-            [("preset", preset.map(JSONValue.string)),
-             ("colors", colors.map { .object($0.mapValues(JSONValue.string)) }),
-             ("color_key", colorKey.map(JSONValue.string)),
-             ("color_value", colorValue.map(JSONValue.string)),
-             ("message", .string(message))]
+            [
+                ("preset", preset.map(JSONValue.string)),
+                ("colors", colors.map { .object($0.mapValues(JSONValue.string)) }),
+                ("color_key", colorKey.map(JSONValue.string)),
+                ("color_value", colorValue.map(JSONValue.string)),
+                ("message", .string(message)),
+            ]
         }
     }
 }

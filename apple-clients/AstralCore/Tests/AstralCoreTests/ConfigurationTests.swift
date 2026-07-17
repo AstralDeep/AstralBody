@@ -5,6 +5,7 @@
 // whose xcconfig was never wired, and a watch with no companion to push it an
 // override. It is isolated from `Bundle` so these run headlessly.
 import XCTest
+
 @testable import AstralCore
 
 final class ConfigurationResolutionTests: XCTestCase {
@@ -14,17 +15,19 @@ final class ConfigurationResolutionTests: XCTestCase {
 
     func testOverrideWinsOverInfoPlist() {
         XCTAssertEqual(
-            AstralConfig.resolve(override: "https://staging.example.edu",
-                                 infoValue: plistValue,
-                                 fallback: AstralConfig.fallbackServerBaseURL),
+            AstralConfig.resolve(
+                override: "https://staging.example.edu",
+                infoValue: plistValue,
+                fallback: AstralConfig.fallbackServerBaseURL),
             "https://staging.example.edu")
     }
 
     func testInfoPlistUsedWhenNoOverride() {
         XCTAssertEqual(
-            AstralConfig.resolve(override: nil,
-                                 infoValue: plistValue,
-                                 fallback: AstralConfig.fallbackServerBaseURL),
+            AstralConfig.resolve(
+                override: nil,
+                infoValue: plistValue,
+                fallback: AstralConfig.fallbackServerBaseURL),
             plistValue)
     }
 
@@ -32,8 +35,9 @@ final class ConfigurationResolutionTests: XCTestCase {
     /// tests get no bundle. Both land here, and both must stay usable.
     func testFallbackWhenNeitherOverrideNorInfoPlistResolves() {
         XCTAssertEqual(
-            AstralConfig.resolve(override: nil, infoValue: nil,
-                                 fallback: AstralConfig.fallbackServerBaseURL),
+            AstralConfig.resolve(
+                override: nil, infoValue: nil,
+                fallback: AstralConfig.fallbackServerBaseURL),
             AstralConfig.fallbackServerBaseURL)
     }
 
@@ -42,8 +46,9 @@ final class ConfigurationResolutionTests: XCTestCase {
     func testBlankAndEmptyOverridesAreIgnored() {
         for bad in ["", "   ", "\n\t"] {
             XCTAssertEqual(
-                AstralConfig.resolve(override: bad, infoValue: plistValue,
-                                     fallback: AstralConfig.fallbackServerBaseURL),
+                AstralConfig.resolve(
+                    override: bad, infoValue: plistValue,
+                    fallback: AstralConfig.fallbackServerBaseURL),
                 plistValue, "override \(bad.debugDescription) should be ignored")
         }
     }
@@ -52,8 +57,9 @@ final class ConfigurationResolutionTests: XCTestCase {
         // A scheme we cannot talk to, a relative path, and a host-less URL.
         for bad in ["ftp://example.edu", "sandbox.ai.uky.edu", "/relative/path", "https://"] {
             XCTAssertEqual(
-                AstralConfig.resolve(override: bad, infoValue: plistValue,
-                                     fallback: AstralConfig.fallbackServerBaseURL),
+                AstralConfig.resolve(
+                    override: bad, infoValue: plistValue,
+                    fallback: AstralConfig.fallbackServerBaseURL),
                 plistValue, "override \(bad.debugDescription) should be ignored")
         }
     }
@@ -63,38 +69,42 @@ final class ConfigurationResolutionTests: XCTestCase {
     /// an endpoint would point the app at a nonsense host instead of production.
     func testUnsubstitutedBuildSettingIsRejected() {
         XCTAssertEqual(
-            AstralConfig.resolve(override: nil,
-                                 infoValue: "$(ASTRAL_SERVER_BASE_URL)",
-                                 fallback: AstralConfig.fallbackServerBaseURL),
+            AstralConfig.resolve(
+                override: nil,
+                infoValue: "$(ASTRAL_SERVER_BASE_URL)",
+                fallback: AstralConfig.fallbackServerBaseURL),
             AstralConfig.fallbackServerBaseURL)
     }
 
     func testOverrideIsTrimmed() {
         XCTAssertEqual(
-            AstralConfig.resolve(override: "  https://staging.example.edu  ",
-                                 infoValue: plistValue,
-                                 fallback: AstralConfig.fallbackServerBaseURL),
+            AstralConfig.resolve(
+                override: "  https://staging.example.edu  ",
+                infoValue: plistValue,
+                fallback: AstralConfig.fallbackServerBaseURL),
             "https://staging.example.edu")
     }
 
     func testLocalhostDebugEndpointIsUsable() {
-        XCTAssertEqual(AstralConfig.usableEndpoint("http://localhost:8001"),
-                       "http://localhost:8001")
+        XCTAssertEqual(
+            AstralConfig.usableEndpoint("http://localhost:8001"),
+            "http://localhost:8001")
     }
 
     // MARK: - realm resolves through the same ladder
 
     func testAuthorityFallsBackToTheProductionRealm() {
         XCTAssertEqual(
-            AstralConfig.resolve(override: nil, infoValue: nil,
-                                 fallback: AstralConfig.fallbackKeycloakAuthority),
+            AstralConfig.resolve(
+                override: nil, infoValue: nil,
+                fallback: AstralConfig.fallbackKeycloakAuthority),
             "https://iam.ai.uky.edu/realms/Astral")
     }
 
     // MARK: - identities are backend contracts
 
     func testOAuthClientIdsMatchTheBackendContract() {
-        XCTAssertEqual(AstralConfig.iosClientId, "astral-mobile")     // shared with Android
+        XCTAssertEqual(AstralConfig.iosClientId, "astral-mobile")  // shared with Android
         XCTAssertEqual(AstralConfig.macosClientId, "astral-desktop")  // shared with Windows
         XCTAssertEqual(AstralConfig.watchClientId, "astral-watch")
         XCTAssertEqual(AstralConfig.redirectURI, "com.personalailabs.astraldeep:/oauth2redirect")

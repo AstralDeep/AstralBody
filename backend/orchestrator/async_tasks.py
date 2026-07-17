@@ -1,23 +1,46 @@
-"""
-020-async-queries: Background task infrastructure for asynchronous chat processing.
+"""Compatibility views for operation-backed asynchronous chat work.
 
-Provides:
-- VirtualWebSocket: captures outputs from background agent runs
-- BackgroundTaskManager: submits, tracks, and notifies on async tasks
+``WorkAdmissionCoordinator`` is the sole identity, admission, lifecycle, and
+retention authority.  This module keeps the legacy background-task DTO,
+captured-output, watcher, and completion-fan surfaces while projecting their
+status from the coordinator.  A process-local dispatcher retains only the
+callable needed to execute a durably accepted operation; FIFO selection,
+capacity, cancellation, execution fencing, and retention remain coordinator
+decisions.
 """
+
+from __future__ import annotations
 
 import asyncio
 import json
 import logging
+import math
+import re
 import uuid
 from dataclasses import dataclass, field
 from datetime import datetime, timezone
 from enum import Enum
-from typing import Any, Dict, List, Optional
+from typing import Any, Dict, List, Mapping, Optional
 
+from orchestrator.work_admission import (
+    AdmissionClass,
+    ExecutionFence,
+    OperationNotFoundError,
+    OperationOwner,
+    OperationRecord,
+    OperationRequest,
+    OperationState,
+    OwnerScope,
+    PurgeResult,
+    SafeOperationProjection,
+    StaleExecutionFenceError,
+    WorkAdmissionCoordinator,
+)
 from shared.feature_flags import flags
 
 logger = logging.getLogger(__name__)
+
+_SAFE_OBSERVABILITY_TOKEN = re.compile(r"^[a-z][a-z0-9_]{0,63}$")
 
 
 class TaskStatus(str, Enum):
@@ -26,64 +49,266 @@ class TaskStatus(str, Enum):
     COMPLETED = "completed"
     FAILED = "failed"
     CANCELLED = "cancelled"
+    RETRYABLE = "retryable"
+
+
+_STATUS_BY_OPERATION_STATE = {
+    OperationState.QUEUED: TaskStatus.QUEUED,
+    OperationState.RUNNING: TaskStatus.RUNNING,
+    OperationState.COMPLETED: TaskStatus.COMPLETED,
+    OperationState.FAILED: TaskStatus.FAILED,
+    OperationState.CANCELLED: TaskStatus.CANCELLED,
+    OperationState.RETRYABLE: TaskStatus.RETRYABLE,
+}
+_TERMINAL_OPERATION_STATES = frozenset(
+    {
+        OperationState.COMPLETED,
+        OperationState.FAILED,
+        OperationState.CANCELLED,
+        OperationState.RETRYABLE,
+    }
+)
+
+
+class BackgroundTaskManagerNotBoundError(RuntimeError):
+    """Raised when lifecycle work is attempted without a coordinator."""
+
+
+class BackgroundTaskAdmissionError(RuntimeError):
+    """Legacy exception projection for an explicit admission refusal."""
+
+    def __init__(
+        self, code: str, *, retryable: bool, retry_after_ms: int | None
+    ) -> None:
+        super().__init__(f"background task admission refused: {code}")
+        self.code = code
+        self.retryable = retryable
+        self.retry_after_ms = retry_after_ms
+
+
+@dataclass(frozen=True)
+class RetentionSweepResult:
+    """Bounded work performed by one maintenance-admitted sweep."""
+
+    operations: int
+    submissions: int
+    compatibility_rows: int
+    batches: int
+    backlog: bool = False
+
+
+OperationProjection = OperationRecord | SafeOperationProjection
+_FENCE_UNSET = object()
+
+
+@dataclass(frozen=True)
+class _BackgroundExecution:
+    """Process-local callable paired with one durable accepted operation."""
+
+    coro_factory: Any
+    args: tuple[Any, ...]
+    kwargs: dict[str, Any]
+
+
+def _validate_execution_fence(
+    operation: OperationProjection, fence: ExecutionFence | None
+) -> None:
+    if fence is None:
+        return
+    if fence.operation_id != operation.operation_id:
+        raise RuntimeError("background task fence operation identity changed")
+    if (
+        isinstance(operation, OperationRecord)
+        and operation.state is OperationState.RUNNING
+    ):
+        if (
+            fence.execution_generation != operation.execution_generation
+            or fence.execution_lease_token != operation.execution_lease_token
+        ):
+            raise RuntimeError("background task execution fence is stale")
 
 
 @dataclass
 class BackgroundTask:
-    """Tracks a single async query execution."""
+    """Legacy task DTO backed by one durable operation when manager-created.
+
+    Direct construction remains supported for ``VirtualWebSocket`` adapters
+    used by internal call sites and tests; arbitrary synthetic identifiers are
+    therefore valid here.  Only ``BackgroundTaskManager.submit`` creates a
+    managed task, and managed identifiers are full operation UUIDs.
+    """
+
     task_id: str
     chat_id: str
     user_id: str
     status: TaskStatus = TaskStatus.QUEUED
-    # 055 bg-continuity: what kind of work this is and a short user-facing
-    # label (derived from the originating message) for cross-device frames.
     kind: str = "async_chat"
     title: str = ""
     created_at: datetime = field(default_factory=lambda: datetime.now(timezone.utc))
-    completed_at: Optional[datetime] = None
-    asyncio_task: Optional[asyncio.Task] = None
-    # Captured outputs from the VirtualWebSocket
+    completed_at: datetime | None = None
+    asyncio_task: asyncio.Task | None = None
     outputs: List[Dict[str, Any]] = field(default_factory=list)
     errors: List[str] = field(default_factory=list)
-    # Subscribers waiting for completion (WS ids or callback coros)
     watchers: List[Any] = field(default_factory=list)
 
+    _MANAGED_FIELDS = frozenset(
+        {"task_id", "chat_id", "user_id", "status", "created_at", "completed_at"}
+    )
+
+    def __setattr__(self, name: str, value: Any) -> None:
+        if (
+            name in self._MANAGED_FIELDS
+            and getattr(self, "_operation", None) is not None
+        ):
+            raise AttributeError(f"managed background task field {name!r} is read-only")
+        object.__setattr__(self, name, value)
+
+    def __post_init__(self) -> None:
+        self.status = TaskStatus(self.status)
+        self._owner: OperationOwner | None = None
+        self._operation: OperationProjection | None = None
+        self._execution_fence: ExecutionFence | None = None
+        self._notification_sent = False
+        self._lease_task: asyncio.Task | None = None
+        self._lease_loss_reason: str | None = None
+        self._virtual_websocket: VirtualWebSocket | None = None
+        self._cancellation_terminal_code: str | None = None
+        self._cancellation_safe_summary: str | None = None
+        self._terminal_observed = False
+
+    def _attach_authority(
+        self,
+        *,
+        owner: OperationOwner,
+        operation: OperationProjection,
+        execution_fence: ExecutionFence | None,
+    ) -> None:
+        if self._operation is not None or self._owner is not None:
+            raise RuntimeError("background task authority is already attached")
+        if execution_fence is not None:
+            _validate_execution_fence(operation, execution_fence)
+        self._apply_operation(operation, execution_fence=execution_fence)
+        self._owner = owner
+
+    @property
+    def operation_execution_generation(self) -> int | None:
+        if self._execution_fence is not None:
+            return self._execution_fence.execution_generation
+        if isinstance(self._operation, OperationRecord):
+            generation = self._operation.execution_generation
+            return generation if generation > 0 else None
+        return None
+
+    def _canonical_status(self) -> TaskStatus:
+        if self._operation is None:
+            return self.status
+        return _STATUS_BY_OPERATION_STATE[self._operation.state]
+
+    def _apply_operation(
+        self,
+        operation: OperationProjection,
+        *,
+        execution_fence: ExecutionFence | None | object = _FENCE_UNSET,
+    ) -> None:
+        if str(operation.operation_id) != self.task_id:
+            raise RuntimeError("background task operation identity changed")
+        if (
+            self._operation is not None
+            and operation.state_revision < self._operation.state_revision
+        ):
+            raise RuntimeError("background task operation projection moved backwards")
+        if (
+            self._operation is not None
+            and self._operation.state in _TERMINAL_OPERATION_STATES
+            and operation.state is not self._operation.state
+        ):
+            raise RuntimeError(
+                "background task terminal projection cannot be overwritten"
+            )
+        if execution_fence is not _FENCE_UNSET:
+            if execution_fence is not None and not isinstance(
+                execution_fence, ExecutionFence
+            ):
+                raise TypeError("execution_fence must be an ExecutionFence")
+            _validate_execution_fence(operation, execution_fence)
+        elif (
+            self._execution_fence is not None
+            and isinstance(operation, OperationRecord)
+            and operation.state is OperationState.RUNNING
+            and (
+                self._execution_fence.execution_generation
+                != operation.execution_generation
+                or self._execution_fence.execution_lease_token
+                != operation.execution_lease_token
+            )
+        ):
+            # Owner-safe refresh/cancel records may reveal that another worker
+            # was explicitly reselected.  Never synthesize its secret fence;
+            # discard only our stale one and wait for an explicit new fence.
+            self._execution_fence = None
+        object.__setattr__(self, "_operation", operation)
+        object.__setattr__(
+            self, "status", _STATUS_BY_OPERATION_STATE[operation.state]
+        )
+        object.__setattr__(self, "created_at", operation.accepted_at)
+        object.__setattr__(self, "completed_at", operation.terminal_at)
+        if operation.state in _TERMINAL_OPERATION_STATES:
+            # The durable terminal transition already revoked this token. Keep
+            # no stale private capability in the compatibility projection.
+            self._execution_fence = None
+        elif execution_fence is not _FENCE_UNSET:
+            self._execution_fence = execution_fence
+
     def to_dict(self) -> Dict[str, Any]:
+        status = self._canonical_status()
+        created_at = (
+            self._operation.accepted_at
+            if self._operation is not None
+            else self.created_at
+        )
+        completed_at = (
+            self._operation.terminal_at
+            if self._operation is not None
+            else self.completed_at
+        )
         return {
             "task_id": self.task_id,
             "chat_id": self.chat_id,
             "user_id": self.user_id,
-            "status": self.status.value,
-            "created_at": self.created_at.isoformat(),
-            "completed_at": self.completed_at.isoformat() if self.completed_at else None,
+            "status": status.value,
+            "created_at": created_at.isoformat(),
+            "completed_at": completed_at.isoformat() if completed_at else None,
         }
 
 
 class VirtualWebSocket:
-    """Captures output messages that would normally be sent via WebSocket.
-
-    Used during background task execution to collect all UI messages
-    (component renders, status updates, etc.) into a buffer that gets
-    persisted as chat history when the task completes.
-    """
+    """Capture messages produced by a background turn."""
 
     def __init__(self, task: BackgroundTask):
         self.task = task
         self._closed = False
 
-    async def send_text(self, data: str):
-        """Receive string data, parse as JSON if possible."""
+    def _can_publish(self) -> bool:
         if self._closed:
+            return False
+        operation = self.task._operation
+        if operation is None:
+            return True
+        return (
+            operation.state is OperationState.RUNNING
+            and self.task._execution_fence is not None
+        )
+
+    async def send_text(self, data: str):
+        if not self._can_publish():
             return
         try:
-            parsed = json.loads(data)
-            self.task.outputs.append(parsed)
+            self.task.outputs.append(json.loads(data))
         except json.JSONDecodeError:
             self.task.outputs.append({"type": "raw", "data": data})
 
     async def send_json(self, data: Any, mode: str = "text"):
-        """Receive dict data directly (used by _safe_send)."""
-        if self._closed:
+        if not self._can_publish():
             return
         if isinstance(data, dict):
             self.task.outputs.append(data)
@@ -91,11 +316,9 @@ class VirtualWebSocket:
             await self.send_text(data)
 
     async def receive_text(self) -> str:
-        """Simulate receiving — returns empty (background tasks don't receive)."""
         return ""
 
     async def receive_json(self, mode: str = "text"):
-        """Simulate receiving — returns empty."""
         return {}
 
     async def close(self, code: int = 1000):
@@ -103,7 +326,6 @@ class VirtualWebSocket:
 
     @property
     def client(self):
-        """Pretend to have a client attribute for audit logging."""
         return ("background", self.task.task_id)
 
     def __repr__(self):
@@ -111,31 +333,284 @@ class VirtualWebSocket:
 
 
 class BackgroundTaskManager:
-    """Manages async background tasks with a maximum concurrent limit."""
+    """Legacy async-task surface projected over an injected coordinator."""
 
     MAX_CONCURRENT_TASKS = 5
+    _DISPATCH_POLL_SECONDS = 0.25
+    _LEASE_RENEWAL_DIVISOR = 4
+    _OBSERVABILITY_STALL_SECONDS = 0.25
 
-    def __init__(self):
+    def __init__(
+        self,
+        coordinator: WorkAdmissionCoordinator | None = None,
+        *,
+        dispatch_poll_seconds: float = _DISPATCH_POLL_SECONDS,
+    ) -> None:
+        if dispatch_poll_seconds <= 0:
+            raise ValueError("dispatch poll interval must be positive")
+        self._coordinator = coordinator
         self._tasks: Dict[str, BackgroundTask] = {}
+        self._pending_executions: Dict[str, _BackgroundExecution] = {}
         self._lock = asyncio.Lock()
-        # 055 bg-continuity: optional durable write-through + completion fan,
-        # bound by the orchestrator once its DB handle exists. Unbound, the
-        # manager stays memory-only with watcher-only notification as before.
+        self._dispatch_poll_seconds = dispatch_poll_seconds
+        self._dispatcher_task: asyncio.Task | None = None
+        self._dispatcher_wakeup: asyncio.Event | None = None
         self._db = None
         self._on_complete = None
+        self._observability = None
+        self._admission_observer_task: asyncio.Task | None = None
+        self._admission_observation_requested = False
+        self._compatibility_write_tasks: set[asyncio.Task] = set()
+        self._draining = False
+        self._drain_lock = asyncio.Lock()
+        self._retention_task: asyncio.Task | None = None
+        self._retention_stop: asyncio.Event | None = None
 
-    def bind(self, *, db=None, on_complete=None):
-        """Wire the durable task store and the orchestrator's completion fan
-        (055 bg-continuity). Both optional; existing behavior when unbound."""
+    def bind(
+        self,
+        *,
+        coordinator=None,
+        db=None,
+        on_complete=None,
+        observability=None,
+    ):
+        """Additively bind operation authority and legacy continuity hooks.
+
+        ``db`` remains the compatibility write-through store.  It is never used
+        to construct an implicit coordinator: production integration must bind
+        the same explicit ``WorkAdmissionCoordinator`` used by other work paths.
+        """
+
+        if coordinator is not None:
+            if self._coordinator is not None and coordinator is not self._coordinator:
+                raise RuntimeError("cannot replace the bound coordinator")
+            self._coordinator = coordinator
         if db is not None:
             self._db = db
         if on_complete is not None:
             self._on_complete = on_complete
+        if observability is not None:
+            if (
+                self._observability is not None
+                and observability is not self._observability
+            ):
+                raise RuntimeError("cannot replace the bound observability collector")
+            self._observability = observability
 
-    def _record(self, query: str, params):
-        """Fire-and-forget durable bookkeeping (055 bg-continuity). Fail-open
-        by design — task execution never blocks on (or fails with) it."""
-        if self._db is None or not flags.is_enabled("bg_continuity"):
+    @staticmethod
+    def _safe_observability_token(value: str | None, *, fallback: str) -> str:
+        if isinstance(value, str) and _SAFE_OBSERVABILITY_TOKEN.fullmatch(value):
+            return value
+        return fallback
+
+    @classmethod
+    def _operation_kind(cls, bg_task: BackgroundTask | None = None) -> str:
+        return cls._safe_observability_token(
+            bg_task.kind if bg_task is not None else None,
+            fallback="background_chat",
+        )
+
+    def _record_operation_observation(
+        self,
+        event: str,
+        *,
+        operation_kind: str,
+        result_code: str | None = None,
+        phase: str | None = None,
+    ) -> None:
+        observability = self._observability
+        if observability is None:
+            return
+        safe_kind = self._safe_observability_token(
+            operation_kind,
+            fallback="background_chat",
+        )
+        safe_result = (
+            self._safe_observability_token(result_code, fallback="unknown")
+            if result_code is not None
+            else None
+        )
+        safe_phase = (
+            self._safe_observability_token(phase, fallback="unknown")
+            if phase is not None
+            else None
+        )
+        try:
+            observability.record_operation(
+                event,
+                operation_kind=safe_kind,
+                result_code=safe_result,
+                phase=safe_phase,
+            )
+        except Exception:
+            logger.debug("background operation telemetry failed", exc_info=True)
+
+    async def _observe_admission(self) -> None:
+        """Request one detached, coalesced effective-admission refresh."""
+
+        observability = self._observability
+        if observability is None or self._draining:
+            return
+        self._admission_observation_requested = True
+        task = self._admission_observer_task
+        if task is not None and not task.done():
+            return
+        self._admission_observer_task = asyncio.create_task(
+            self._run_admission_observer(),
+            name="background-admission-observer",
+        )
+
+    async def _run_admission_observer(self) -> None:
+        """Refresh gauges off-loop without ever delaying lifecycle callers."""
+
+        current_task = asyncio.current_task()
+        try:
+            while self._admission_observation_requested and not self._draining:
+                self._admission_observation_requested = False
+                observability = self._observability
+                if observability is None:
+                    return
+
+                def _refresh() -> None:
+                    status = self._require_coordinator().inspect_admission_class(
+                        AdmissionClass.BACKGROUND
+                    )
+                    observability.observe_admission(
+                        status,
+                        operation_kind="background_chat",
+                    )
+
+                refresh = asyncio.create_task(
+                    asyncio.to_thread(_refresh),
+                    name="background-admission-inspection",
+                )
+                try:
+                    await asyncio.wait_for(
+                        asyncio.shield(refresh),
+                        timeout=self._OBSERVABILITY_STALL_SECONDS,
+                    )
+                except TimeoutError:
+                    # Keep one coalescing owner until the already-running call
+                    # returns. This bounds thread-pool pressure without making
+                    # accepted/refused/terminal lifecycle paths await telemetry.
+                    logger.warning("background admission telemetry is stalled")
+                    try:
+                        await refresh
+                    except asyncio.CancelledError:
+                        refresh.cancel()
+                        await asyncio.gather(refresh, return_exceptions=True)
+                        raise
+                    except Exception:
+                        logger.debug(
+                            "background admission telemetry failed",
+                            exc_info=True,
+                        )
+                except asyncio.CancelledError:
+                    refresh.cancel()
+                    await asyncio.gather(refresh, return_exceptions=True)
+                    raise
+                except Exception:
+                    logger.debug(
+                        "background admission telemetry failed",
+                        exc_info=True,
+                    )
+        except asyncio.CancelledError:
+            raise
+        except Exception:
+            logger.debug("background admission telemetry failed", exc_info=True)
+        finally:
+            if self._admission_observer_task is current_task:
+                self._admission_observer_task = None
+            if self._draining:
+                self._admission_observation_requested = False
+
+    async def _observe_terminal(self, bg_task: BackgroundTask) -> None:
+        operation = bg_task._operation
+        if (
+            self._observability is None
+            or operation is None
+            or operation.state not in _TERMINAL_OPERATION_STATES
+            or bg_task._terminal_observed
+        ):
+            return
+        bg_task._terminal_observed = True
+        operation_kind = self._operation_kind(bg_task)
+        result_code = operation.terminal_code or operation.state.value
+        if operation.terminal_code == "queue_wait_expired":
+            self._record_operation_observation(
+                "queue_expired",
+                operation_kind=operation_kind,
+                result_code="queue_wait_expired",
+            )
+        self._record_operation_observation(
+            operation.state.value,
+            operation_kind=operation_kind,
+            result_code=result_code,
+        )
+        self._record_operation_observation(
+            "terminal",
+            operation_kind=operation_kind,
+            result_code=operation.state.value,
+        )
+        await self._observe_admission()
+
+    async def _refuse_service_draining(self, operation_kind: str) -> None:
+        self._record_operation_observation(
+            "refused",
+            operation_kind=operation_kind,
+            result_code="service_draining",
+        )
+        await self._observe_admission()
+        raise self._service_draining_error()
+
+    @staticmethod
+    def _service_draining_error() -> BackgroundTaskAdmissionError:
+        return BackgroundTaskAdmissionError(
+            "service_draining",
+            retryable=True,
+            retry_after_ms=1000,
+        )
+
+    def _require_coordinator(self) -> WorkAdmissionCoordinator:
+        if self._coordinator is None:
+            raise BackgroundTaskManagerNotBoundError(
+                "bind an explicit WorkAdmissionCoordinator before submitting work"
+            )
+        return self._coordinator
+
+    def _lease_renewal_seconds(self) -> float:
+        coordinator = self._require_coordinator()
+        lease_seconds = coordinator.slot_lease.total_seconds()
+        if lease_seconds <= 0:  # pragma: no cover - coordinator validates this
+            raise RuntimeError("execution slot lease must be positive")
+        # Renew before the contractual one-third boundary to leave scheduling
+        # and database latency margin rather than treating the bound as a
+        # best-effort sleep duration.
+        return lease_seconds / self._LEASE_RENEWAL_DIVISOR
+
+    def _wake_dispatcher(self) -> None:
+        if self._dispatcher_wakeup is not None:
+            self._dispatcher_wakeup.set()
+
+    def _ensure_dispatcher_locked(self) -> None:
+        if not self._pending_executions:
+            return
+        if self._dispatcher_task is not None and not self._dispatcher_task.done():
+            self._wake_dispatcher()
+            return
+        self._dispatcher_wakeup = asyncio.Event()
+        self._dispatcher_task = asyncio.create_task(
+            self._dispatch_pending(), name="background-operation-dispatcher"
+        )
+
+    def _record(self, query: str, params) -> None:
+        """Best-effort write of the operation-backed legacy task projection."""
+
+        if (
+            self._draining
+            or self._db is None
+            or not flags.is_enabled("bg_continuity")
+        ):
             return
 
         async def _write():
@@ -144,7 +619,16 @@ class BackgroundTaskManager:
             except Exception:
                 logger.debug("background_task bookkeeping failed", exc_info=True)
 
-        asyncio.create_task(_write())
+        task = asyncio.create_task(
+            _write(),
+            name="background-compatibility-write",
+        )
+        self._compatibility_write_tasks.add(task)
+        task.add_done_callback(self._compatibility_write_done)
+
+    def _compatibility_write_done(self, task: asyncio.Task) -> None:
+        self._compatibility_write_tasks.discard(task)
+        self._consume_drain_helper(task)
 
     async def submit(
         self,
@@ -154,111 +638,610 @@ class BackgroundTaskManager:
         *args,
         kind: str = "async_chat",
         title: str = "",
+        connection_generation: uuid.UUID | None = None,
+        request_generation: uuid.UUID | None = None,
         **kwargs,
     ) -> BackgroundTask:
-        """Create a background task and start executing it.
+        """Durably admit one background operation and project its task DTO."""
 
-        Args:
-            chat_id: The chat session ID
-            user_id: The authenticated user ID
-            coro_factory: Async callable that takes (virtual_ws, *args, **kwargs)
-            kind: Task kind for the durable record (055 bg-continuity)
-            title: Short user-facing label for cross-device task frames
-        """
+        coordinator = self._require_coordinator()
+        operation_kind = self._safe_observability_token(
+            kind,
+            fallback="background_chat",
+        )
+        if self._draining:
+            await self._refuse_service_draining(operation_kind)
+        owner = OperationOwner(
+            owner_scope=OwnerScope.USER,
+            owner_user_id=user_id,
+            connection_scope_id=None,
+        )
+        request = OperationRequest(
+            operation_kind=kind,
+            admission_class=AdmissionClass.BACKGROUND,
+            owner=owner,
+            submission_id=uuid.uuid4(),
+            idempotency_namespace=None,
+            idempotency_key=None,
+            normalized_input_digest=None,
+            chat_id=chat_id,
+            parent_operation_id=None,
+            connection_generation=connection_generation,
+            request_generation=request_generation,
+        )
+
+        accepted_while_draining = False
         async with self._lock:
-            # Capacity check
-            running = sum(1 for t in self._tasks.values() if t.status == TaskStatus.RUNNING)
-            if running >= self.MAX_CONCURRENT_TASKS:
-                # Queue it
-                pass  # We still accept and run; asyncio handles scheduling
-
-            task_id = str(uuid.uuid4())[:8]
+            if self._draining:
+                await self._refuse_service_draining(operation_kind)
+            admitted = await asyncio.to_thread(coordinator.submit, request)
+            if not admitted.accepted:
+                self._record_operation_observation(
+                    "refused",
+                    operation_kind=operation_kind,
+                    result_code=admitted.code,
+                )
+                await self._observe_admission()
+                raise BackgroundTaskAdmissionError(
+                    admitted.code,
+                    retryable=admitted.retryable,
+                    retry_after_ms=admitted.retry_after_ms,
+                )
+            if self._draining:
+                operation = await asyncio.to_thread(
+                    coordinator.cancel,
+                    owner=owner,
+                    operation_id=admitted.operation_id,
+                    terminal_code="service_draining",
+                )
+                accepted_while_draining = True
+            else:
+                operation = await asyncio.to_thread(
+                    coordinator.query_operation,
+                    owner=owner,
+                    operation_id=admitted.operation_id,
+                )
+                if self._draining:
+                    operation = await asyncio.to_thread(
+                        coordinator.cancel,
+                        owner=owner,
+                        operation_id=admitted.operation_id,
+                        terminal_code="service_draining",
+                    )
+                    accepted_while_draining = True
             bg_task = BackgroundTask(
-                task_id=task_id,
+                task_id=str(admitted.operation_id),
                 chat_id=chat_id,
                 user_id=user_id,
-                status=TaskStatus.QUEUED,
                 kind=kind,
                 title=title,
             )
-            self._tasks[task_id] = bg_task
+            bg_task._attach_authority(
+                owner=owner,
+                operation=operation,
+                execution_fence=None,
+            )
+            self._tasks[bg_task.task_id] = bg_task
+            if not accepted_while_draining:
+                self._pending_executions[bg_task.task_id] = _BackgroundExecution(
+                    coro_factory=coro_factory,
+                    args=tuple(args),
+                    kwargs=dict(kwargs),
+                )
+
+            if not accepted_while_draining and admitted.state is OperationState.RUNNING:
+                try:
+                    claim = await asyncio.to_thread(
+                        coordinator.claim_operation,
+                        AdmissionClass.BACKGROUND,
+                        admitted.operation_id,
+                    )
+                except asyncio.CancelledError:
+                    raise
+                except Exception:
+                    claim = None
+                    logger.exception(
+                        "background operation %s initial handoff will retry",
+                        bg_task.task_id,
+                    )
+                if self._draining:
+                    self._pending_executions.pop(bg_task.task_id, None)
+                    if claim is not None:
+                        operation = await asyncio.to_thread(
+                            coordinator.terminalize,
+                            claim.fence,
+                            state=OperationState.CANCELLED,
+                            terminal_code="service_draining",
+                            safe_summary="Service draining",
+                            retry_after_ms=None,
+                        )
+                    else:
+                        operation = await asyncio.to_thread(
+                            coordinator.cancel,
+                            owner=owner,
+                            operation_id=admitted.operation_id,
+                            terminal_code="service_draining",
+                        )
+                    bg_task._apply_operation(operation, execution_fence=None)
+                    accepted_while_draining = True
+                elif claim is not None:
+                    self._start_claimed_task_locked(bg_task, claim)
+                else:
+                    logger.warning(
+                        "background operation %s was accepted but not selected locally",
+                        bg_task.task_id,
+                    )
+            if not accepted_while_draining:
+                self._ensure_dispatcher_locked()
+
+        self._record_operation_observation(
+            "accepted",
+            operation_kind=operation_kind,
+        )
+        await self._observe_admission()
+        if accepted_while_draining:
+            await self._observe_terminal(bg_task)
 
         self._record(
-            "INSERT INTO background_task (task_id, user_id, chat_id, kind, status, title) "
-            "VALUES (?, ?, ?, ?, ?, ?) ON CONFLICT (task_id) DO NOTHING",
-            (task_id, user_id, chat_id, kind, bg_task.status.value, title),
+            "INSERT INTO background_task (task_id, user_id, chat_id, kind, status, "
+            "title, operation_id, operation_execution_generation) "
+            "VALUES (?, ?, ?, ?, ?, ?, ?, ?) ON CONFLICT (task_id) DO NOTHING",
+            (
+                bg_task.task_id,
+                user_id,
+                chat_id,
+                kind,
+                bg_task.status.value,
+                title,
+                bg_task.task_id,
+                bg_task.operation_execution_generation,
+            ),
         )
-
-        vws = VirtualWebSocket(bg_task)
-        atask = asyncio.create_task(self._run_task(bg_task, vws, coro_factory, *args, **kwargs))
-        bg_task.asyncio_task = atask
-
         return bg_task
 
-    async def _run_task(self, bg_task: BackgroundTask, vws: VirtualWebSocket, coro_factory, *args, **kwargs):
-        """Execute the task, capture results, and notify watchers."""
-        try:
-            bg_task.status = TaskStatus.RUNNING
-            logger.info("Background task %s started (chat=%s user=%s)", bg_task.task_id, bg_task.chat_id, bg_task.user_id)
-            await coro_factory(vws, *args, **kwargs)
-            bg_task.status = TaskStatus.COMPLETED
-            logger.info("Background task %s completed with %d outputs", bg_task.task_id, len(bg_task.outputs))
-        except asyncio.CancelledError:
-            bg_task.status = TaskStatus.CANCELLED
-            logger.info("Background task %s cancelled", bg_task.task_id)
-        except Exception as e:
-            bg_task.status = TaskStatus.FAILED
-            bg_task.errors.append(str(e))
-            logger.error("Background task %s failed: %s", bg_task.task_id, e, exc_info=True)
-        finally:
-            bg_task.completed_at = datetime.now(timezone.utc)
-            await self._notify_watchers(bg_task)
+    def _start_claimed_task_locked(self, bg_task: BackgroundTask, claim: Any) -> bool:
+        """Start exactly one locally retained callable for an exact claim."""
 
-    async def _notify_watchers(self, bg_task: BackgroundTask):
-        """Notify all watchers of task completion."""
+        descriptor = self._pending_executions.get(bg_task.task_id)
+        if descriptor is None:
+            return False
+        if bg_task.asyncio_task is not None and not bg_task.asyncio_task.done():
+            return False
+        if str(claim.operation.operation_id) != bg_task.task_id:
+            raise RuntimeError("background dispatcher claimed the wrong operation")
+        bg_task._apply_operation(claim.operation, execution_fence=claim.fence)
+        bg_task._lease_loss_reason = None
+        self._pending_executions.pop(bg_task.task_id, None)
+        vws = VirtualWebSocket(bg_task)
+        bg_task._virtual_websocket = vws
+        bg_task.asyncio_task = asyncio.create_task(
+            self._run_task(
+                bg_task,
+                vws,
+                descriptor.coro_factory,
+                *descriptor.args,
+                **descriptor.kwargs,
+            ),
+            name=f"background-operation-{bg_task.task_id}",
+        )
+        return True
+
+    async def _dispatch_pending(self) -> None:
+        """Claim retained operations in durable FIFO order until none remain."""
+
+        coordinator = self._require_coordinator()
+        current_task = asyncio.current_task()
+        try:
+            while True:
+                notify: list[BackgroundTask] = []
+                made_progress = False
+                wakeup: asyncio.Event | None = None
+                async with self._lock:
+                    pending = sorted(
+                        (
+                            self._tasks[task_id]
+                            for task_id in self._pending_executions
+                            if task_id in self._tasks
+                        ),
+                        key=lambda task: (
+                            task.created_at,
+                            uuid.UUID(task.task_id).int,
+                        ),
+                    )
+                    if not pending:
+                        return
+
+                    for bg_task in pending:
+                        try:
+                            claim = await asyncio.to_thread(
+                                coordinator.claim_operation,
+                                AdmissionClass.BACKGROUND,
+                                uuid.UUID(bg_task.task_id),
+                            )
+                        except asyncio.CancelledError:
+                            raise
+                        except Exception:
+                            logger.exception(
+                                "background operation %s could not be claimed",
+                                bg_task.task_id,
+                            )
+                            break
+
+                        if claim is not None:
+                            made_progress = (
+                                self._start_claimed_task_locked(bg_task, claim)
+                                or made_progress
+                            )
+                            continue
+
+                        if bg_task._owner is None:
+                            self._pending_executions.pop(bg_task.task_id, None)
+                            continue
+                        try:
+                            operation = await asyncio.to_thread(
+                                coordinator.query_operation,
+                                owner=bg_task._owner,
+                                operation_id=uuid.UUID(bg_task.task_id),
+                            )
+                        except OperationNotFoundError:
+                            self._pending_executions.pop(bg_task.task_id, None)
+                            self._tasks.pop(bg_task.task_id, None)
+                            continue
+                        except asyncio.CancelledError:
+                            raise
+                        except Exception:
+                            logger.exception(
+                                "background operation %s could not be refreshed",
+                                bg_task.task_id,
+                            )
+                            break
+                        bg_task._apply_operation(operation)
+                        if operation.state in _TERMINAL_OPERATION_STATES:
+                            self._pending_executions.pop(bg_task.task_id, None)
+                            notify.append(bg_task)
+                            continue
+                        if operation.state is OperationState.QUEUED:
+                            # Exact claims preserve global FIFO.  If the first
+                            # local queued candidate cannot claim, no later
+                            # queued candidate can either; avoid an O(queue)
+                            # database poll while capacity is saturated.
+                            break
+
+                    if self._pending_executions and not made_progress:
+                        wakeup = self._dispatcher_wakeup
+                        if wakeup is not None:
+                            wakeup.clear()
+
+                for bg_task in notify:
+                    await self._observe_terminal(bg_task)
+                    await self._notify_watchers(bg_task)
+                if made_progress:
+                    await asyncio.sleep(0)
+                    continue
+                if wakeup is None:
+                    return
+                try:
+                    await asyncio.wait_for(
+                        wakeup.wait(), timeout=self._dispatch_poll_seconds
+                    )
+                except TimeoutError:
+                    pass
+        finally:
+            async with self._lock:
+                if self._dispatcher_task is current_task:
+                    self._dispatcher_task = None
+                    self._dispatcher_wakeup = None
+
+    async def _terminalize(
+        self,
+        bg_task: BackgroundTask,
+        *,
+        state: OperationState,
+        terminal_code: str | None,
+        safe_summary: str | None,
+        retry_after_ms: int | None = None,
+    ) -> OperationProjection | None:
+        coordinator = self._require_coordinator()
+        fence = bg_task._execution_fence
+        if fence is None:
+            return None
+        try:
+            operation = await asyncio.to_thread(
+                coordinator.terminalize,
+                fence,
+                state=state,
+                terminal_code=terminal_code,
+                safe_summary=safe_summary,
+                retry_after_ms=retry_after_ms,
+            )
+        except StaleExecutionFenceError:
+            bg_task._execution_fence = None
+            if bg_task._owner is None:
+                return None
+            operation = await asyncio.to_thread(
+                coordinator.query_operation,
+                owner=bg_task._owner,
+                operation_id=fence.operation_id,
+            )
+        bg_task._apply_operation(operation)
+        await self._observe_terminal(bg_task)
+        return operation
+
+    async def _handle_execution_lease_loss(
+        self,
+        bg_task: BackgroundTask,
+        vws: VirtualWebSocket,
+        *,
+        stale: bool,
+        worker: asyncio.Task | None,
+    ) -> None:
+        """Revoke local output/effect authority and stop a lost execution."""
+
+        coordinator = self._require_coordinator()
+        fence = bg_task._execution_fence
+        bg_task._lease_loss_reason = (
+            "execution_lease_lost" if stale else "execution_lease_renewal_failed"
+        )
+        await vws.close()
+
+        operation: OperationProjection | None = None
+        if stale:
+            bg_task._execution_fence = None
+        if stale and bg_task._owner is not None and fence is not None:
+            try:
+                operation = await asyncio.to_thread(
+                    coordinator.query_operation,
+                    owner=bg_task._owner,
+                    operation_id=fence.operation_id,
+                )
+            except OperationNotFoundError:
+                operation = None
+            except Exception:
+                logger.exception(
+                    "background operation %s could not refresh after lease loss",
+                    bg_task.task_id,
+                )
+        if operation is not None:
+            bg_task._apply_operation(operation)
+            if operation.state in _TERMINAL_OPERATION_STATES:
+                await self._observe_terminal(bg_task)
+                await self._notify_watchers(bg_task)
+
+        if worker is not None and worker is not asyncio.current_task():
+            if not worker.done():
+                worker.cancel()
+
+    async def _renew_execution_lease_loop(
+        self,
+        bg_task: BackgroundTask,
+        vws: VirtualWebSocket,
+        worker: asyncio.Task,
+    ) -> None:
+        coordinator = self._require_coordinator()
+        interval = self._lease_renewal_seconds()
+        loop = asyncio.get_running_loop()
+        next_renewal = loop.time() + interval
+        while True:
+            await asyncio.sleep(max(0.0, next_renewal - loop.time()))
+            next_renewal += interval
+            fence = bg_task._execution_fence
+            if fence is None:
+                return
+            try:
+                await asyncio.to_thread(coordinator.renew_execution_lease, fence)
+            except asyncio.CancelledError:
+                raise
+            except StaleExecutionFenceError:
+                logger.warning(
+                    "background operation %s lost its execution lease",
+                    bg_task.task_id,
+                )
+                await self._handle_execution_lease_loss(
+                    bg_task,
+                    vws,
+                    stale=True,
+                    worker=worker,
+                )
+                return
+            except Exception:
+                logger.exception(
+                    "background operation %s could not renew its execution lease",
+                    bg_task.task_id,
+                )
+                await self._handle_execution_lease_loss(
+                    bg_task,
+                    vws,
+                    stale=False,
+                    worker=worker,
+                )
+                return
+
+    async def _run_task(
+        self,
+        bg_task: BackgroundTask,
+        vws: VirtualWebSocket,
+        coro_factory,
+        *args,
+        **kwargs,
+    ) -> None:
+        terminal_state: OperationState | None = OperationState.COMPLETED
+        terminal_code = None
+        retry_after_ms = None
+        try:
+            fence = bg_task._execution_fence
+            if fence is not None:
+                try:
+                    await asyncio.to_thread(
+                        self._require_coordinator().renew_execution_lease,
+                        fence,
+                    )
+                except StaleExecutionFenceError:
+                    await self._handle_execution_lease_loss(
+                        bg_task,
+                        vws,
+                        stale=True,
+                        worker=None,
+                    )
+                    terminal_state = None
+                    return
+                except Exception:
+                    logger.exception(
+                        "background operation %s could not establish its execution lease",
+                        bg_task.task_id,
+                    )
+                    await self._handle_execution_lease_loss(
+                        bg_task,
+                        vws,
+                        stale=False,
+                        worker=None,
+                    )
+                    terminal_state = OperationState.RETRYABLE
+                    terminal_code = "execution_lease_renewal_failed"
+                    retry_after_ms = 1000
+                    return
+                worker = asyncio.current_task()
+                if worker is None:  # pragma: no cover - coroutine always runs in a task
+                    raise RuntimeError("background work requires an asyncio task")
+                bg_task._lease_task = asyncio.create_task(
+                    self._renew_execution_lease_loop(bg_task, vws, worker),
+                    name=f"background-lease-{bg_task.task_id}",
+                )
+            logger.info(
+                "Background task %s started (chat=%s user=%s)",
+                bg_task.task_id,
+                bg_task.chat_id,
+                bg_task.user_id,
+            )
+            await coro_factory(vws, *args, **kwargs)
+        except asyncio.CancelledError:
+            if bg_task._lease_loss_reason == "execution_lease_lost":
+                terminal_state = None
+            elif bg_task._lease_loss_reason == "execution_lease_renewal_failed":
+                terminal_state = OperationState.RETRYABLE
+                terminal_code = "execution_lease_renewal_failed"
+                retry_after_ms = 1000
+            else:
+                terminal_state = OperationState.CANCELLED
+                terminal_code = (
+                    bg_task._cancellation_terminal_code or "cancelled_by_user"
+                )
+        except Exception as exc:
+            terminal_state = OperationState.FAILED
+            terminal_code = "operation_failed"
+            bg_task.errors.append(str(exc))
+            logger.error(
+                "Background task %s failed: %s",
+                bg_task.task_id,
+                exc,
+                exc_info=True,
+            )
+        finally:
+            lease_task = bg_task._lease_task
+            if lease_task is not None and lease_task is not asyncio.current_task():
+                lease_task.cancel()
+                await asyncio.gather(lease_task, return_exceptions=True)
+            bg_task._lease_task = None
+            await vws.close()
+            if bg_task._virtual_websocket is vws:
+                bg_task._virtual_websocket = None
+
+            if terminal_state is OperationState.FAILED:
+                safe_summary = "Background task failed"
+            elif terminal_state is OperationState.CANCELLED:
+                safe_summary = bg_task._cancellation_safe_summary or "Cancelled"
+            elif terminal_state is OperationState.RETRYABLE:
+                safe_summary = "Execution lease renewal failed"
+            else:
+                safe_summary = "Completed"
+            operation = None
+            if terminal_state is not None:
+                try:
+                    operation = await self._terminalize(
+                        bg_task,
+                        state=terminal_state,
+                        terminal_code=terminal_code,
+                        safe_summary=safe_summary,
+                        retry_after_ms=retry_after_ms,
+                    )
+                except Exception:
+                    logger.exception(
+                        "background operation %s could not be terminalized",
+                        bg_task.task_id,
+                    )
+            if operation is not None and operation.state in _TERMINAL_OPERATION_STATES:
+                await self._notify_watchers(bg_task)
+            self._wake_dispatcher()
+
+    async def _notify_watchers(self, bg_task: BackgroundTask) -> None:
+        if bg_task._notification_sent:
+            return
+        bg_task._notification_sent = True
         notification = {
             "type": "task_completed",
             "payload": {
                 "task_id": bg_task.task_id,
                 "chat_id": bg_task.chat_id,
-                "status": bg_task.status.value,
-                "completed_at": bg_task.completed_at.isoformat() if bg_task.completed_at else None,
+                "status": bg_task._canonical_status().value,
+                "completed_at": (
+                    bg_task._operation.terminal_at.isoformat()
+                    if bg_task._operation is not None
+                    and bg_task._operation.terminal_at is not None
+                    else None
+                ),
             },
         }
-        summary = self._summary_from_outputs(bg_task)
-        # 055 bg-continuity: the orchestrator fan reaches EVERY socket of the
-        # user — the originator may be long gone. Watchers still get the frame
-        # (clients de-dupe by task_id), covering the fan-failure case too.
+        if bg_task._canonical_status() is TaskStatus.COMPLETED:
+            summary = self._summary_from_outputs(bg_task)
+        elif bg_task._operation is not None:
+            summary = bg_task._operation.safe_summary or "Background task failed"
+        else:  # pragma: no cover - managed notifications require an operation
+            summary = "Background task failed"
         fanned = 0
         if self._on_complete is not None and flags.is_enabled("bg_continuity"):
             notification["payload"]["summary"] = summary
             try:
                 fanned = int(await self._on_complete(bg_task, notification) or 0)
             except Exception:
-                logger.debug("completion fan failed for task %s", bg_task.task_id, exc_info=True)
-        # Watchers are WS objects that we can send to. send_text — FastAPI's
-        # send_json would re-encode the already-dumped string and clients
-        # would receive (and drop) a JSON string literal.
+                logger.debug(
+                    "completion fan failed for task %s",
+                    bg_task.task_id,
+                    exc_info=True,
+                )
         for ws in bg_task.watchers:
             try:
                 await ws.send_text(json.dumps(notification))
             except Exception:
-                logger.debug("Failed to notify watcher for task %s", bg_task.task_id, exc_info=True)
+                logger.debug(
+                    "Failed to notify watcher for task %s",
+                    bg_task.task_id,
+                    exc_info=True,
+                )
         bg_task.watchers.clear()
         self._record(
-            "INSERT INTO background_task (task_id, user_id, chat_id, kind, status, title, summary, completed_at, notified) "
-            "VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?) ON CONFLICT (task_id) DO UPDATE SET "
-            "status = EXCLUDED.status, summary = EXCLUDED.summary, "
-            "completed_at = EXCLUDED.completed_at, notified = EXCLUDED.notified",
-            (bg_task.task_id, bg_task.user_id, bg_task.chat_id, bg_task.kind,
-             bg_task.status.value, bg_task.title, summary, bg_task.completed_at,
-             fanned > 0),
+            "INSERT INTO background_task (task_id, user_id, chat_id, kind, status, "
+            "title, summary, completed_at, notified, operation_id, "
+            "operation_execution_generation) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?) "
+            "ON CONFLICT (task_id) DO UPDATE SET status = EXCLUDED.status, "
+            "summary = EXCLUDED.summary, completed_at = EXCLUDED.completed_at, "
+            "notified = EXCLUDED.notified, operation_id = EXCLUDED.operation_id, "
+            "operation_execution_generation = EXCLUDED.operation_execution_generation",
+            (
+                bg_task.task_id,
+                bg_task.user_id,
+                bg_task.chat_id,
+                bg_task.kind,
+                bg_task._canonical_status().value,
+                bg_task.title,
+                summary,
+                bg_task.completed_at,
+                fanned > 0,
+                bg_task.task_id,
+                bg_task.operation_execution_generation,
+            ),
         )
 
     @staticmethod
     def _summary_from_outputs(bg_task: BackgroundTask) -> str:
-        """One-line completion summary: the last narrative/status text the
-        turn captured (mirrors ``run_scheduled_turn``), else the last error."""
         summary = ""
         for out in bg_task.outputs:
             if not isinstance(out, dict):
@@ -270,36 +1253,863 @@ class BackgroundTaskManager:
                         summary = content.strip()
                         break
                 continue
-            txt = out.get("text") or out.get("message")
-            if not txt and isinstance(out.get("payload"), dict):
-                txt = out["payload"].get("text") or out["payload"].get("message")
-            if isinstance(txt, str) and txt.strip():
-                summary = txt.strip()
+            text = out.get("text") or out.get("message")
+            if not text and isinstance(out.get("payload"), dict):
+                text = out["payload"].get("text") or out["payload"].get("message")
+            if isinstance(text, str) and text.strip():
+                summary = text.strip()
         if not summary and bg_task.errors:
             summary = str(bg_task.errors[-1])
         return " ".join(summary.split())[:200]
 
+    async def _refresh(self, bg_task: BackgroundTask) -> bool:
+        coordinator = self._require_coordinator()
+        if bg_task._owner is None:
+            return True
+        try:
+            operation = await asyncio.to_thread(
+                coordinator.query_operation,
+                owner=bg_task._owner,
+                operation_id=uuid.UUID(bg_task.task_id),
+            )
+        except OperationNotFoundError:
+            return False
+        bg_task._apply_operation(operation)
+        await self._observe_terminal(bg_task)
+        return True
+
     async def cancel(self, task_id: str) -> bool:
-        """Cancel a running background task."""
+        coordinator = self._require_coordinator()
+        worker: asyncio.Task | None = None
+        bg_task: BackgroundTask | None = None
         async with self._lock:
             bg_task = self._tasks.get(task_id)
-            if bg_task and bg_task.asyncio_task and not bg_task.asyncio_task.done():
-                bg_task.asyncio_task.cancel()
-                return True
-        return False
+            if bg_task is None or bg_task._owner is None:
+                return False
+            if not await self._refresh(bg_task):
+                self._pending_executions.pop(task_id, None)
+                self._tasks.pop(task_id, None)
+                return False
+            if (
+                bg_task._operation is None
+                or bg_task._operation.state in _TERMINAL_OPERATION_STATES
+            ):
+                return False
+
+            operation = await asyncio.to_thread(
+                coordinator.cancel,
+                owner=bg_task._owner,
+                operation_id=uuid.UUID(bg_task.task_id),
+                terminal_code="cancelled_by_user",
+            )
+            bg_task._apply_operation(operation)
+            await self._observe_terminal(bg_task)
+            self._pending_executions.pop(task_id, None)
+            if bg_task._virtual_websocket is not None:
+                await bg_task._virtual_websocket.close()
+
+            worker = bg_task.asyncio_task
+            if (
+                operation.state is OperationState.RUNNING
+                and bg_task._execution_fence is not None
+                and (worker is None or worker.done())
+            ):
+                terminal = await self._terminalize(
+                    bg_task,
+                    state=OperationState.CANCELLED,
+                    terminal_code="cancelled_by_user",
+                    safe_summary="Cancelled",
+                )
+                if terminal is not None:
+                    bg_task._apply_operation(terminal)
+
+        if worker is not None and not worker.done():
+            worker.cancel()
+            if worker is not asyncio.current_task():
+                await asyncio.gather(worker, return_exceptions=True)
+
+        # Cancellation before a newly created asyncio task's first scheduling
+        # does not enter that coroutine's ``finally`` block.  Only after the
+        # wrapper is fully joined may this fallback clear the durable slot;
+        # otherwise a replacement could start while old user cleanup runs.
+        if worker is None or worker.done():
+            async with self._lock:
+                if await self._refresh(bg_task):
+                    if (
+                        bg_task._operation is not None
+                        and bg_task._operation.state is OperationState.RUNNING
+                        and bg_task._execution_fence is not None
+                    ):
+                        terminal = await self._terminalize(
+                            bg_task,
+                            state=OperationState.CANCELLED,
+                            terminal_code="cancelled_by_user",
+                            safe_summary="Cancelled",
+                        )
+                        if terminal is not None:
+                            bg_task._apply_operation(terminal)
+        notify = (
+            bg_task._operation is not None
+            and bg_task._operation.state in _TERMINAL_OPERATION_STATES
+        )
+        self._wake_dispatcher()
+        if notify:
+            await self._notify_watchers(bg_task)
+        return True
+
+    @staticmethod
+    def _consume_drain_helper(task: asyncio.Task) -> None:
+        """Retrieve helper failures without extending the bounded drain."""
+
+        try:
+            task.exception()
+        except (asyncio.CancelledError, Exception):
+            return
+
+    async def _request_service_cancellation(
+        self,
+        bg_task: BackgroundTask,
+    ) -> None:
+        if bg_task._owner is None or bg_task._operation is None:
+            return
+        if bg_task._operation.state in _TERMINAL_OPERATION_STATES:
+            await self._observe_terminal(bg_task)
+            return
+        try:
+            operation = await asyncio.to_thread(
+                self._require_coordinator().cancel,
+                owner=bg_task._owner,
+                operation_id=uuid.UUID(bg_task.task_id),
+                terminal_code="service_draining",
+            )
+        except OperationNotFoundError:
+            return
+        except asyncio.CancelledError:
+            raise
+        except Exception:
+            logger.exception(
+                "background operation %s shutdown cancellation failed",
+                bg_task.task_id,
+            )
+            return
+        bg_task._apply_operation(operation)
+        await self._observe_terminal(bg_task)
+
+    async def _force_service_terminal(
+        self,
+        bg_task: BackgroundTask,
+    ) -> None:
+        operation = bg_task._operation
+        if operation is None:
+            return
+        if operation.state in _TERMINAL_OPERATION_STATES:
+            bg_task._execution_fence = None
+            await self._observe_terminal(bg_task)
+            return
+        if bg_task._execution_fence is not None:
+            try:
+                terminal = await self._terminalize(
+                    bg_task,
+                    state=OperationState.CANCELLED,
+                    terminal_code="service_draining",
+                    safe_summary="Service draining",
+                )
+            except asyncio.CancelledError:
+                raise
+            except Exception:
+                logger.exception(
+                    "background operation %s shutdown terminalization failed",
+                    bg_task.task_id,
+                )
+                return
+            if terminal is not None and terminal.state in _TERMINAL_OPERATION_STATES:
+                bg_task._execution_fence = None
+            return
+        await self._request_service_cancellation(bg_task)
+        if (
+            bg_task._operation is not None
+            and bg_task._operation.state in _TERMINAL_OPERATION_STATES
+        ):
+            bg_task._execution_fence = None
+
+    async def drain(self, *, timeout_seconds: float = 5.0) -> int:
+        """Boundedly fence and settle all locally retained background work.
+
+        The manager remains permanently draining after this call: subsequent
+        submissions receive the explicit retryable ``service_draining``
+        refusal.  The returned integer is the count of cancellation-resistant
+        user coroutines still executing locally after their durable operation
+        and captured-output authority have both been revoked.
+        """
+
+        if (
+            isinstance(timeout_seconds, bool)
+            or not isinstance(timeout_seconds, (int, float))
+            or not math.isfinite(float(timeout_seconds))
+            or timeout_seconds <= 0
+        ):
+            raise ValueError("drain timeout must be finite and positive")
+        self._require_coordinator()
+        loop = asyncio.get_running_loop()
+        started_at = loop.time()
+        deadline = started_at + float(timeout_seconds)
+        graceful_deadline = started_at + (float(timeout_seconds) * 0.7)
+
+        # Publish the irreversible service state before any lock acquisition.
+        # A submitter already waiting on coordinator I/O will observe this flag
+        # when that I/O returns and settle its just-accepted pre-handoff record.
+        self._draining = True
+        drain_lock_acquired = False
+        state_lock_acquired = False
+        background_tasks: tuple[BackgroundTask, ...] = ()
+        dispatcher: asyncio.Task | None = None
+        retention: asyncio.Task | None = None
+        admission_observer: asyncio.Task | None = None
+        workers: set[asyncio.Task] = set()
+        lease_tasks: set[asyncio.Task] = set()
+        compatibility_writes: set[asyncio.Task] = set()
+        infrastructure_tasks: set[asyncio.Task] = set()
+        cancellation_helpers: set[asyncio.Task] = set()
+        force_helpers: set[asyncio.Task] = set()
+        try:
+            if self._drain_lock.locked():
+                remaining = max(0.0, deadline - loop.time())
+                if remaining <= 0:
+                    raise TimeoutError
+                await asyncio.wait_for(
+                    self._drain_lock.acquire(),
+                    timeout=remaining,
+                )
+            else:
+                await self._drain_lock.acquire()
+            drain_lock_acquired = True
+
+            if self._lock.locked():
+                remaining = max(0.0, graceful_deadline - loop.time())
+                if remaining > 0:
+                    try:
+                        await asyncio.wait_for(
+                            self._lock.acquire(),
+                            timeout=remaining,
+                        )
+                        state_lock_acquired = True
+                    except TimeoutError:
+                        pass
+            else:
+                await self._lock.acquire()
+                state_lock_acquired = True
+
+            # This snapshot is event-loop atomic even if a coordinator call is
+            # holding the logical state lock in another suspended coroutine.
+            # No new submitter may pass its draining checks, and every awaited
+            # submit/claim path rechecks the flag before starting user code.
+            self._pending_executions.clear()
+            self._wake_dispatcher()
+            background_tasks = tuple(self._tasks.values())
+            dispatcher = self._dispatcher_task
+            retention = self._retention_task
+            admission_observer = self._admission_observer_task
+            self._admission_observation_requested = False
+            compatibility_writes = {
+                task
+                for task in self._compatibility_write_tasks
+                if not task.done()
+            }
+            if self._retention_stop is not None:
+                self._retention_stop.set()
+            for bg_task in background_tasks:
+                bg_task._cancellation_terminal_code = "service_draining"
+                bg_task._cancellation_safe_summary = "Service draining"
+                if bg_task._virtual_websocket is not None:
+                    await bg_task._virtual_websocket.close()
+            if state_lock_acquired:
+                self._lock.release()
+                state_lock_acquired = False
+
+            workers = {
+                bg_task.asyncio_task
+                for bg_task in background_tasks
+                if bg_task.asyncio_task is not None
+                and not bg_task.asyncio_task.done()
+            }
+            lease_tasks = {
+                bg_task._lease_task
+                for bg_task in background_tasks
+                if bg_task._lease_task is not None
+                and not bg_task._lease_task.done()
+            }
+            infrastructure_tasks = {
+                task
+                for task in (
+                    dispatcher,
+                    retention,
+                    admission_observer,
+                    *lease_tasks,
+                    *compatibility_writes,
+                )
+                if task is not None and not task.done()
+            }
+            for task in (*infrastructure_tasks, *workers):
+                task.cancel()
+
+            cancellation_helpers = {
+                asyncio.create_task(
+                    self._request_service_cancellation(bg_task),
+                    name=f"background-drain-cancel-{bg_task.task_id}",
+                )
+                for bg_task in background_tasks
+                if bg_task._operation is not None
+                and bg_task._operation.state not in _TERMINAL_OPERATION_STATES
+            }
+            graceful_tasks = {
+                *infrastructure_tasks,
+                *workers,
+                *cancellation_helpers,
+            }
+            if graceful_tasks:
+                _, pending = await asyncio.wait(
+                    graceful_tasks,
+                    timeout=max(0.0, graceful_deadline - loop.time()),
+                )
+                for helper in pending.intersection(cancellation_helpers):
+                    helper.add_done_callback(self._consume_drain_helper)
+                    helper.cancel()
+
+            force_helpers = {
+                asyncio.create_task(
+                    self._force_service_terminal(bg_task),
+                    name=f"background-drain-terminal-{bg_task.task_id}",
+                )
+                for bg_task in background_tasks
+                if bg_task._operation is not None
+                and bg_task._operation.state not in _TERMINAL_OPERATION_STATES
+            }
+            if force_helpers:
+                _, pending_force = await asyncio.wait(
+                    force_helpers,
+                    timeout=max(0.0, deadline - loop.time()),
+                )
+                for helper in pending_force:
+                    helper.add_done_callback(self._consume_drain_helper)
+                    helper.cancel()
+        except TimeoutError:
+            # A concurrent drain owns settlement. This caller still obeys its
+            # own deadline and reports the currently visible local remainder.
+            background_tasks = tuple(self._tasks.values())
+            workers = {
+                bg_task.asyncio_task
+                for bg_task in background_tasks
+                if bg_task.asyncio_task is not None
+                and not bg_task.asyncio_task.done()
+            }
+        finally:
+            if state_lock_acquired:
+                self._lock.release()
+            for task in (*infrastructure_tasks, *workers):
+                if not task.done():
+                    task.add_done_callback(self._consume_drain_helper)
+                    task.cancel()
+            for helper in (*cancellation_helpers, *force_helpers):
+                if not helper.done():
+                    helper.add_done_callback(self._consume_drain_helper)
+                    helper.cancel()
+            for bg_task in background_tasks:
+                # No local worker retains publication authority after the
+                # bounded deadline, including when its final database CAS is
+                # still unavailable. The durable lease may recover elsewhere,
+                # but this process can emit nothing late.
+                bg_task._execution_fence = None
+                if bg_task._lease_task in lease_tasks:
+                    bg_task._lease_task = None
+                bg_task.watchers.clear()
+            if self._dispatcher_task is dispatcher:
+                self._dispatcher_task = None
+                self._dispatcher_wakeup = None
+            if self._retention_task is retention:
+                self._retention_task = None
+                self._retention_stop = None
+            if self._admission_observer_task is admission_observer:
+                self._admission_observer_task = None
+            self._admission_observation_requested = False
+            self._compatibility_write_tasks.difference_update(
+                task for task in compatibility_writes if task.done()
+            )
+            if drain_lock_acquired:
+                self._drain_lock.release()
+
+        remainder = sum(not worker.done() for worker in workers)
+        self._record_operation_observation(
+            "drain",
+            operation_kind="background_chat",
+            result_code=("complete" if remainder == 0 else "fenced_remainder"),
+            phase="shutdown",
+        )
+        return remainder
 
     async def get(self, task_id: str) -> Optional[BackgroundTask]:
-        return self._tasks.get(task_id)
+        bg_task = self._tasks.get(task_id)
+        if bg_task is None:
+            return None
+        if not await self._refresh(bg_task):
+            self._pending_executions.pop(task_id, None)
+            self._tasks.pop(task_id, None)
+            return None
+        return bg_task
 
-    async def list_for_user(self, user_id: str, limit: int = 20) -> List[BackgroundTask]:
-        """Return recent tasks for a user, newest first."""
-        user_tasks = [t for t in self._tasks.values() if t.user_id == user_id]
-        user_tasks.sort(key=lambda t: t.created_at, reverse=True)
+    async def list_for_user(
+        self, user_id: str, limit: int = 20
+    ) -> List[BackgroundTask]:
+        user_tasks = []
+        for task_id, task in tuple(self._tasks.items()):
+            if task.user_id != user_id:
+                continue
+            if await self._refresh(task):
+                user_tasks.append(task)
+            else:
+                self._pending_executions.pop(task_id, None)
+                self._tasks.pop(task_id, None)
+        user_tasks.sort(key=lambda task: task.created_at, reverse=True)
         return user_tasks[:limit]
 
     async def get_active_for_chat(self, chat_id: str) -> Optional[BackgroundTask]:
-        """Return the currently active task for a chat, if any."""
-        for t in self._tasks.values():
-            if t.chat_id == chat_id and t.status in (TaskStatus.QUEUED, TaskStatus.RUNNING):
-                return t
+        for task_id, task in tuple(self._tasks.items()):
+            if task.chat_id != chat_id:
+                continue
+            if not await self._refresh(task):
+                self._pending_executions.pop(task_id, None)
+                self._tasks.pop(task_id, None)
+                continue
+            if (
+                task._operation is not None
+                and task._operation.state
+                in {OperationState.QUEUED, OperationState.RUNNING}
+            ):
+                return task
         return None
+
+    async def prune_missing(self) -> int:
+        """Drop cache entries whose durable operation was already purged."""
+
+        removed = 0
+        for task_id, task in tuple(self._tasks.items()):
+            if not await self._refresh(task):
+                self._pending_executions.pop(task_id, None)
+                self._tasks.pop(task_id, None)
+                removed += 1
+        return removed
+
+    def _oldest_retention_backlog_lag_seconds(
+        self,
+        fence: ExecutionFence,
+    ) -> float:
+        """Return the age of the oldest row currently eligible for purge."""
+
+        coordinator = self._require_coordinator()
+        retention_seconds = int(coordinator.operation_retention.total_seconds())
+        with coordinator.fenced_transaction(fence) as cursor:
+            execute = getattr(cursor, "execute", None)
+            fetchone = getattr(cursor, "fetchone", None)
+            if callable(execute) and callable(fetchone):
+                execute(
+                    """
+                    WITH eligible AS (
+                        SELECT submission.purge_after AS due_at
+                        FROM operation_submission_result AS submission
+                        LEFT JOIN operation_record AS operation
+                          ON operation.operation_id = submission.operation_id
+                        WHERE submission.purge_after < CURRENT_TIMESTAMP
+                          AND (
+                              NOT submission.accepted
+                              OR operation.operation_id IS NULL
+                              OR (
+                                  operation.state IN (
+                                      'completed', 'failed', 'cancelled', 'retryable'
+                                  )
+                                  AND operation.purge_after < CURRENT_TIMESTAMP
+                              )
+                          )
+                        UNION ALL
+                        SELECT operation.purge_after AS due_at
+                        FROM operation_record AS operation
+                        WHERE operation.state IN (
+                            'completed', 'failed', 'cancelled', 'retryable'
+                        )
+                          AND operation.purge_after < CURRENT_TIMESTAMP
+                          AND NOT EXISTS (
+                              SELECT 1
+                              FROM operation_submission_result AS submission
+                              WHERE submission.accepted
+                                AND submission.operation_id = operation.operation_id
+                          )
+                        UNION ALL
+                        SELECT COALESCE(task.completed_at, task.created_at)
+                               + (%s * INTERVAL '1 second') AS due_at
+                        FROM background_task AS task
+                        WHERE task.operation_id IS NULL
+                          AND COALESCE(task.completed_at, task.created_at) < (
+                              CURRENT_TIMESTAMP - (%s * INTERVAL '1 second')
+                          )
+                          AND (
+                              task.operation_execution_generation IS NOT NULL
+                              OR task.task_id ~* '^[0-9a-f]{8}-[0-9a-f]{4}-[1-5][0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}$'
+                              OR (
+                                  task.task_id ~* '^[0-9a-f]{8}$'
+                                  AND task.status IN (
+                                      'completed', 'failed', 'cancelled', 'retryable'
+                                  )
+                              )
+                          )
+                    )
+                    SELECT COALESCE(
+                        GREATEST(
+                            0,
+                            EXTRACT(EPOCH FROM CURRENT_TIMESTAMP - MIN(due_at))
+                        ),
+                        0
+                    ) AS lag_seconds
+                    FROM eligible
+                    """,
+                    (retention_seconds, retention_seconds),
+                )
+                row = fetchone()
+                if row is None:
+                    return 0.0
+                value = (
+                    row["lag_seconds"]
+                    if isinstance(row, Mapping)
+                    else row[0]
+                )
+                return max(0.0, float(value or 0.0))
+
+            # The explicitly injected in-memory repository is yielded as the
+            # fenced-transaction sentinel. Mirror its purge eligibility so
+            # deterministic tests exercise the same oldest-overdue meaning.
+            operations = getattr(cursor, "_operations", None)
+            submissions = getattr(cursor, "_submissions", None)
+            if not isinstance(operations, Mapping) or not isinstance(
+                submissions, Mapping
+            ):
+                return 0.0
+            now_factory = getattr(coordinator, "_now", None)
+            current_time = now_factory() if callable(now_factory) else None
+            if current_time is None:
+                current_time = datetime.now(timezone.utc)
+            due_times: list[datetime] = []
+            for submission in submissions.values():
+                if submission.purge_after >= current_time:
+                    continue
+                operation = (
+                    operations.get(submission.operation_id)
+                    if submission.operation_id is not None
+                    else None
+                )
+                if submission.accepted and operation is not None and (
+                    operation.state not in _TERMINAL_OPERATION_STATES
+                    or operation.purge_after is None
+                    or operation.purge_after >= current_time
+                ):
+                    continue
+                due_times.append(submission.purge_after)
+            for operation in operations.values():
+                if (
+                    operation.state not in _TERMINAL_OPERATION_STATES
+                    or operation.purge_after is None
+                    or operation.purge_after >= current_time
+                ):
+                    continue
+                if any(
+                    submission.accepted
+                    and submission.operation_id == operation.operation_id
+                    for submission in submissions.values()
+                ):
+                    continue
+                due_times.append(operation.purge_after)
+            if not due_times:
+                return 0.0
+            return max(0.0, (current_time - min(due_times)).total_seconds())
+
+    def _fenced_compatibility_cleanup(
+        self,
+        fence: ExecutionFence,
+        *,
+        limit: int,
+    ) -> int:
+        """Bulk-delete retained FK-null rows in the maintenance transaction."""
+
+        coordinator = self._require_coordinator()
+        retention_seconds = int(coordinator.operation_retention.total_seconds())
+        with coordinator.fenced_transaction(fence) as cursor:
+            # The deterministic in-memory repository yields itself rather than
+            # a SQL cursor.  It has no compatibility table to clean.
+            if not callable(getattr(cursor, "execute", None)):
+                return 0
+            cursor.execute(
+                """
+                WITH candidates AS (
+                    SELECT task_id
+                    FROM background_task
+                    WHERE operation_id IS NULL
+                      AND COALESCE(completed_at, created_at) < (
+                          CURRENT_TIMESTAMP - (%s * INTERVAL '1 second')
+                      )
+                      AND (
+                          operation_execution_generation IS NOT NULL
+                          OR task_id ~* '^[0-9a-f]{8}-[0-9a-f]{4}-[1-5][0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}$'
+                          OR (
+                              task_id ~* '^[0-9a-f]{8}$'
+                              AND status IN (
+                                  'completed', 'failed', 'cancelled', 'retryable'
+                              )
+                          )
+                      )
+                    ORDER BY COALESCE(completed_at, created_at), task_id
+                    FOR UPDATE SKIP LOCKED
+                    LIMIT %s
+                )
+                DELETE FROM background_task AS task
+                USING candidates
+                WHERE task.task_id = candidates.task_id
+                RETURNING task.task_id
+                """,
+                (retention_seconds, limit),
+            )
+            return len(cursor.fetchall())
+
+    async def run_retention_sweep_once(
+        self,
+        *,
+        limit: int = 100,
+        max_batches: int = 10,
+        compatibility_limit: int = 1000,
+    ) -> RetentionSweepResult | None:
+        """Run one bounded, maintenance-admitted retention operation.
+
+        ``None`` means maintenance capacity was unavailable.  The caller may
+        retry sooner, while interactive/background capacity and latency remain
+        governed by their independent child-class limits.
+        """
+
+        if limit <= 0 or max_batches <= 0 or compatibility_limit <= 0:
+            raise ValueError("retention sweep bounds must be positive")
+        if self._draining:
+            self._record_operation_observation(
+                "refused",
+                operation_kind="operation_retention_sweep",
+                result_code="service_draining",
+            )
+            raise self._service_draining_error()
+        coordinator = self._require_coordinator()
+        owner = OperationOwner(
+            owner_scope=OwnerScope.MAINTENANCE,
+            owner_user_id=None,
+            connection_scope_id=None,
+        )
+        request = OperationRequest(
+            operation_kind="operation_retention_sweep",
+            admission_class=AdmissionClass.MAINTENANCE,
+            owner=owner,
+            submission_id=uuid.uuid4(),
+            idempotency_namespace=None,
+            idempotency_key=None,
+            normalized_input_digest=None,
+            chat_id=None,
+            parent_operation_id=None,
+            connection_generation=None,
+            request_generation=None,
+        )
+        admitted = await asyncio.to_thread(coordinator.submit, request)
+        if not admitted.accepted:
+            return None
+        claim = await asyncio.to_thread(
+            coordinator.claim_operation,
+            AdmissionClass.MAINTENANCE,
+            admitted.operation_id,
+        )
+        if claim is None:
+            await asyncio.to_thread(
+                coordinator.cancel,
+                owner=owner,
+                operation_id=admitted.operation_id,
+                terminal_code="maintenance_capacity_unavailable",
+            )
+            return None
+
+        operations = 0
+        submissions = 0
+        batches = 0
+        compatibility_rows = 0
+        saturated = False
+        retention_lag_seconds = 0.0
+        try:
+            try:
+                retention_lag_seconds = await asyncio.to_thread(
+                    self._oldest_retention_backlog_lag_seconds,
+                    claim.fence,
+                )
+            except asyncio.CancelledError:
+                raise
+            except Exception:
+                logger.debug(
+                    "retention backlog telemetry failed",
+                    exc_info=True,
+                )
+            for _ in range(max_batches):
+                await asyncio.to_thread(
+                    coordinator.renew_execution_lease,
+                    claim.fence,
+                )
+                result = await asyncio.to_thread(
+                    coordinator.purge_expired,
+                    limit=limit,
+                    fence=claim.fence,
+                )
+                operations += result.operations
+                submissions += result.submissions
+                batches += 1
+                saturated = (
+                    result.operations >= limit or result.submissions >= limit
+                )
+                if not saturated:
+                    break
+            await asyncio.to_thread(
+                coordinator.renew_execution_lease,
+                claim.fence,
+            )
+            compatibility_rows = await asyncio.to_thread(
+                self._fenced_compatibility_cleanup,
+                claim.fence,
+                limit=compatibility_limit,
+            )
+            await asyncio.to_thread(
+                coordinator.terminalize,
+                claim.fence,
+                state=OperationState.COMPLETED,
+                terminal_code=None,
+                safe_summary="Retention sweep completed",
+                retry_after_ms=None,
+            )
+        except asyncio.CancelledError:
+            try:
+                await asyncio.to_thread(
+                    coordinator.terminalize,
+                    claim.fence,
+                    state=OperationState.CANCELLED,
+                    terminal_code="retention_sweep_cancelled",
+                    safe_summary="Retention sweep cancelled",
+                    retry_after_ms=None,
+                )
+            except Exception:
+                logger.exception("retention sweep operation could not be terminalized")
+            raise
+        except Exception:
+            try:
+                await asyncio.to_thread(
+                    coordinator.terminalize,
+                    claim.fence,
+                    state=OperationState.RETRYABLE,
+                    terminal_code="retention_sweep_failed",
+                    safe_summary="Retention sweep retryable",
+                    retry_after_ms=60_000,
+                )
+            except Exception:
+                logger.exception("retention sweep operation could not be terminalized")
+            raise
+        await self.prune_missing()
+        sweep_result = RetentionSweepResult(
+            operations=operations,
+            submissions=submissions,
+            compatibility_rows=compatibility_rows,
+            batches=batches,
+            backlog=saturated or compatibility_rows >= compatibility_limit,
+        )
+        observability = self._observability
+        if observability is not None:
+            try:
+                observability.observe_retention(
+                    purged_count=(
+                        operations + submissions + compatibility_rows
+                    ),
+                    lag_seconds=retention_lag_seconds,
+                )
+            except Exception:
+                logger.debug("retention sweep telemetry failed", exc_info=True)
+        return sweep_result
+
+    def start_retention_sweep(
+        self,
+        *,
+        interval_seconds: float = 3300,
+        retry_seconds: float = 60,
+        on_sweep=None,
+    ) -> asyncio.Task:
+        """Start the immediate and periodic production retention loop."""
+
+        if not 0 < interval_seconds <= 3300:
+            raise ValueError("retention interval must be in (0, 3300] seconds")
+        if not 0 < retry_seconds <= interval_seconds:
+            raise ValueError("retention retry must be in (0, interval] seconds")
+        if self._draining:
+            self._record_operation_observation(
+                "refused",
+                operation_kind="operation_retention_sweep",
+                result_code="service_draining",
+            )
+            raise self._service_draining_error()
+        if self._retention_task is not None and not self._retention_task.done():
+            return self._retention_task
+        self._retention_stop = asyncio.Event()
+
+        async def _loop() -> None:
+            delay = 0.0
+            while self._retention_stop is not None:
+                if delay:
+                    try:
+                        await asyncio.wait_for(
+                            self._retention_stop.wait(), timeout=delay
+                        )
+                        return
+                    except TimeoutError:
+                        pass
+                try:
+                    result = await self.run_retention_sweep_once()
+                    if result is not None and on_sweep is not None:
+                        callback_result = on_sweep()
+                        if asyncio.iscoroutine(callback_result):
+                            await callback_result
+                    delay = (
+                        interval_seconds
+                        if result is not None
+                        and not result.backlog
+                        else retry_seconds
+                    )
+                except asyncio.CancelledError:
+                    raise
+                except Exception:
+                    logger.exception("operation retention sweep failed")
+                    delay = retry_seconds
+
+        self._retention_task = asyncio.create_task(
+            _loop(), name="operation-retention-sweep"
+        )
+        return self._retention_task
+
+    async def stop_retention_sweep(self) -> None:
+        """Cancel and await the tracked retention task during shutdown."""
+
+        task = self._retention_task
+        if task is None:
+            return
+        if self._retention_stop is not None:
+            self._retention_stop.set()
+        task.cancel()
+        await asyncio.gather(task, return_exceptions=True)
+        self._retention_task = None
+        self._retention_stop = None
+
+    async def purge_expired(self, *, limit: int = 100) -> PurgeResult:
+        """Delegate retention to the coordinator, then prune missing DTOs."""
+
+        coordinator = self._require_coordinator()
+        result = await asyncio.to_thread(coordinator.purge_expired, limit=limit)
+        await self.prune_missing()
+        return result

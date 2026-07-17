@@ -1,0 +1,39 @@
+{
+  "schema_version": 1,
+  "fixture_id": "runtime-lock-contract-060-v1",
+  "runtime_contract_version": 2,
+  "digest_algorithm": "sha256",
+  "lock_artifact": "windows-client/requirements-release.lock.txt",
+  "lock_digest": "6041036906881c59868b9e53e16d1e22d8371b68af2f36701022a5a239dd43ba",
+  "bundle_digest_contract": "canonical-json-utf8-v1",
+  "bundle_digest_vector": {
+    "files": {
+      "agent_main.py": "# canonical digest vector\n",
+      "astralprims_ui.py": "def normalize(value):\n    return value\n",
+      "mcp_tools.py": "TOOL_REGISTRY = {}\n"
+    },
+    "bundle_sha256": "2403aaf8410384f752d030dc90dd5c1456541dad858cb6475f8b5644ed590842"
+  },
+  "compatibility_vectors": [
+    {
+      "id": "exact-contract-and-lock",
+      "advertised_runtime_contract_version": 2,
+      "advertised_lock_digest": "6041036906881c59868b9e53e16d1e22d8371b68af2f36701022a5a239dd43ba",
+      "compatible": true
+    },
+    {
+      "id": "runtime-contract-mismatch",
+      "advertised_runtime_contract_version": 1,
+      "advertised_lock_digest": "6041036906881c59868b9e53e16d1e22d8371b68af2f36701022a5a239dd43ba",
+      "compatible": false,
+      "refusal_code": "runtime_contract_unsupported"
+    },
+    {
+      "id": "lock-digest-mismatch",
+      "advertised_runtime_contract_version": 2,
+      "advertised_lock_digest": "0000000000000000000000000000000000000000000000000000000000000000",
+      "compatible": false,
+      "refusal_code": "runtime_lock_mismatch"
+    }
+  ]
+}

@@ -1,3 +1,4 @@
+import AstralCore
 // Feature 055 (US1) — first-turn contract reduce tests: welcome components
 // arrive with `wel_`-prefixed identities and the server no longer sends the
 // turn-start blanking `ui_render []`, so the CLIENT purges `wel_` from the
@@ -9,36 +10,46 @@
 // ops apply to the visible canvas immediately — AppModelLiveCanvasTests), so
 // the commit-on-done regressions below drive a buffered render.
 import XCTest
-import AstralCore
+
 @testable import AstralDeep
 
 @MainActor
 final class AppModelFirstTurnContractTests: XCTestCase {
 
     private let doneStatus = #"{"type":"chat_status","status":"done"}"#
-    private let resultUpsert = #"{"type":"ui_upsert","ops":[{"op":"upsert","component_id":"wc_result","component":{"type":"card","component_id":"wc_result","title":"Result"}}]}"#
-    private let resultRender = #"{"type":"ui_render","target":"canvas","components":[{"type":"card","component_id":"wc_result","title":"Result"}]}"#
+    private let resultUpsert =
+        #"{"type":"ui_upsert","ops":[{"op":"upsert","component_id":"wc_result","component":{"type":"card","component_id":"wc_result","title":"Result"}}]}"#
+    private let resultRender =
+        #"{"type":"ui_render","target":"canvas","components":[{"type":"card","component_id":"wc_result","title":"Result"}]}"#
 
     private func component(_ fields: [String: JSONValue]) -> AstralComponent {
         AstralComponent(json: .object(fields))!
     }
 
     private var welcomeHero: AstralComponent {
-        component(["type": .string("hero"), "id": .string("wel_hero"),
-                   "component_id": .string("wel_hero"), "heading": .string("Welcome")])
+        component([
+            "type": .string("hero"), "id": .string("wel_hero"),
+            "component_id": .string("wel_hero"), "heading": .string("Welcome"),
+        ])
     }
     private var welcomeExamples: AstralComponent {
-        component(["type": .string("card"), "id": .string("wel_examples"),
-                   "component_id": .string("wel_examples"), "title": .string("Try asking")])
+        component([
+            "type": .string("card"), "id": .string("wel_examples"),
+            "component_id": .string("wel_examples"), "title": .string("Try asking"),
+        ])
     }
     /// Carries only `id` — the purge keys on `component_id ?? id`.
     private var welcomeHint: AstralComponent {
-        component(["type": .string("text"), "id": .string("wel_hint"),
-                   "content": .string("Pick an agent")])
+        component([
+            "type": .string("text"), "id": .string("wel_hint"),
+            "content": .string("Pick an agent"),
+        ])
     }
     private var workspaceCard: AstralComponent {
-        component(["type": .string("card"), "component_id": .string("wc_abc123"),
-                   "title": .string("Budget")])
+        component([
+            "type": .string("card"), "component_id": .string("wc_abc123"),
+            "title": .string("Budget"),
+        ])
     }
 
     private func reduce(_ model: AppModel, _ json: String) {
@@ -79,8 +90,8 @@ final class AppModelFirstTurnContractTests: XCTestCase {
         // A welcome resurrecting mid-turn (reconnect re-register) must still
         // never reach the timeline.
         model.canvas = [welcomeHero, workspaceCard]
-        reduce(model, resultRender)   // buffers into pendingCanvas
-        reduce(model, doneStatus)     // commit
+        reduce(model, resultRender)  // buffers into pendingCanvas
+        reduce(model, doneStatus)  // commit
         XCTAssertEqual(model.canvasHistory.count, 1)
         XCTAssertEqual(model.canvasHistory[0].components.map(\.componentId), ["wc_abc123"])
         XCTAssertEqual(model.canvas.map(\.componentId), ["wc_result"])
@@ -90,10 +101,10 @@ final class AppModelFirstTurnContractTests: XCTestCase {
         let model = AppModel()
         model.canvas = [welcomeHero, welcomeExamples]
         model.sendChat("first")
-        model.canvas = [welcomeHero]   // resurrected mid-turn
+        model.canvas = [welcomeHero]  // resurrected mid-turn
         reduce(model, resultRender)
         reduce(model, doneStatus)
-        XCTAssertTrue(model.canvasHistory.isEmpty)   // welcome-only ⇒ no snapshot
+        XCTAssertTrue(model.canvasHistory.isEmpty)  // welcome-only ⇒ no snapshot
         XCTAssertEqual(model.canvas.map(\.componentId), ["wc_result"])
     }
 
@@ -102,8 +113,8 @@ final class AppModelFirstTurnContractTests: XCTestCase {
     func testTextOnlyTurnDropsWelcomeFromKeptCanvas() {
         let model = AppModel()
         model.sendChat("just a question")
-        model.canvas = [welcomeHero, workspaceCard]   // resurrected mid-turn
-        reduce(model, doneStatus)   // no components this turn — canvas kept
+        model.canvas = [welcomeHero, workspaceCard]  // resurrected mid-turn
+        reduce(model, doneStatus)  // no components this turn — canvas kept
         XCTAssertFalse(model.turnActive)
         XCTAssertEqual(model.canvas.map(\.componentId), ["wc_abc123"])
         XCTAssertTrue(model.canvasHistory.isEmpty)
@@ -112,9 +123,9 @@ final class AppModelFirstTurnContractTests: XCTestCase {
     func testUpsertOnlyTurnDropsWelcomeAtCommit() {
         let model = AppModel()
         model.sendChat("just a question")
-        model.canvas = [welcomeHero, workspaceCard]   // resurrected mid-turn
-        reduce(model, resultUpsert)   // live op — no buffered render
-        reduce(model, doneStatus)     // live canvas commits, welcome dropped
+        model.canvas = [welcomeHero, workspaceCard]  // resurrected mid-turn
+        reduce(model, resultUpsert)  // live op — no buffered render
+        reduce(model, doneStatus)  // live canvas commits, welcome dropped
         XCTAssertEqual(model.canvas.map(\.componentId), ["wc_abc123", "wc_result"])
         XCTAssertTrue(model.canvasHistory.isEmpty)
     }

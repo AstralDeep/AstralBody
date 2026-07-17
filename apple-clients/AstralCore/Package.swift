@@ -13,7 +13,7 @@ let package = Package(
         .watchOS(.v10),
     ],
     products: [
-        .library(name: "AstralCore", targets: ["AstralCore"]),
+        .library(name: "AstralCore", targets: ["AstralCore"])
     ],
     targets: [
         .target(name: "AstralCore", path: "Sources/AstralCore"),

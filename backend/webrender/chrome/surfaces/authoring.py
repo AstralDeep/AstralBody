@@ -32,6 +32,7 @@ import asyncio
 import json
 import logging
 from typing import Any, Dict, List, Tuple
+import uuid
 
 from orchestrator import agent_authoring as aa
 from webrender.chrome import esc, notice_block
@@ -85,6 +86,18 @@ def _fields(payload: Any) -> Dict[str, str]:
         return {}
     return {k: ("" if v is None else str(v))
             for k, v in raw.items() if isinstance(k, str) and not isinstance(v, (dict, list))}
+
+
+def _mutation_fields(payload: Any) -> Dict[str, str]:
+    """Merge server-rendered CAS identities with collected editable fields."""
+
+    fields = _fields(payload)
+    if isinstance(payload, dict):
+        for name in ("expected_revision", "transition_id"):
+            value = payload.get(name)
+            if value is not None and not isinstance(value, (dict, list, bool)):
+                fields[name] = str(value)
+    return fields
 
 
 def _user_agents(orch, user_id: str) -> List[Dict[str, Any]]:
@@ -289,7 +302,17 @@ def _phase_body(row: Dict[str, Any], phase: str) -> str:
                                    f"(version {record.get('constitution_version') or '?'}).")
 
 
-def _phase_actions(draft_id: str, phase: str) -> str:
+def _mutation_payload(draft_id: str, state_revision: int) -> Dict[str, Any]:
+    """Return one render-bound, replay-safe authoring mutation identity."""
+
+    return {
+        "draft_id": draft_id,
+        "expected_revision": state_revision,
+        "transition_id": str(uuid.uuid4()),
+    }
+
+
+def _phase_actions(draft_id: str, phase: str, state_revision: int) -> str:
     """The phase's action buttons.
 
     A collecting button (``data-ui-collect``) posts the form's named fields, so
@@ -297,7 +320,7 @@ def _phase_actions(draft_id: str, phase: str) -> str:
     button posts only its ``data-ui-payload``, so it carries the id explicitly.
     Both land on the handler's ``_draft_id`` — miss either and the action would
     silently address no session."""
-    pid = _payload({"draft_id": draft_id})
+    pid = _payload(_mutation_payload(draft_id, state_revision))
     back = (f'<button type="button" class="{_BTN}" data-ui-action="chrome_author_list">'
             "← My agents</button>")
     if phase == "analyze":
@@ -316,8 +339,10 @@ def _phase_actions(draft_id: str, phase: str) -> str:
     return (
         '<div class="flex flex-wrap gap-2">'
         f'<button type="button" class="{_BTN_PRIMARY}" data-ui-action="{advance}" '
+        f"data-ui-payload='{_payload(_mutation_payload(draft_id, state_revision))}' "
         'data-ui-collect="true">Save &amp; continue</button>'
         f'<button type="button" class="{_BTN}" data-ui-action="chrome_author_edit" '
+        f"data-ui-payload='{_payload(_mutation_payload(draft_id, state_revision))}' "
         'data-ui-collect="true">Save</button>'
         f'<button type="button" class="{_BTN}" data-ui-action="chrome_author_draft" '
         f"data-ui-payload='{pid}'>Ask the assistant</button>"
@@ -341,7 +366,7 @@ async def _render_session(orch, user_id: str, draft_id: str) -> str:
         f'<p class="text-xs text-astral-muted">{esc(_PHASE_HELP[phase])}</p>'
         f'<div class="bg-white/5 border border-white/10 rounded-lg p-4">'
         f"{_phase_body(row, phase)}</div>"
-        f"{_phase_actions(draft_id, phase)}"
+        f"{_phase_actions(draft_id, phase, int(row.get('state_revision') or 0))}"
         f'<p class="text-xs text-astral-muted">{esc(HOST_NOTE)}</p>'
         f"</div>"
     )
@@ -406,6 +431,7 @@ async def components(orch, user_id: str, roles: Any, params: Any) -> List[Dict[s
         if row is None:
             return [_sdui.alert("That authoring session is not available.", "error")]
         phase = aa.phase_of(row)
+        state_revision = int(row.get("state_revision") or 0)
         out: List[Dict[str, Any]] = [
             _sdui.text(f"{aa.PHASE_LABELS[phase]} — {row.get('agent_name') or ''}", "h3"),
             _sdui.text(_PHASE_HELP[phase], "caption"),
@@ -423,16 +449,18 @@ async def components(orch, user_id: str, roles: Any, params: Any) -> List[Dict[s
             else:
                 out.append(_sdui.text("Not checked yet.", "caption"))
             out.append(_sdui.button("Run Analyze", "chrome_author_analyze",
-                                    {"draft_id": draft_id}, variant="primary"))
+                                    _mutation_payload(draft_id, state_revision),
+                                    variant="primary"))
         elif phase == "generate":
             record = aa.analyze_record(row)
             out.append(_sdui.alert(
                 f"Analyze passed against the agent rules "
                 f"(version {record.get('constitution_version') or '?'}).", "success"))
             out.append(_sdui.button("Generate & send to my desktop", "chrome_author_generate",
-                                    {"draft_id": draft_id}, variant="primary"))
+                                    _mutation_payload(draft_id, state_revision),
+                                    variant="primary"))
             out.append(_sdui.button("Re-run Analyze", "chrome_author_analyze",
-                                    {"draft_id": draft_id}))
+                                    _mutation_payload(draft_id, state_revision)))
         else:
             advance = ("chrome_author_clarify" if phase == "clarify"
                        else "chrome_author_advance")
@@ -440,9 +468,9 @@ async def components(orch, user_id: str, roles: Any, params: Any) -> List[Dict[s
             if fields:
                 out.append(_sdui.form(fields, actions=[
                     {"label": "Save", "action": "chrome_author_edit",
-                     "payload": {"draft_id": draft_id}},
+                     "payload": _mutation_payload(draft_id, state_revision)},
                     {"label": "Save & continue", "action": advance, "variant": "primary",
-                     "payload": {"draft_id": draft_id}},
+                     "payload": _mutation_payload(draft_id, state_revision)},
                 ]))
             else:
                 out.append(_sdui.text("Nothing drafted yet — ask the assistant.", "caption"))
@@ -556,7 +584,7 @@ async def _h_edit(orch, websocket, user_id, roles, payload):
         return _refused()
     draft_id = _draft_id(payload)
     ok, message = await asyncio.to_thread(
-        aa.save_artifact, orch, user_id, draft_id, _fields(payload))
+        aa.save_artifact, orch, user_id, draft_id, _mutation_fields(payload))
     return (SURFACE_KEY, {"draft_id": draft_id},
             notice_block("success" if ok else "error", message))
 
@@ -575,7 +603,7 @@ async def _h_advance(orch, websocket, user_id, roles, payload):
         return _refused()
     draft_id = _draft_id(payload)
     advanced, _phase, message = await asyncio.to_thread(
-        aa.advance, orch, user_id, draft_id, _fields(payload))
+        aa.advance, orch, user_id, draft_id, _mutation_fields(payload))
     if not advanced:
         return (SURFACE_KEY, {"draft_id": draft_id}, notice_block("error", message))
     drafted = await _autodraft(orch, websocket, user_id, draft_id)
@@ -592,7 +620,19 @@ async def _h_analyze(orch, websocket, user_id, roles, payload):
     if not aa.byo_enabled():
         return _refused()
     draft_id = _draft_id(payload)
-    result = await asyncio.to_thread(aa.run_analyze, orch, user_id, draft_id)
+    mutation = _mutation_fields(payload)
+    try:
+        expected_revision = int(mutation["expected_revision"])
+    except (KeyError, TypeError, ValueError):
+        expected_revision = None
+    result = await asyncio.to_thread(
+        aa.run_analyze,
+        orch,
+        user_id,
+        draft_id,
+        expected_revision=expected_revision,
+        transition_id=mutation.get("transition_id"),
+    )
     status = result.get("status")
     if status == "passed":
         return (SURFACE_KEY, {"draft_id": draft_id}, notice_block(
@@ -605,6 +645,9 @@ async def _h_analyze(orch, websocket, user_id, roles, payload):
     if status == "too_early":
         return (SURFACE_KEY, {"draft_id": draft_id}, notice_block(
             "error", "Finish the earlier steps first."))
+    if status == "conflict":
+        return (SURFACE_KEY, {"draft_id": draft_id}, notice_block(
+            "error", "This draft changed elsewhere. Refresh and run Analyze again."))
     return (SURFACE_KEY, {}, notice_block("error", "That authoring session is not available."))
 
 
@@ -618,7 +661,19 @@ async def _h_generate(orch, websocket, user_id, roles, payload):
     if not aa.byo_enabled():
         return _refused()
     draft_id = _draft_id(payload)
-    result = await aa.generate_from_session(orch, user_id, draft_id, websocket=websocket)
+    mutation = _mutation_fields(payload)
+    try:
+        expected_revision = int(mutation["expected_revision"])
+    except (KeyError, TypeError, ValueError):
+        expected_revision = None
+    result = await aa.generate_from_session(
+        orch,
+        user_id,
+        draft_id,
+        websocket=websocket,
+        expected_revision=expected_revision,
+        transition_id=mutation.get("transition_id"),
+    )
     status = result.get("status")
     if status == "delivered":
         return (SURFACE_KEY, {}, notice_block(
@@ -640,6 +695,9 @@ async def _h_generate(orch, websocket, user_id, roles, payload):
     if status == "generation_failed":
         return (SURFACE_KEY, {"draft_id": draft_id}, notice_block(
             "error", f"Code generation failed: {result.get('error') or 'unknown error'}"))
+    if status == "conflict":
+        return (SURFACE_KEY, {"draft_id": draft_id}, notice_block(
+            "error", "This draft changed elsewhere. Refresh before generating again."))
     return (SURFACE_KEY, {}, notice_block("error", "That authoring session is not available."))
 
 

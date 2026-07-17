@@ -1,0 +1,76 @@
+{
+  "document_type": "trusted_debt_resolution",
+  "schema_version": 1,
+  "manifest_id": "77777777-7777-4777-8777-777777777777",
+  "resolution_id": "33333333-3333-4333-8333-333333333333",
+  "exception_id": "11111111-1111-4111-8111-111111111111",
+  "repository": "AstralDeep/AstralDeep",
+  "candidate_sha": "bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb",
+  "release_id": "060-rc-b",
+  "ledger_repository": "AstralDeep/AstralDeep",
+  "ledger_ref": "refs/heads/release-evidence-debt",
+  "ledger_parent_sha": "1111111111111111111111111111111111111111",
+  "ledger_commit_sha": "2222222222222222222222222222222222222222",
+  "ledger_entry_path": "resolutions/33333333-3333-4333-8333-333333333333.json",
+  "ledger_entry_sha256": "2417ef56a8e10cc471353aa87af0700a6a547d7181b97f6392458fe525c5643a",
+  "ledger_entry_immutable_reference": "ghgit://AstralDeep/AstralDeep/commits/2222222222222222222222222222222222222222/paths/resolutions/33333333-3333-4333-8333-333333333333.json",
+  "ledger_entry": {
+    "document_type": "release_evidence_debt_resolution",
+    "schema_version": 1,
+    "resolution_id": "33333333-3333-4333-8333-333333333333",
+    "exception_id": "11111111-1111-4111-8111-111111111111",
+    "repository": "AstralDeep/AstralDeep",
+    "candidate_sha": "bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb",
+    "release_id": "060-rc-b",
+    "platform": "windows",
+    "resolved_checks": [
+      "windows_deployment_validation"
+    ],
+    "debt_entry_sha256": "81d84b87594269272f53e132a511eb06d736052c7b4c79dea75c13ca73a9b257",
+    "passing_evidence_artifact": {
+      "kind": "github_actions_artifact_member",
+      "repository": "AstralDeep/AstralDeep",
+      "run_id": "6002",
+      "run_attempt": 1,
+      "artifact_id": "7002",
+      "artifact_name": "release-evidence-windows-b",
+      "member": "windows.json",
+      "immutable_reference": "gh://AstralDeep/AstralDeep/runs/6002/attempts/1/artifacts/7002/members/windows.json",
+      "sha256": "1010101010101010101010101010101010101010101010101010101010101010"
+    },
+    "passing_provenance_manifest_artifact": {
+      "kind": "github_actions_artifact_member",
+      "repository": "AstralDeep/AstralDeep",
+      "run_id": "6002",
+      "run_attempt": 1,
+      "artifact_id": "7004",
+      "artifact_name": "trusted-provenance-windows-b",
+      "member": "windows-provenance.json",
+      "immutable_reference": "gh://AstralDeep/AstralDeep/runs/6002/attempts/1/artifacts/7004/members/windows-provenance.json",
+      "sha256": "2020202020202020202020202020202020202020202020202020202020202020"
+    },
+    "protected_policy_sha256": "3030303030303030303030303030303030303030303030303030303030303030",
+    "resolved_at": "2026-07-23T19:01:00Z"
+  },
+  "workflow": {
+    "name": "release-exception-registrar",
+    "run_id": "6002",
+    "run_attempt": 1,
+    "job_id": "register-resolution"
+  },
+  "workflow_ref": "AstralDeep/AstralDeep/.github/workflows/release-exception-registrar.yml@ffffffffffffffffffffffffffffffffffffffff",
+  "runner": {
+    "os": "linux",
+    "architecture": "x86_64",
+    "runner_image": "ubuntu-24.04",
+    "runner_name": "GitHub Actions 1",
+    "runner_environment": "github_hosted"
+  },
+  "trusted_builder": {
+    "repository": "AstralDeep/AstralDeep",
+    "workflow_path": ".github/workflows/release-exception-registrar.yml",
+    "signer_digest": "ffffffffffffffffffffffffffffffffffffffff",
+    "certificate_identity": "https://github.com/AstralDeep/AstralDeep/.github/workflows/release-exception-registrar.yml@refs/heads/main"
+  },
+  "generated_at": "2026-07-23T19:01:01Z"
+}

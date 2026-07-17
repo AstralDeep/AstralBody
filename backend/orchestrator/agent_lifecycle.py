@@ -10,20 +10,51 @@ subprocess management, and approval flow.
 """
 import ast
 import asyncio
+from dataclasses import dataclass
+from datetime import UTC, datetime
+import inspect
 import json
 import logging
 import os
+from pathlib import PurePosixPath
 import re
 import shutil
-import subprocess
 import sys
 import time
 import uuid
-from typing import Dict, Any, Optional, List
+from typing import (
+    Any,
+    Awaitable,
+    Callable,
+    Dict,
+    List,
+    Mapping,
+    Optional,
+    Protocol,
+    Sequence,
+)
 
-from orchestrator.agent_generator import AgentCodeGenerator
+from orchestrator.agent_generator import (
+    BYO_BUNDLE_FILENAMES,
+    BYO_RUNTIME_CONTRACT_VERSION,
+    BYO_RUNTIME_LOCK_SHA256,
+    AgentCodeGenerator,
+)
+from orchestrator.artifact_publication import ImmutableAgentArtifactStore
+from orchestrator.user_agents import (
+    AgentDeletedError,
+    PersonalAgentRuntimeRepository,
+    StaleRuntimeGenerationError,
+)
+from orchestrator.work_admission import ExecutionFence, OperationState
 from orchestrator.agent_validator import AgentSpecValidator
 from orchestrator.code_security import CodeSecurityAnalyzer, Severity
+from shared.process_supervision import (
+    ProcessOwner,
+    ProcessSupervisor,
+    TerminationReason,
+)
+from shared.protocol import AgentLifecycle
 
 logger = logging.getLogger("AgentLifecycle")
 
@@ -49,11 +80,1063 @@ BYO_TARGET = "byo"           # 058: self-contained bundle, run on the owner's de
 #: the authoring journey.
 BYO_ORIGIN = "byo_client"
 
+AGENT_LIFECYCLE_LABELS = {
+    "starting": "Starting",
+    "online": "Online",
+    "updating": "Updating",
+    "failed": "Failed",
+    "offline": "Offline",
+}
+
+
+def canonical_agent_lifecycle(
+    *,
+    agent_id: str,
+    revision_id: Optional[str],
+    runtime_instance_id: Optional[str],
+    lifecycle_generation: int,
+    state_revision: int,
+    state: str,
+    reason_code: Optional[str] = None,
+    updated_at: Optional[datetime] = None,
+) -> AgentLifecycle:
+    """Build and validate one canonical personal-agent lifecycle projection."""
+
+    timestamp = updated_at or datetime.now(UTC)
+    if timestamp.tzinfo is None:
+        timestamp = timestamp.replace(tzinfo=UTC)
+    frame = AgentLifecycle(
+        agent_id=agent_id,
+        revision_id=revision_id,
+        runtime_instance_id=runtime_instance_id,
+        lifecycle_generation=lifecycle_generation,
+        state_revision=state_revision,
+        state=state,
+        reason_code=reason_code,
+        label=AGENT_LIFECYCLE_LABELS.get(state, state.replace("_", " ").title()),
+        updated_at=timestamp.astimezone(UTC).isoformat().replace("+00:00", "Z"),
+    )
+    frame.validate()
+    return frame
+
+
+async def publish_agent_lifecycle(
+    orchestrator: Any,
+    owner_user_id: str,
+    **projection: Any,
+) -> int:
+    """Publish one validated lifecycle frame only to the owning user's UIs.
+
+    Durable runtime/revision state remains authoritative; this function never
+    allocates or increments a generation. Callers pass the committed fence and
+    state revision after their database transaction succeeds.
+
+    Returns:
+        Number of owner sockets that accepted the projection.
+    """
+
+    if not isinstance(owner_user_id, str) or not owner_user_id:
+        raise ValueError("owner_user_id must be non-empty")
+    frame = canonical_agent_lifecycle(**projection)
+    payload = frame.to_json()
+    sessions = getattr(orchestrator, "ui_sessions", {}) or {}
+    clients = tuple(getattr(orchestrator, "ui_clients", ()) or ())
+    delivered = 0
+    for websocket in clients:
+        claims = sessions.get(websocket) or {}
+        if claims.get("sub") != owner_user_id:
+            continue
+        if await orchestrator._safe_send(websocket, payload):
+            delivered += 1
+    return delivered
+
+
+class RevisionActivationError(RuntimeError):
+    """Safe terminal failure while preparing or promoting one BYO revision."""
+
+    @property
+    def code(self) -> str:
+        return str(self)
+
+
+@dataclass(frozen=True)
+class CandidatePreparation:
+    """Immutable inputs needed to durably prepare one candidate revision."""
+
+    owner_user_id: str
+    agent_id: str
+    revision_id: str
+    bundle_sha256: str
+    runtime_manifest: Mapping[str, Any]
+    artifact_relative_path: str
+    runtime_contract_version: int
+    required_runtime_lock_sha256: str
+    host_session_id: str
+    operation_fence: Any
+
+
+@dataclass(frozen=True)
+class CandidateRevision:
+    """Durable candidate and the authority that existed before preparation."""
+
+    owner_user_id: str
+    agent_id: str
+    revision_id: str
+    promotion_token: str
+    runtime_instance_id: str
+    previous_active_revision_id: Optional[str]
+    previous_runtime_instance_id: Optional[str]
+
+
+@dataclass(frozen=True)
+class PromotionCommit:
+    """Result of the single transaction that changes routing authority."""
+
+    owner_user_id: str
+    agent_id: str
+    revision_id: str
+    runtime_instance_id: str
+    previous_revision_id: Optional[str]
+    previous_runtime_instance_id: Optional[str]
+
+
+@dataclass(frozen=True)
+class RecoveryPlan:
+    """Actions derived only from durable active/authoritative pointers."""
+
+    owner_user_id: str
+    agent_id: str
+    active_revision_id: Optional[str]
+    authoritative_runtime_instance_id: Optional[str]
+    start_revision_id: Optional[str]
+    stop_runtime_instance_ids: tuple[str, ...]
+
+
+@dataclass(frozen=True)
+class RevisionActivationResult:
+    """Committed activation plus best-effort post-commit cleanup status."""
+
+    commit: PromotionCommit
+    prior_runtime_stopped: bool
+    cleanup_pending: bool
+
+
+class RevisionActivationStore(Protocol):
+    """Narrow durable seam used by the two-phase revision coordinator."""
+
+    def prepare_candidate(self, request: CandidatePreparation) -> CandidateRevision: ...
+
+    def mark_candidate_starting(self, candidate: CandidateRevision) -> None: ...
+
+    def confirm_candidate_ready(
+        self, candidate: CandidateRevision, ready_runtime_instance_id: str
+    ) -> CandidateRevision: ...
+
+    def promote_candidate(self, candidate: CandidateRevision) -> PromotionCommit: ...
+
+    def fail_candidate(self, candidate: CandidateRevision, failure_code: str) -> None: ...
+
+    def recovery_plan(self, owner_user_id: str, agent_id: str) -> RecoveryPlan: ...
+
+
+@dataclass
+class PostgresPersonalAgentRevisionStore:
+    """Durable revision activation adapter over the feature-060 repository.
+
+    ``PersonalAgentRuntimeRepository`` remains the owner of host/runtime fences.
+    This adapter owns only the revision/pointer transaction that the repository
+    intentionally does not expose.  It uses the repository's transaction and
+    owner-lock seams so selection, runtime, and promotion serialize together.
+    """
+
+    _SHA256 = re.compile(r"[0-9a-f]{64}")
+    _SAFE_FAILURE = re.compile(r"[a-z][a-z0-9_]{0,127}")
+
+    runtime_repository: PersonalAgentRuntimeRepository
+
+    def __post_init__(self) -> None:
+        if not isinstance(self.runtime_repository, PersonalAgentRuntimeRepository):
+            raise TypeError(
+                "runtime_repository must be PersonalAgentRuntimeRepository"
+            )
+
+    @property
+    def _runtime(self) -> PersonalAgentRuntimeRepository:
+        return self.runtime_repository
+
+    @staticmethod
+    def _required_text(value: Any, field_name: str, maximum: int = 1024) -> str:
+        if not isinstance(value, str) or not value or len(value) > maximum:
+            raise ValueError(f"{field_name} must be non-empty and bounded")
+        return value
+
+    @staticmethod
+    def _uuid_text(value: Any, field_name: str) -> str:
+        try:
+            return str(uuid.UUID(str(value)))
+        except (TypeError, ValueError, AttributeError) as exc:
+            raise ValueError(f"{field_name} must be a UUID") from exc
+
+    def _validate_preparation(
+        self, request: CandidatePreparation
+    ) -> tuple[Mapping[str, Any], str]:
+        self._required_text(request.owner_user_id, "owner_user_id", 255)
+        self._required_text(request.agent_id, "agent_id", 255)
+        self._uuid_text(request.revision_id, "revision_id")
+        self._uuid_text(request.host_session_id, "host_session_id")
+        if not isinstance(request.operation_fence, ExecutionFence):
+            raise TypeError("operation_fence must be ExecutionFence")
+        if self._SHA256.fullmatch(request.bundle_sha256 or "") is None:
+            raise ValueError("bundle_sha256 must be lowercase SHA-256")
+        policy = self._runtime._policy
+        if request.runtime_contract_version != policy.runtime_contract_version:
+            raise ValueError("revision runtime contract is incompatible")
+        if request.required_runtime_lock_sha256 != policy.runtime_lock_sha256:
+            raise ValueError("revision runtime lock is incompatible")
+        path = request.artifact_relative_path
+        if (
+            not isinstance(path, str)
+            or not path
+            or len(path) > 1024
+            or "\\" in path
+            or PurePosixPath(path).is_absolute()
+            or ".." in PurePosixPath(path).parts
+        ):
+            raise ValueError("artifact path must remain beneath revision root")
+        immutable_manifest, canonical_manifest = self._runtime._validate_manifest(
+            request.runtime_manifest
+        )
+        required_manifest = {
+            "revision_id": request.revision_id,
+            "agent_id": request.agent_id,
+            "bundle_sha256": request.bundle_sha256,
+            "runtime_contract_version": request.runtime_contract_version,
+            "required_runtime_lock_sha256": (
+                request.required_runtime_lock_sha256
+            ),
+        }
+        for key, expected in required_manifest.items():
+            if immutable_manifest.get(key) != expected:
+                raise ValueError(f"runtime manifest {key} does not match candidate")
+        entries = immutable_manifest.get("files")
+        if not (
+            immutable_manifest.get("manifest_version") == 2
+            and immutable_manifest.get("digest_algorithm") == "sha256"
+            and isinstance(entries, Sequence)
+            and not isinstance(entries, (str, bytes))
+            and tuple(
+                entry.get("name") if isinstance(entry, Mapping) else None
+                for entry in entries
+            )
+            == BYO_BUNDLE_FILENAMES
+        ):
+            raise ValueError("runtime manifest file inventory is invalid")
+        for entry in entries:
+            if not (
+                self._SHA256.fullmatch(str(entry.get("sha256") or ""))
+                and type(entry.get("size_bytes")) is int
+                and entry["size_bytes"] >= 0
+            ):
+                raise ValueError("runtime manifest file metadata is invalid")
+        return immutable_manifest, canonical_manifest
+
+    def _mark_revision_failed_only(
+        self, request: CandidatePreparation, failure_code: str
+    ) -> None:
+        with self._runtime._transaction() as cursor:
+            self._runtime._lock_owner(cursor, request.owner_user_id)
+            cursor.execute(
+                """
+                UPDATE user_agent_revision
+                SET state = 'failed', failed_at = clock_timestamp(),
+                    failure_code = %s, state_revision = state_revision + 1
+                WHERE revision_id = %s AND agent_id = %s AND owner_user_id = %s
+                  AND state IN ('prepared', 'starting', 'ready')
+                """,
+                (
+                    failure_code,
+                    request.revision_id,
+                    request.agent_id,
+                    request.owner_user_id,
+                ),
+            )
+
+    def prepare_candidate(self, request: CandidatePreparation) -> CandidateRevision:
+        """Insert immutable revision metadata, then reserve its runtime fence."""
+
+        _manifest, canonical_manifest = self._validate_preparation(request)
+        promotion_token: Optional[str] = None
+        previous_revision_id: Optional[str] = None
+        previous_runtime_id: Optional[str] = None
+        with self._runtime._transaction() as cursor:
+            self._runtime._lock_owner(cursor, request.owner_user_id)
+            try:
+                agent = self._runtime._locked_agent(
+                    cursor,
+                    owner_user_id=request.owner_user_id,
+                    agent_id=request.agent_id,
+                )
+            except AgentDeletedError as exc:
+                raise RevisionActivationError("agent_deleted") from exc
+            if (
+                agent["selected_host_session_id"] is None
+                or str(agent["selected_host_session_id"])
+                != request.host_session_id
+            ):
+                raise StaleRuntimeGenerationError(
+                    "selected host session is stale"
+                )
+            cursor.execute(
+                """
+                SELECT state, inventory_state, owner_user_id
+                FROM agent_host_session WHERE host_session_id = %s FOR UPDATE
+                """,
+                (request.host_session_id,),
+            )
+            host = cursor.fetchone()
+            if not (
+                host is not None
+                and str(host["owner_user_id"]) == request.owner_user_id
+                and host["state"] == "connected"
+            ):
+                raise StaleRuntimeGenerationError(
+                    "selected host session is stale"
+                )
+            if host["inventory_state"] != "reconciled":
+                raise RevisionActivationError("inventory_required")
+            previous_revision_id = (
+                None
+                if agent["active_revision_id"] is None
+                else str(agent["active_revision_id"])
+            )
+            previous_runtime_id = (
+                None
+                if agent["authoritative_instance_id"] is None
+                else str(agent["authoritative_instance_id"])
+            )
+            cursor.execute(
+                "SELECT * FROM user_agent_revision WHERE revision_id = %s FOR UPDATE",
+                (request.revision_id,),
+            )
+            revision = cursor.fetchone()
+            if revision is None:
+                cursor.execute(
+                    "SELECT COALESCE(max(revision_number), -1) + 1 AS number "
+                    "FROM user_agent_revision WHERE agent_id = %s",
+                    (request.agent_id,),
+                )
+                revision_number = int(cursor.fetchone()["number"])
+                promotion_token = self._runtime._new_uuid("promotion_token")
+                cursor.execute(
+                    """
+                    INSERT INTO user_agent_revision (
+                        revision_id, agent_id, owner_user_id, revision_number,
+                        parent_revision_id, previous_good_revision_id,
+                        artifact_digest, manifest_json, artifact_relative_path,
+                        runtime_contract_version, release_lock_digest,
+                        compatibility_state, state, promotion_token
+                    ) VALUES (
+                        %s, %s, %s, %s, %s, %s, %s, %s::jsonb, %s, %s, %s,
+                        'compatible', 'prepared', %s
+                    )
+                    """,
+                    (
+                        request.revision_id,
+                        request.agent_id,
+                        request.owner_user_id,
+                        revision_number,
+                        previous_revision_id,
+                        previous_revision_id,
+                        request.bundle_sha256,
+                        canonical_manifest,
+                        request.artifact_relative_path,
+                        request.runtime_contract_version,
+                        request.required_runtime_lock_sha256,
+                        promotion_token,
+                    ),
+                )
+            else:
+                manifest = revision["manifest_json"]
+                if isinstance(manifest, str):
+                    manifest = json.loads(manifest)
+                persisted_manifest = json.dumps(
+                    manifest,
+                    sort_keys=True,
+                    separators=(",", ":"),
+                    allow_nan=False,
+                )
+                if not (
+                    str(revision["agent_id"]) == request.agent_id
+                    and str(revision["owner_user_id"]) == request.owner_user_id
+                    and revision["artifact_digest"] == request.bundle_sha256
+                    and persisted_manifest == canonical_manifest
+                    and revision["artifact_relative_path"]
+                    == request.artifact_relative_path
+                    and int(revision["runtime_contract_version"])
+                    == request.runtime_contract_version
+                    and revision["release_lock_digest"]
+                    == request.required_runtime_lock_sha256
+                    and revision["state"] in {"prepared", "starting", "ready"}
+                ):
+                    raise StaleRuntimeGenerationError(
+                        "revision identity is already bound to different bytes"
+                    )
+                promotion_token = str(revision["promotion_token"])
+                previous_revision_id = (
+                    None
+                    if revision["previous_good_revision_id"] is None
+                    else str(revision["previous_good_revision_id"])
+                )
+
+            cursor.execute(
+                """
+                SELECT runtime_instance_id FROM agent_runtime_instance
+                WHERE revision_id = %s AND agent_id = %s AND owner_user_id = %s
+                  AND state NOT IN ('stopped', 'failed', 'offline', 'superseded')
+                ORDER BY created_at DESC, runtime_instance_id DESC
+                LIMIT 1
+                """,
+                (
+                    request.revision_id,
+                    request.agent_id,
+                    request.owner_user_id,
+                ),
+            )
+            existing_runtime = cursor.fetchone()
+
+        if existing_runtime is None:
+            try:
+                runtime = self._runtime.create_prelaunch_instance(
+                    owner_user_id=request.owner_user_id,
+                    agent_id=request.agent_id,
+                    host_session_id=request.host_session_id,
+                    revision_id=request.revision_id,
+                    operation_fence=request.operation_fence,
+                )
+            except Exception:
+                self._mark_revision_failed_only(request, "bundle_install_failed")
+                raise
+            runtime_instance_id = runtime.fence.runtime_instance_id
+        else:
+            runtime_instance_id = str(existing_runtime["runtime_instance_id"])
+        return CandidateRevision(
+            owner_user_id=request.owner_user_id,
+            agent_id=request.agent_id,
+            revision_id=request.revision_id,
+            promotion_token=str(promotion_token),
+            runtime_instance_id=runtime_instance_id,
+            previous_active_revision_id=previous_revision_id,
+            previous_runtime_instance_id=previous_runtime_id,
+        )
+
+    def mark_candidate_starting(self, candidate: CandidateRevision) -> None:
+        with self._runtime._transaction() as cursor:
+            self._runtime._lock_owner(cursor, candidate.owner_user_id)
+            cursor.execute(
+                """
+                UPDATE user_agent_revision
+                SET state = 'starting', state_revision = state_revision + 1
+                WHERE revision_id = %s AND agent_id = %s AND owner_user_id = %s
+                  AND promotion_token = %s AND state = 'prepared'
+                """,
+                (
+                    candidate.revision_id,
+                    candidate.agent_id,
+                    candidate.owner_user_id,
+                    candidate.promotion_token,
+                ),
+            )
+            if cursor.rowcount == 0:
+                cursor.execute(
+                    "SELECT state FROM user_agent_revision WHERE revision_id = %s",
+                    (candidate.revision_id,),
+                )
+                row = cursor.fetchone()
+                if row is None or row["state"] not in {"starting", "ready", "active"}:
+                    raise StaleRuntimeGenerationError(
+                        "candidate starting transition is stale"
+                    )
+
+    def confirm_candidate_ready(
+        self, candidate: CandidateRevision, ready_runtime_instance_id: str
+    ) -> CandidateRevision:
+        ready_runtime_instance_id = self._uuid_text(
+            ready_runtime_instance_id, "ready_runtime_instance_id"
+        )
+        if ready_runtime_instance_id != candidate.runtime_instance_id:
+            raise StaleRuntimeGenerationError("ready runtime identity is stale")
+        runtime = self._runtime.get_runtime_instance(ready_runtime_instance_id)
+        if not (
+            runtime.state == "ready"
+            and runtime.fence.revision_id == candidate.revision_id
+            and runtime.fence.agent_id == candidate.agent_id
+        ):
+            raise StaleRuntimeGenerationError("candidate runtime is not ready")
+        with self._runtime._transaction() as cursor:
+            self._runtime._lock_owner(cursor, candidate.owner_user_id)
+            cursor.execute(
+                """
+                UPDATE user_agent_revision
+                SET state = 'ready', confirmed_at = clock_timestamp(),
+                    state_revision = state_revision + 1
+                WHERE revision_id = %s AND agent_id = %s AND owner_user_id = %s
+                  AND promotion_token = %s AND state IN ('prepared', 'starting')
+                """,
+                (
+                    candidate.revision_id,
+                    candidate.agent_id,
+                    candidate.owner_user_id,
+                    candidate.promotion_token,
+                ),
+            )
+            if cursor.rowcount == 0:
+                cursor.execute(
+                    "SELECT state FROM user_agent_revision WHERE revision_id = %s",
+                    (candidate.revision_id,),
+                )
+                row = cursor.fetchone()
+                if row is None or row["state"] not in {"ready", "active"}:
+                    raise StaleRuntimeGenerationError(
+                        "candidate ready transition is stale"
+                    )
+        return candidate
+
+    def promote_candidate(self, candidate: CandidateRevision) -> PromotionCommit:
+        """Atomically move every authoritative pointer to one ready candidate."""
+
+        with self._runtime._transaction() as cursor:
+            self._runtime._lock_owner(cursor, candidate.owner_user_id)
+            agent = self._runtime._locked_agent(
+                cursor,
+                owner_user_id=candidate.owner_user_id,
+                agent_id=candidate.agent_id,
+            )
+            cursor.execute(
+                "SELECT * FROM user_agent_revision WHERE revision_id = %s FOR UPDATE",
+                (candidate.revision_id,),
+            )
+            revision = cursor.fetchone()
+            cursor.execute(
+                "SELECT * FROM agent_runtime_instance "
+                "WHERE runtime_instance_id = %s FOR UPDATE",
+                (candidate.runtime_instance_id,),
+            )
+            runtime = cursor.fetchone()
+            if revision is None or runtime is None:
+                raise StaleRuntimeGenerationError("candidate promotion fence is stale")
+
+            active_revision = (
+                None
+                if agent["active_revision_id"] is None
+                else str(agent["active_revision_id"])
+            )
+            authoritative_runtime = (
+                None
+                if agent["authoritative_instance_id"] is None
+                else str(agent["authoritative_instance_id"])
+            )
+            if (
+                active_revision == candidate.revision_id
+                and authoritative_runtime == candidate.runtime_instance_id
+                and revision["state"] == "active"
+                and runtime["state"] == "online"
+                and bool(runtime["is_authoritative"])
+            ):
+                try:
+                    replay_operation = (
+                        self._runtime._assert_runtime_operation_locked(
+                            cursor, runtime
+                        )
+                    )
+                except StaleRuntimeGenerationError:
+                    replay_operation = None
+                if replay_operation is not None:
+                    self._runtime._operations.terminalize(
+                        replay_operation,
+                        state=OperationState.COMPLETED,
+                        terminal_code=None,
+                        safe_summary=None,
+                        retry_after_ms=None,
+                        now=None,
+                        retention=self._runtime._operation_retention,
+                        transaction=cursor,
+                    )
+                return PromotionCommit(
+                    owner_user_id=candidate.owner_user_id,
+                    agent_id=candidate.agent_id,
+                    revision_id=candidate.revision_id,
+                    runtime_instance_id=candidate.runtime_instance_id,
+                    previous_revision_id=(
+                        None
+                        if revision["previous_good_revision_id"] is None
+                        else str(revision["previous_good_revision_id"])
+                    ),
+                    previous_runtime_instance_id=None,
+                )
+            if not (
+                active_revision == candidate.previous_active_revision_id
+                and authoritative_runtime
+                == candidate.previous_runtime_instance_id
+                and str(revision["agent_id"]) == candidate.agent_id
+                and str(revision["owner_user_id"]) == candidate.owner_user_id
+                and str(revision["promotion_token"]) == candidate.promotion_token
+                and revision["state"] == "ready"
+                and str(runtime["agent_id"]) == candidate.agent_id
+                and str(runtime["owner_user_id"]) == candidate.owner_user_id
+                and str(runtime["revision_id"]) == candidate.revision_id
+                and runtime["state"] == "ready"
+                and not bool(runtime["is_authoritative"])
+                and str(agent["selected_host_session_id"])
+                == str(runtime["host_session_id"])
+            ):
+                raise StaleRuntimeGenerationError("candidate promotion fence is stale")
+            operation_fence = self._runtime._assert_runtime_operation_locked(
+                cursor, runtime
+            )
+
+            if authoritative_runtime is not None:
+                cursor.execute(
+                    """
+                    UPDATE agent_runtime_instance
+                    SET state = CASE
+                            WHEN state IN ('stopped', 'failed', 'offline', 'superseded')
+                                THEN state
+                            ELSE 'stopping'
+                        END,
+                        is_authoritative = FALSE,
+                        state_revision = state_revision + 1
+                    WHERE runtime_instance_id = %s AND is_authoritative = TRUE
+                    """,
+                    (authoritative_runtime,),
+                )
+            cursor.execute(
+                """
+                UPDATE agent_runtime_instance
+                SET state = 'online', is_authoritative = TRUE,
+                    state_revision = state_revision + 1
+                WHERE runtime_instance_id = %s AND revision_id = %s
+                  AND state = 'ready' AND is_authoritative = FALSE
+                """,
+                (candidate.runtime_instance_id, candidate.revision_id),
+            )
+            if cursor.rowcount != 1:
+                raise StaleRuntimeGenerationError("candidate runtime promotion is stale")
+            cursor.execute(
+                """
+                UPDATE user_agent_revision
+                SET state = 'active', promoted_at = clock_timestamp(),
+                    state_revision = state_revision + 1
+                WHERE revision_id = %s AND promotion_token = %s AND state = 'ready'
+                """,
+                (candidate.revision_id, candidate.promotion_token),
+            )
+            if cursor.rowcount != 1:
+                raise StaleRuntimeGenerationError("candidate revision promotion is stale")
+            if active_revision is not None:
+                cursor.execute(
+                    """
+                    UPDATE user_agent_revision
+                    SET state = 'retired', state_revision = state_revision + 1
+                    WHERE revision_id = %s AND state = 'active'
+                    """,
+                    (active_revision,),
+                )
+            cursor.execute(
+                """
+                UPDATE user_agent
+                SET active_revision_id = %s,
+                    last_known_good_revision_id = %s,
+                    authoritative_instance_id = %s,
+                    lifecycle_generation = %s,
+                    status = 'live', state_revision = state_revision + 1,
+                    updated_at = (extract(epoch from clock_timestamp()) * 1000)::bigint
+                WHERE agent_id = %s AND owner_user_id = %s
+                  AND state_revision = %s
+                """,
+                (
+                    candidate.revision_id,
+                    active_revision,
+                    candidate.runtime_instance_id,
+                    int(runtime["lifecycle_generation"]),
+                    candidate.agent_id,
+                    candidate.owner_user_id,
+                    int(agent["state_revision"]),
+                ),
+            )
+            if cursor.rowcount != 1:
+                raise StaleRuntimeGenerationError("agent pointer promotion is stale")
+            self._runtime._operations.terminalize(
+                operation_fence,
+                state=OperationState.COMPLETED,
+                terminal_code=None,
+                safe_summary=None,
+                retry_after_ms=None,
+                now=None,
+                retention=self._runtime._operation_retention,
+                transaction=cursor,
+            )
+
+        return PromotionCommit(
+            owner_user_id=candidate.owner_user_id,
+            agent_id=candidate.agent_id,
+            revision_id=candidate.revision_id,
+            runtime_instance_id=candidate.runtime_instance_id,
+            previous_revision_id=active_revision,
+            previous_runtime_instance_id=authoritative_runtime,
+        )
+
+    def fail_candidate(
+        self, candidate: CandidateRevision, failure_code: str
+    ) -> None:
+        if self._SAFE_FAILURE.fullmatch(failure_code or "") is None:
+            raise ValueError("candidate failure code is invalid")
+        with self._runtime._transaction() as cursor:
+            self._runtime._lock_owner(cursor, candidate.owner_user_id)
+            cursor.execute(
+                """
+                SELECT active_revision_id FROM user_agent
+                WHERE agent_id = %s AND owner_user_id = %s FOR UPDATE
+                """,
+                (candidate.agent_id, candidate.owner_user_id),
+            )
+            agent = cursor.fetchone()
+            if agent is None:
+                raise StaleRuntimeGenerationError("candidate agent is stale")
+            if (
+                agent["active_revision_id"] is not None
+                and str(agent["active_revision_id"]) == candidate.revision_id
+            ):
+                return
+            cursor.execute(
+                "SELECT * FROM agent_runtime_instance "
+                "WHERE runtime_instance_id = %s FOR UPDATE",
+                (candidate.runtime_instance_id,),
+            )
+            runtime = cursor.fetchone()
+            if runtime is not None and runtime["state"] not in {
+                "stopped",
+                "failed",
+                "offline",
+                "superseded",
+            }:
+                self._runtime._terminalize_instance_row_locked(
+                    cursor, runtime, failure_code=failure_code
+                )
+            cursor.execute(
+                """
+                UPDATE user_agent_revision
+                SET state = 'failed', failed_at = clock_timestamp(),
+                    failure_code = %s, state_revision = state_revision + 1
+                WHERE revision_id = %s AND agent_id = %s AND owner_user_id = %s
+                  AND promotion_token = %s
+                  AND state IN ('prepared', 'starting', 'ready')
+                """,
+                (
+                    failure_code,
+                    candidate.revision_id,
+                    candidate.agent_id,
+                    candidate.owner_user_id,
+                    candidate.promotion_token,
+                ),
+            )
+
+    def recovery_plan(self, owner_user_id: str, agent_id: str) -> RecoveryPlan:
+        owner_user_id = self._required_text(owner_user_id, "owner_user_id", 255)
+        agent_id = self._required_text(agent_id, "agent_id", 255)
+        with self._runtime._transaction() as cursor:
+            self._runtime._lock_owner(cursor, owner_user_id)
+            agent = self._runtime._locked_agent(
+                cursor, owner_user_id=owner_user_id, agent_id=agent_id
+            )
+            active_revision = (
+                None
+                if agent["active_revision_id"] is None
+                else str(agent["active_revision_id"])
+            )
+            authoritative_runtime = (
+                None
+                if agent["authoritative_instance_id"] is None
+                else str(agent["authoritative_instance_id"])
+            )
+            cursor.execute(
+                """
+                SELECT * FROM agent_runtime_instance
+                WHERE agent_id = %s AND owner_user_id = %s
+                  AND state NOT IN ('stopped', 'failed', 'offline', 'superseded')
+                ORDER BY created_at, runtime_instance_id
+                FOR UPDATE
+                """,
+                (agent_id, owner_user_id),
+            )
+            runtimes = list(cursor.fetchall())
+            authoritative = next(
+                (
+                    row
+                    for row in runtimes
+                    if authoritative_runtime is not None
+                    and str(row["runtime_instance_id"]) == authoritative_runtime
+                    and active_revision is not None
+                    and str(row["revision_id"]) == active_revision
+                    and row["state"] == "online"
+                    and bool(row["is_authoritative"])
+                ),
+                None,
+            )
+            keep_runtime_id = (
+                None
+                if authoritative is None
+                else str(authoritative["runtime_instance_id"])
+            )
+            stop_runtime_ids = tuple(
+                str(row["runtime_instance_id"])
+                for row in runtimes
+                if str(row["runtime_instance_id"]) != keep_runtime_id
+            )
+            for row in runtimes:
+                if str(row["runtime_instance_id"]) == keep_runtime_id:
+                    continue
+                self._runtime._terminalize_instance_row_locked(
+                    cursor,
+                    row,
+                    failure_code="revision_promotion_failed",
+                )
+            if active_revision is not None:
+                cursor.execute(
+                    """
+                    UPDATE user_agent_revision
+                    SET state = 'failed', failed_at = clock_timestamp(),
+                        failure_code = 'revision_promotion_failed',
+                        state_revision = state_revision + 1
+                    WHERE agent_id = %s AND owner_user_id = %s
+                      AND revision_id <> %s
+                      AND state IN ('prepared', 'starting', 'ready')
+                    """,
+                    (agent_id, owner_user_id, active_revision),
+                )
+            else:
+                cursor.execute(
+                    """
+                    UPDATE user_agent_revision
+                    SET state = 'failed', failed_at = clock_timestamp(),
+                        failure_code = 'revision_promotion_failed',
+                        state_revision = state_revision + 1
+                    WHERE agent_id = %s AND owner_user_id = %s
+                      AND state IN ('prepared', 'starting', 'ready')
+                    """,
+                    (agent_id, owner_user_id),
+                )
+        return RecoveryPlan(
+            owner_user_id=owner_user_id,
+            agent_id=agent_id,
+            active_revision_id=active_revision,
+            authoritative_runtime_instance_id=keep_runtime_id,
+            start_revision_id=(
+                active_revision
+                if active_revision is not None and keep_runtime_id is None
+                else None
+            ),
+            stop_runtime_instance_ids=stop_runtime_ids,
+        )
+
+
+async def _await_if_needed(value: Any) -> Any:
+    """Await callback results while permitting synchronous durable test seams."""
+
+    if inspect.isawaitable(value):
+        return await value
+    return value
+
+
+@dataclass
+class AgentRevisionActivator:
+    """Coordinate prepare/start/ready/promote without risking the old runtime.
+
+    All pre-commit failures terminalize only the candidate.  The old runtime is
+    not stopped until :meth:`RevisionActivationStore.promote_candidate` returns,
+    which is the durable commit boundary.  A process crash is recovered from the
+    store's active pointer rather than from whichever candidate was newest.
+    """
+
+    store: RevisionActivationStore
+    start_candidate: Callable[[CandidateRevision], Awaitable[str] | str]
+    await_candidate_ready: Callable[
+        [CandidateRevision], Awaitable[str] | str
+    ]
+    stop_runtime: Callable[[str], Awaitable[Any] | Any]
+    fault_hook: Optional[Callable[[str, CandidateRevision], None]] = None
+
+    @property
+    def _store(self) -> RevisionActivationStore:
+        return self.store
+
+    @property
+    def _start_candidate(
+        self,
+    ) -> Callable[[CandidateRevision], Awaitable[str] | str]:
+        return self.start_candidate
+
+    @property
+    def _await_candidate_ready(
+        self,
+    ) -> Callable[[CandidateRevision], Awaitable[str] | str]:
+        return self.await_candidate_ready
+
+    @property
+    def _stop_runtime(self) -> Callable[[str], Awaitable[Any] | Any]:
+        return self.stop_runtime
+
+    @property
+    def _fault_hook(self) -> Callable[[str, CandidateRevision], None]:
+        return self.fault_hook or (lambda _boundary, _candidate: None)
+
+    def _fault(self, boundary: str, candidate: CandidateRevision) -> None:
+        self._fault_hook(boundary, candidate)
+
+    async def _fail_precommit_candidate(
+        self, candidate: CandidateRevision, failure_code: str
+    ) -> None:
+        try:
+            self._store.fail_candidate(candidate, failure_code)
+        except Exception:
+            logger.exception(
+                "candidate failure transition failed",
+                extra={"failure_code": failure_code},
+            )
+        try:
+            await _await_if_needed(self._stop_runtime(candidate.runtime_instance_id))
+        except Exception:
+            logger.exception(
+                "candidate stop failed",
+                extra={"failure_code": failure_code},
+            )
+
+    async def activate(
+        self, request: CandidatePreparation
+    ) -> RevisionActivationResult:
+        """Prepare and activate one revision through a single commit boundary."""
+
+        candidate: Optional[CandidateRevision] = None
+        commit: Optional[PromotionCommit] = None
+        phase = "preparation"
+        committed = False
+        try:
+            candidate = self._store.prepare_candidate(request)
+            self._fault("after_prepare", candidate)
+
+            phase = "start"
+            self._fault("before_start", candidate)
+            started_runtime_id = await _await_if_needed(
+                self._start_candidate(candidate)
+            )
+            if started_runtime_id != candidate.runtime_instance_id:
+                raise RevisionActivationError("stale_runtime_generation")
+            self._store.mark_candidate_starting(candidate)
+            self._fault("after_start", candidate)
+
+            phase = "ready"
+            self._fault("before_ready", candidate)
+            ready_runtime_id = await _await_if_needed(
+                self._await_candidate_ready(candidate)
+            )
+            candidate = self._store.confirm_candidate_ready(
+                candidate, ready_runtime_id
+            )
+            self._fault("after_ready", candidate)
+
+            phase = "promotion"
+            self._fault("before_promote", candidate)
+            commit = self._store.promote_candidate(candidate)
+            committed = True
+            self._fault("after_promote_commit", candidate)
+        except Exception as exc:
+            if committed and commit is not None:
+                # The database is already authoritative.  A local observer/fault
+                # hook cannot truthfully turn that into promotion failure; carry
+                # on to post-commit cleanup and let crash recovery retry it.
+                logger.exception(
+                    "post-commit revision observer failed; promotion remains active",
+                    extra={"revision_id": commit.revision_id},
+                )
+            else:
+                if candidate is not None:
+                    failure_code = {
+                        "preparation": "bundle_install_failed",
+                        "start": "child_start_failed",
+                        "ready": "child_registration_timeout",
+                        "promotion": "revision_promotion_failed",
+                    }[phase]
+                    await self._fail_precommit_candidate(candidate, failure_code)
+                if isinstance(exc, RevisionActivationError) and phase != "promotion":
+                    raise
+                code = {
+                    "preparation": "bundle_install_failed",
+                    "start": "child_start_failed",
+                    "ready": "child_registration_timeout",
+                    "promotion": "revision_promotion_failed",
+                }[phase]
+                raise RevisionActivationError(code) from exc
+
+        if commit is None:  # pragma: no cover - defensive invariant
+            raise RuntimeError("revision activation lost its promotion commit")
+
+        previous_runtime = commit.previous_runtime_instance_id
+        if previous_runtime is None or previous_runtime == commit.runtime_instance_id:
+            return RevisionActivationResult(
+                commit=commit,
+                prior_runtime_stopped=False,
+                cleanup_pending=False,
+            )
+
+        self._fault("before_prior_stop", candidate)
+        try:
+            await _await_if_needed(self._stop_runtime(previous_runtime))
+        except Exception:
+            logger.exception(
+                "prior runtime stop failed after revision promotion",
+                extra={"revision_id": commit.revision_id},
+            )
+            return RevisionActivationResult(
+                commit=commit,
+                prior_runtime_stopped=False,
+                cleanup_pending=True,
+            )
+        self._fault("after_prior_stop", candidate)
+        return RevisionActivationResult(
+            commit=commit,
+            prior_runtime_stopped=True,
+            cleanup_pending=False,
+        )
+
+    async def reconcile_after_crash(
+        self, owner_user_id: str, agent_id: str
+    ) -> RecoveryPlan:
+        """Stop every non-authoritative candidate named by durable recovery."""
+
+        plan = self._store.recovery_plan(owner_user_id, agent_id)
+        for runtime_instance_id in plan.stop_runtime_instance_ids:
+            try:
+                await _await_if_needed(self._stop_runtime(runtime_instance_id))
+            except Exception:
+                logger.exception(
+                    "non-authoritative runtime stop failed during recovery",
+                    extra={"runtime_instance_id": runtime_instance_id},
+                )
+        return plan
+
 
 class AgentLifecycleManager:
     """Manages draft agent creation, testing, approval, and promotion to live."""
 
-    def __init__(self, db, orchestrator=None):
+    def __init__(
+        self,
+        db,
+        orchestrator=None,
+        process_supervisor=None,
+        *,
+        byo_runtime_contract_version: int = BYO_RUNTIME_CONTRACT_VERSION,
+        byo_runtime_lock_sha256: str = BYO_RUNTIME_LOCK_SHA256,
+        artifact_store: Optional[ImmutableAgentArtifactStore] = None,
+    ):
         """
         Args:
             db: Database instance with draft_agents CRUD methods
@@ -71,10 +1154,30 @@ class AgentLifecycleManager:
         )
         self.security = CodeSecurityAnalyzer()
         self.validator = AgentSpecValidator()
-        self._draft_processes: Dict[str, subprocess.Popen] = {}  # draft_id -> process
+        self.process_supervisor = (
+            process_supervisor
+            if process_supervisor is not None
+            else ProcessSupervisor()
+        )
+        if byo_runtime_contract_version != BYO_RUNTIME_CONTRACT_VERSION:
+            raise ValueError("unsupported BYO runtime contract version")
+        if not re.fullmatch(r"[0-9a-f]{64}", byo_runtime_lock_sha256 or ""):
+            raise ValueError("BYO runtime lock must be lowercase SHA-256")
+        self._byo_runtime_contract_version = byo_runtime_contract_version
+        self._byo_runtime_lock_sha256 = byo_runtime_lock_sha256
+        self._artifact_store = artifact_store
+        self._draft_processes: Dict[str, Any] = {}  # draft_id -> supervised process
         self._agents_dir = os.path.abspath(
             os.path.join(os.path.dirname(__file__), '..', 'agents')
         )
+
+    @property
+    def artifact_store(self) -> ImmutableAgentArtifactStore:
+        """Persistent immutable BYO revision store, initialized on first use."""
+
+        if self._artifact_store is None:
+            self._artifact_store = ImmutableAgentArtifactStore()
+        return self._artifact_store
 
     # Progress Callback
 
@@ -205,10 +1308,16 @@ class AgentLifecycleManager:
 
                     tools_code = candidate
 
-                    # Write the fixed code
-                    tools_file = os.path.join(self._agents_dir, slug, "mcp_tools.py")
-                    with open(tools_file, "w", encoding="utf-8") as fh:
-                        fh.write(tools_code)
+                    # Server-hosted drafts retain their legacy editable working
+                    # directory. BYO bytes stay in memory until the dedicated
+                    # immutable publication seam has validated and committed the
+                    # complete three-file revision.
+                    if not static_only:
+                        tools_file = os.path.join(
+                            self._agents_dir, slug, "mcp_tools.py"
+                        )
+                        with open(tools_file, "w", encoding="utf-8") as fh:
+                            fh.write(tools_code)
 
                 except Exception as e:
                     await asyncio.to_thread(self._append_log, draft_id, f"Auto-fix failed: {e}")
@@ -258,7 +1367,8 @@ class AgentLifecycleManager:
 
     async def create_draft(self, user_id: str, agent_name: str, description: str,
                             tools_spec: List[Dict] = None, skill_tags: List[str] = None,
-                            packages: List[str] = None) -> Dict[str, Any]:
+                            packages: List[str] = None,
+                            revises_agent_id: Optional[str] = None) -> Dict[str, Any]:
         """Create a new draft agent record."""
         # Validate
         if not agent_name or len(agent_name.strip()) < 2:
@@ -268,13 +1378,13 @@ class AgentLifecycleManager:
         if len(agent_name) > 100:
             raise ValueError("Agent name must be under 100 characters")
 
-        slug = self._sanitize_slug(agent_name)
-        # 052 event-loop hygiene: this is an async method, so its DB work is
-        # offloaded off the event loop (the sync-DB-on-the-loop guard, empty
-        # allowlist, otherwise flags it — and blocking the loop here stalls every
-        # concurrent request during a draft create).
-        slug = await asyncio.to_thread(self._ensure_unique_slug, slug)
         draft_id = str(uuid.uuid4())
+        # The storage slug is deliberately identity-suffixed. A filesystem
+        # exists-check followed by insert is not an allocation primitive: two
+        # replicas could observe the same free name. The immutable UUID suffix
+        # makes same-name draft storage collision-free without a shared lock.
+        slug_base = self._sanitize_slug(agent_name)[:48]
+        slug = f"{slug_base}_{draft_id.replace('-', '')[:12]}"
 
         await asyncio.to_thread(
             self.db.create_draft_agent,
@@ -286,6 +1396,7 @@ class AgentLifecycleManager:
             tools_spec=json.dumps(tools_spec) if tools_spec else None,
             skill_tags=json.dumps(skill_tags) if skill_tags else None,
             packages=json.dumps(packages) if packages else None,
+            revises_agent_id=revises_agent_id,
         )
 
         logger.info(f"Created draft agent '{agent_name}' (id={draft_id}, slug={slug}) for user {user_id}")
@@ -295,16 +1406,24 @@ class AgentLifecycleManager:
 
     async def generate_code(self, draft_id: str, websocket=None, *,
                             target: str = BACKEND_TARGET,
-                            agent_id: Optional[str] = None) -> Dict[str, Any]:
+                            agent_id: Optional[str] = None,
+                            expected_state_revision: Optional[int] = None,
+                            generation_claim_id: Optional[str] = None) -> Dict[str, Any]:
         """Generate the 3 agent files for a draft.
 
         Args:
             target: ``backend`` (027 — server-hosted: agent.py + mcp_server.py +
-                mcp_tools.py, run as a subprocess here) or ``byo`` (058 — the
-                self-contained desktop bundle: agent_main.py + mcp_tools.py +
-                manifest.json, delivered to the owner's host and never run here).
+                mcp_tools.py, run as a subprocess here) or ``byo`` (060 — the
+                self-contained desktop bundle: agent_main.py +
+                astralprims_ui.py + mcp_tools.py plus its deterministic runtime
+                manifest, delivered to the owner's host and never run here).
             agent_id: the identity to bake into the generated card. Defaults to
                 the slug-derived ``<slug>-1``; BYO passes the owner-namespaced id.
+            expected_state_revision: revision the caller observed. A stale value
+                returns the current revision and a ``refresh`` action without
+                running generation.
+            generation_claim_id: optional UUID4 idempotency identity. Retries may
+                reuse it only while the same live claim and revision remain.
 
         Returns the draft row, plus a ``files`` key holding the FINAL bundle
         (post auto-fix) on success. Callers deliver from that key — the generated
@@ -313,13 +1432,6 @@ class AgentLifecycleManager:
         draft = await asyncio.to_thread(self.db.get_draft_agent, draft_id)
         if not draft:
             raise ValueError(f"Draft {draft_id} not found")
-
-        slug = draft["agent_slug"]
-        agent_name = draft["agent_name"]
-        description = draft["description"]
-        tools_spec = json.loads(draft["tools_spec"]) if draft.get("tools_spec") else []
-        skill_tags = json.loads(draft["skill_tags"]) if draft.get("skill_tags") else []
-        packages = json.loads(draft["packages"]) if draft.get("packages") else []
 
         # 058 SC-002 — the sandbox/exec decision is a property of the ROW, not of
         # the caller's argument. Keying it on ``target`` alone let any caller that
@@ -335,7 +1447,89 @@ class AgentLifecycleManager:
                 f"server-hosted ('{target}') agent (058 SC-002)."
             )
         is_byo = is_byo_origin or (target == BYO_TARGET)
+
+        observed_revision = int(draft.get("state_revision") or 0)
+        if expected_state_revision is None:
+            expected_state_revision = observed_revision
+        if type(expected_state_revision) is not int or expected_state_revision < 0:
+            raise ValueError("expected_state_revision must be non-negative")
+        if generation_claim_id is None:
+            generation_claim_id = str(uuid.uuid4())
+        else:
+            parsed_claim_id = uuid.UUID(str(generation_claim_id))
+            if parsed_claim_id.version != 4:
+                raise ValueError("generation_claim_id must be a UUID4")
+            generation_claim_id = str(parsed_claim_id)
+
+        owner_user_id = str(draft.get("user_id") or "")
+        claimed = await asyncio.to_thread(
+            self.db.claim_draft_generation,
+            draft_id=draft_id,
+            owner_user_id=owner_user_id,
+            expected_revision=expected_state_revision,
+            claim_id=generation_claim_id,
+        )
+        if claimed is None:
+            current = dict(
+                await asyncio.to_thread(self.db.get_draft_agent, draft_id) or {}
+            )
+            current.update(
+                {
+                    "status": "conflict",
+                    "generation_outcome": "conflict",
+                    "current_revision": int(current.get("state_revision") or 0),
+                    "refresh": "refresh",
+                }
+            )
+            return current
+
+        # Every byte and every policy decision below is derived from the exact
+        # claimed row. An edit increments state_revision and makes both artifact
+        # publication and terminalization fail closed.
+        draft = dict(claimed)
+        claimed_revision = int(draft["state_revision"])
+        slug = draft["agent_slug"]
+        agent_name = draft["agent_name"]
+        description = draft["description"]
+        tools_spec = json.loads(draft["tools_spec"]) if draft.get("tools_spec") else []
+        skill_tags = json.loads(draft["skill_tags"]) if draft.get("skill_tags") else []
+        packages = json.loads(draft["packages"]) if draft.get("packages") else []
         agent_id = agent_id or self.generator.default_agent_id(slug)
+
+        async def finish_generation(
+            status: str,
+            *,
+            error_message: Optional[str] = None,
+            security_report: Optional[str] = None,
+            validation_report: Optional[str] = None,
+            required_credentials: Optional[str] = None,
+        ) -> Dict[str, Any]:
+            finished = await asyncio.to_thread(
+                self.db.finish_draft_generation,
+                draft_id=draft_id,
+                owner_user_id=owner_user_id,
+                expected_revision=claimed_revision,
+                claim_id=generation_claim_id,
+                status=status,
+                error_message=error_message,
+                security_report=security_report,
+                validation_report=validation_report,
+                required_credentials=required_credentials,
+            )
+            if finished is not None:
+                return dict(finished)
+            current = dict(
+                await asyncio.to_thread(self.db.get_draft_agent, draft_id) or {}
+            )
+            current.update(
+                {
+                    "status": "conflict",
+                    "generation_outcome": "conflict",
+                    "current_revision": int(current.get("state_revision") or 0),
+                    "refresh": "refresh",
+                }
+            )
+            return current
 
         # BYO codegen uses the OWNER's LLM, not the admin-managed system credential.
         # A user authoring their own private agent is an INTERACTIVE turn on their
@@ -356,8 +1550,6 @@ class AgentLifecycleManager:
                 logger.debug("byo codegen: owner LLM resolution unavailable, "
                              "falling back to system resolver", exc_info=True)
 
-        # Update status
-        await asyncio.to_thread(self.db.update_draft_agent, draft_id, status=GENERATING)
         await asyncio.to_thread(self._append_log, draft_id, "Starting code generation...")
 
         try:
@@ -366,14 +1558,15 @@ class AgentLifecycleManager:
                                        "Generating agent template files...", GENERATING)
             await asyncio.to_thread(self._append_log, draft_id, "Generating template files...")
 
+            revision_id = None
             if is_byo:
                 from orchestrator.agent_constitution import AGENT_CONSTITUTION_VERSION
-                template_files = self.generator.generate_byo_files(
+                revision_id = str(uuid.uuid4())
+                template_files = self.generator.generate_byo_scaffold(
                     agent_name=agent_name,
                     description=description,
                     agent_id=agent_id,
                     skill_tags=skill_tags,
-                    constitution_version=AGENT_CONSTITUTION_VERSION,
                 )
             else:
                 template_files = self.generator.generate_template_files(
@@ -402,7 +1595,10 @@ class AgentLifecycleManager:
                 if draft_archive.archive_enabled():
                     fp = draft_archive.draft_fingerprint(draft)
                     knowledge_context = draft_archive.exemplar_prompt_for(
-                        knowledge_context, fp)
+                        knowledge_context,
+                        fp,
+                        owner_user_id=owner_user_id,
+                    )
             except Exception:  # pragma: no cover — conditioning is best-effort
                 logger.debug("draft-archive: codegen conditioning skipped", exc_info=True)
 
@@ -425,21 +1621,19 @@ class AgentLifecycleManager:
 
             for fname, code in all_files.items():
                 if not fname.endswith(".py"):
-                    continue          # BYO ships a manifest.json alongside the code
+                    continue
                 try:
                     compile(code, f"{slug}/{fname}", "exec")
                 except SyntaxError as e:
                     error_msg = f"Syntax error in {fname} (line {e.lineno}): {e.msg}"
                     logger.error(f"Generated code has syntax error: {error_msg}")
-                    await asyncio.to_thread(
-                        self.db.update_draft_agent,
-                        draft_id, status=ERROR,
-                        error_message=error_msg,
+                    state = await finish_generation(
+                        ERROR, error_message=error_msg
                     )
                     await self._send_progress(websocket, draft_id, "syntax_error",
                                                error_msg, ERROR)
                     await asyncio.to_thread(self._append_log, draft_id, f"SYNTAX ERROR: {error_msg}")
-                    return await asyncio.to_thread(self.db.get_draft_agent, draft_id)
+                    return state
 
             # Step 2.6 (BYO): the bundle must be self-contained — the desktop host
             # ships no backend package, so a `from shared…` import is a dead agent
@@ -449,12 +1643,13 @@ class AgentLifecycleManager:
                 if bad:
                     error_msg = ("Generated bundle is not self-contained "
                                  f"(forbidden imports: {bad}). Not delivered.")
-                    await asyncio.to_thread(self.db.update_draft_agent, draft_id, status=ERROR,
-                                            error_message=error_msg)
+                    state = await finish_generation(
+                        ERROR, error_message=error_msg
+                    )
                     await self._send_progress(websocket, draft_id, "not_self_contained",
                                                error_msg, ERROR)
                     await asyncio.to_thread(self._append_log, draft_id, f"BYO GATE: {error_msg}")
-                    return await asyncio.to_thread(self.db.get_draft_agent, draft_id)
+                    return state
 
             # Step 3: Security analysis
             await self._send_progress(websocket, draft_id, "security_scan",
@@ -464,10 +1659,8 @@ class AgentLifecycleManager:
             report = self.security.analyze(tools_code, filename=f"{slug}/mcp_tools.py")
 
             if not report.passed and report.max_severity == Severity.CRITICAL:
-                await asyncio.to_thread(
-                    self.db.update_draft_agent,
-                    draft_id,
-                    status=ERROR,
+                state = await finish_generation(
+                    ERROR,
                     security_report=json.dumps(report.to_dict()),
                     error_message="Security analysis found critical issues in generated code.",
                 )
@@ -475,29 +1668,36 @@ class AgentLifecycleManager:
                                            "Security analysis found critical issues. Code was not written.",
                                            ERROR, detail=report.to_dict())
                 await asyncio.to_thread(self._append_log, draft_id, f"Security analysis FAILED: {report.recommendation}")
-                return await asyncio.to_thread(self.db.get_draft_agent, draft_id)
+                return state
 
-            # Step 4: Write files to disk
+            # Step 4: Write server-hosted draft working files to disk. BYO
+            # executable bytes are not written into the shared slug directory;
+            # they remain in memory until the immutable revision publisher
+            # commits the complete, validated bundle below.
             await self._send_progress(websocket, draft_id, "writing_files",
                                        "Writing agent files...", GENERATING)
             await asyncio.to_thread(self._append_log, draft_id, "Writing agent files to disk...")
 
-            agent_dir = os.path.join(self._agents_dir, slug)
-            os.makedirs(agent_dir, exist_ok=True)
+            if not is_byo:
+                agent_dir = os.path.join(self._agents_dir, slug)
+                os.makedirs(agent_dir, exist_ok=True)
 
-            # Write draft marker — start.py skips directories with .draft
-            with open(os.path.join(agent_dir, ".draft"), "w", encoding="utf-8") as f:
-                f.write(draft_id)
+                # Write draft marker — start.py skips directories with .draft
+                with open(
+                    os.path.join(agent_dir, ".draft"), "w", encoding="utf-8"
+                ) as marker_file:
+                    marker_file.write(draft_id)
 
-            # Write __init__.py
-            init_content = f'"""Auto-generated agent: {agent_name}"""\n'
-            with open(os.path.join(agent_dir, "__init__.py"), "w", encoding="utf-8") as f:
-                f.write(init_content)
+                init_content = f'"""Auto-generated agent: {agent_name}"""\n'
+                with open(
+                    os.path.join(agent_dir, "__init__.py"), "w", encoding="utf-8"
+                ) as init_file:
+                    init_file.write(init_content)
 
-            for filename, content in all_files.items():
-                filepath = os.path.join(agent_dir, filename)
-                with open(filepath, "w", encoding="utf-8") as f:
-                    f.write(content)
+                for filename, content in all_files.items():
+                    filepath = os.path.join(agent_dir, filename)
+                    with open(filepath, "w", encoding="utf-8") as generated_file:
+                        generated_file.write(content)
 
             # Step 5: Spec validation (with auto-fix retry). The 027 validator
             # RUNS the generated tools; BYO (user-authored) code is validated
@@ -517,12 +1717,13 @@ class AgentLifecycleManager:
                 if bad:
                     error_msg = ("Auto-fixed bundle is not self-contained "
                                  f"(forbidden imports: {bad}). Not delivered.")
-                    await asyncio.to_thread(self.db.update_draft_agent, draft_id, status=ERROR,
-                                            error_message=error_msg)
+                    state = await finish_generation(
+                        ERROR, error_message=error_msg
+                    )
                     await self._send_progress(websocket, draft_id, "not_self_contained",
                                                error_msg, ERROR)
                     await asyncio.to_thread(self._append_log, draft_id, f"BYO GATE: {error_msg}")
-                    return await asyncio.to_thread(self.db.get_draft_agent, draft_id)
+                    return state
 
             # Step 5.5: Extract required credentials declared by LLM
             required_creds = self._extract_required_credentials(tools_code)
@@ -535,9 +1736,61 @@ class AgentLifecycleManager:
                     detail={"required_credentials": required_creds},
                 )
 
-            # Step 6: Update status
+            # Step 6: Finalize and durably publish the exact BYO revision before
+            # reporting generation success. Runtime start/ready/promotion remains
+            # a separate lifecycle transaction owned by AgentRevisionActivator.
+            finalized = None
+            published_artifact = None
+            publication_id = None
+            final_files = {**template_files, "mcp_tools.py": tools_code}
+            if is_byo:
+                finalized = self.generator.finalize_byo_bundle(
+                    files=final_files,
+                    agent_id=agent_id,
+                    revision_id=revision_id,
+                    agent_name=agent_name,
+                    description=description,
+                    constitution_version=AGENT_CONSTITUTION_VERSION,
+                    required_runtime_lock_sha256=self._byo_runtime_lock_sha256,
+                )
+                publication_id = str(uuid.uuid4())
+                draft_uuid = str(draft.get("draft_uuid") or draft_id)
+                source_state_revision = claimed_revision
+
+                def publication_fence(_boundary: str) -> None:
+                    current = self.db.get_draft_agent(draft_id)
+                    if not current:
+                        raise RuntimeError("draft publication fence is stale")
+                    if (
+                        str(current.get("user_id") or "") != owner_user_id
+                        or str(current.get("draft_uuid") or draft_id) != draft_uuid
+                        or int(current.get("state_revision") or 0)
+                        != source_state_revision
+                        or str(current.get("generation_claim_id") or "")
+                        != generation_claim_id
+                    ):
+                        raise RuntimeError("draft publication fence is stale")
+
+                await self._send_progress(
+                    websocket,
+                    draft_id,
+                    "publishing_artifact",
+                    "Publishing immutable agent revision...",
+                    GENERATING,
+                )
+                published_artifact = await asyncio.to_thread(
+                    self.artifact_store.publish,
+                    finalized,
+                    draft_uuid=draft_uuid,
+                    source_state_revision=source_state_revision,
+                    publication_id=publication_id,
+                    agent_id=agent_id,
+                    revision_id=revision_id,
+                    fence_check=publication_fence,
+                )
+
+            # Only a fully published revision may transition to generated.
             update_kwargs = {
-                "status": GENERATED,
                 "security_report": json.dumps(report.to_dict()) if report.findings else None,
                 "validation_report": json.dumps(validation_report.to_dict()),
                 "required_credentials": json.dumps(required_creds) if required_creds else None,
@@ -549,7 +1802,9 @@ class AgentLifecycleManager:
                     "You can still test manually or refine the agent."
                 )
 
-            await asyncio.to_thread(self.db.update_draft_agent, draft_id, **update_kwargs)
+            state = await finish_generation(GENERATED, **update_kwargs)
+            if state.get("generation_outcome") == "conflict":
+                return state
 
             status_msg = (
                 "Agent files generated and validated successfully!"
@@ -566,21 +1821,41 @@ class AgentLifecycleManager:
                                        })
             await asyncio.to_thread(self._append_log, draft_id, "Code generation complete!")
 
-            # Hand the caller the FINAL bundle (mcp_tools.py may have been
-            # auto-fixed since it was written). Without this the generated source
-            # is only reachable off disk, and the BYO delivery seam — which has no
-            # disk to reach for — would ship an empty bundle.
-            state = dict(await asyncio.to_thread(self.db.get_draft_agent, draft_id) or {})
-            state["files"] = {**template_files, "mcp_tools.py": tools_code}
+            # Hand the caller the re-opened immutable bundle (mcp_tools.py may
+            # have been auto-fixed since first generation). The v2 metadata
+            # envelope remains outside the three-file artifact hash.
+            if is_byo:
+                if finalized is None or published_artifact is None:
+                    raise RuntimeError("immutable BYO publication was not completed")
+                state["files"] = {
+                    **dict(published_artifact.files),
+                    "manifest.json": published_artifact.manifest_json,
+                }
+                state["runtime_manifest"] = published_artifact.manifest_dict()
+                state["bundle_sha256"] = published_artifact.bundle_sha256
+                state["manifest_sha256"] = published_artifact.manifest_sha256
+                state["artifact_relative_path"] = (
+                    published_artifact.artifact_relative_path
+                )
+                state["publication_id"] = publication_id
+                state["revision_id"] = revision_id
+                state["runtime_contract_version"] = (
+                    self._byo_runtime_contract_version
+                )
+                state["required_runtime_lock_sha256"] = (
+                    self._byo_runtime_lock_sha256
+                )
+            else:
+                state["files"] = final_files
             return state
 
         except Exception as e:
             logger.error(f"Code generation failed for draft {draft_id}: {e}")
-            await asyncio.to_thread(self.db.update_draft_agent, draft_id, status=ERROR, error_message=str(e))
+            state = await finish_generation(ERROR, error_message=str(e))
             await self._send_progress(websocket, draft_id, "error",
                                        f"Code generation failed: {e}", ERROR)
             await asyncio.to_thread(self._append_log, draft_id, f"ERROR: {e}")
-            return await asyncio.to_thread(self.db.get_draft_agent, draft_id)
+            return state
 
     # Start Draft Agent for Testing
 
@@ -680,11 +1955,11 @@ class AgentLifecycleManager:
             logger.exception("C-S6 sandbox setup failed; launching unsandboxed")
             sandbox_kwargs = {}
 
-        proc = subprocess.Popen(
-            [python_exe, agent_script, "--port", str(port)],
+        proc = self.process_supervisor.spawn(
+            process_id=uuid.uuid4(),
+            owner=ProcessOwner(owner_kind="draft_agent", owner_id=draft_id),
+            argv=(python_exe, agent_script, "--port", str(port)),
             cwd=agent_dir,
-            stdout=subprocess.PIPE,
-            stderr=subprocess.PIPE,
             **sandbox_kwargs,
         )
         self._draft_processes[draft_id] = proc
@@ -702,7 +1977,10 @@ class AgentLifecycleManager:
                 await asyncio.sleep(2)
                 # Check if process is still alive
                 if proc.poll() is not None:
-                    stderr_out = proc.stderr.read().decode() if proc.stderr else ""
+                    snapshot = await asyncio.to_thread(proc.wait)
+                    stderr_out = b"\n".join(snapshot.stderr.lines).decode(
+                        "utf-8", "replace"
+                    )
                     error_msg = f"Agent process exited with code {proc.returncode}"
                     if stderr_out:
                         error_msg += f": {stderr_out[:500]}"
@@ -786,29 +2064,16 @@ class AgentLifecycleManager:
                     del self.orchestrator.agent_urls[k]
 
         proc = self._draft_processes.get(draft_id)
-        if proc and proc.poll() is None:
-            if os.name == 'nt':
-                try:
-                    subprocess.run(
-                        ['taskkill', '/F', '/T', '/PID', str(proc.pid)],
-                        stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL, check=False
+        if proc:
+            try:
+                if proc.poll() is None:
+                    await asyncio.to_thread(
+                        lambda: proc.terminate(reason=TerminationReason.STOP)
                     )
-                except Exception:
-                    proc.terminate()
-                # Wait for process to fully exit so file handles are released
-                try:
-                    proc.wait(timeout=5)
-                except subprocess.TimeoutExpired:
-                    proc.kill()
-                    proc.wait(timeout=3)
-            else:
-                proc.terminate()
-                try:
-                    proc.wait(timeout=3)
-                except subprocess.TimeoutExpired:
-                    proc.kill()
-
-            del self._draft_processes[draft_id]
+                else:
+                    await asyncio.to_thread(proc.wait, 0)
+            finally:
+                self._draft_processes.pop(draft_id, None)
             logger.info(f"Stopped draft agent process for {draft_id}")
 
     # Refine Agent

@@ -23,6 +23,7 @@ import json
 import os
 import sys
 import types
+import uuid
 from pathlib import Path
 
 import pytest
@@ -107,9 +108,10 @@ class FakeLifecycle:
 
     async def create_draft(self, user_id, agent_name, description, tools_spec=None,
                            skill_tags=None, packages=None):
-        draft_id = f"draft-{len(self.db.drafts) + 1}"
+        draft_id = str(uuid.uuid4())
         slug = agent_name.lower().replace(" ", "_").replace("(", "").replace(")", "")
         row = {"id": draft_id, "user_id": user_id, "agent_name": agent_name,
+               "draft_uuid": draft_id, "state_revision": 0,
                "agent_slug": slug, "description": description, "status": "pending"}
         self.db.drafts[draft_id] = row
         self.calls.append(("create_draft", agent_name))
@@ -256,7 +258,7 @@ def test_flag_off_runs_self_test_and_does_not_archive(tmp_path, monkeypatch):
     assert st["status"] == "passed"
     assert not st.get("self_test_skipped")
     # Nothing archived while the flag is off.
-    assert da.get_archive() == []
+    assert da.get_archive("u1") == []
 
 
 # ---------------------------------------------------------------------------
@@ -286,7 +288,7 @@ def test_flag_on_high_surrogate_skips_self_test_and_archives(tmp_path, monkeypat
     assert st.get("surrogate_score", 0) >= 0.85
 
     # The passing draft was archived as a future exemplar.
-    archive = da.get_archive()
+    archive = da.get_archive("u1")
     assert len(archive) == 1
     rec = archive[0]
     assert rec.score > 0
@@ -341,7 +343,7 @@ def test_flag_on_very_weak_cheap_rejects_before_self_test(tmp_path, monkeypatch)
     assert st["status"] == "failed"
     assert st.get("self_test_skipped") is True
     # A predicted-failure draft is NOT archived as an exemplar.
-    assert da.get_archive() == []
+    assert da.get_archive("u1") == []
 
 
 # ---------------------------------------------------------------------------
@@ -351,16 +353,78 @@ def test_flag_on_very_weak_cheap_rejects_before_self_test(tmp_path, monkeypatch)
 def test_archived_exemplar_conditions_next_codegen_prompt(tmp_path, monkeypatch):
     monkeypatch.setenv("FF_DRAFT_ARCHIVE", "true")
     # Seed the archive with a successful pdf-reader exemplar.
-    da.record_archived_draft("read pdf table extract", HIGH_SURROGATE_CODE, 0.95)
+    draft_uuid = str(uuid.uuid4())
+    da.record_archived_draft(
+        "read pdf table extract",
+        HIGH_SURROGATE_CODE,
+        0.95,
+        owner_user_id="u1",
+        draft_uuid=draft_uuid,
+        source_state_revision=3,
+    )
     base = "GENERATE THE AGENT"
-    out = da.exemplar_prompt_for(base, "read pdf table for a report", k=3)
+    out = da.exemplar_prompt_for(
+        base,
+        "read pdf table for a report",
+        owner_user_id="u1",
+        k=3,
+    )
     assert out.startswith(base)
     assert "## Exemplars from past successful agents" in out
     assert "do_thing" in out  # the exemplar's code was embedded
 
     # Flag OFF → conditioning is inert (prompt unchanged).
     monkeypatch.setenv("FF_DRAFT_ARCHIVE", "false")
-    assert da.exemplar_prompt_for(base, "read pdf table for a report") == base
+    assert da.exemplar_prompt_for(
+        base,
+        "read pdf table for a report",
+        owner_user_id="u1",
+    ) == base
+
+
+def test_archive_is_owner_scoped_and_idempotent(monkeypatch):
+    monkeypatch.setenv("FF_DRAFT_ARCHIVE", "true")
+    draft_uuid = str(uuid.uuid4())
+    arguments = {
+        "owner_user_id": "owner-a",
+        "draft_uuid": draft_uuid,
+        "source_state_revision": 9,
+    }
+
+    first = da.record_archived_draft(
+        "read pdf table",
+        HIGH_SURROGATE_CODE,
+        0.95,
+        **arguments,
+    )
+    replay = da.record_archived_draft(
+        "read pdf table",
+        HIGH_SURROGATE_CODE,
+        0.95,
+        **arguments,
+    )
+    conflicting = da.record_archived_draft(
+        "read pdf table",
+        HIGH_SURROGATE_CODE + "\n# changed",
+        0.95,
+        **arguments,
+    )
+
+    assert first is not None
+    assert replay is first
+    assert conflicting is None
+    assert da.get_archive("owner-a") == [first]
+    assert da.get_archive("owner-b") == []
+    assert "do_thing" in da.exemplar_prompt_for(
+        "BASE",
+        "read pdf",
+        owner_user_id="owner-a",
+    )
+    assert da.exemplar_prompt_for(
+        "BASE",
+        "read pdf",
+        owner_user_id="owner-b",
+    ) == "BASE"
 
 
 # ---------------------------------------------------------------------------
@@ -375,15 +439,19 @@ def test_approval_archives_live_draft(tmp_path, monkeypatch):
     agent_dir = tmp_path / slug
     agent_dir.mkdir()
     (agent_dir / "mcp_tools.py").write_text(HIGH_SURROGATE_CODE, encoding="utf-8")
-    orch.db.drafts["d1"] = {"id": "d1", "user_id": "u1", "agent_name": "Pdf Reader",
+    draft_uuid = str(uuid.uuid4())
+    orch.db.drafts[draft_uuid] = {"id": draft_uuid, "draft_uuid": draft_uuid,
+                            "state_revision": 7, "user_id": "u1", "agent_name": "Pdf Reader",
                             "agent_slug": slug, "description": "reads pdf tables",
                             "status": "testing", "gap_fingerprint": "read pdf",
                             "self_test": json.dumps({"status": "passed"})}
 
     monkeypatch.setenv("FF_REDTEAM_SELFTEST", "false")  # skip the red-team gate
-    run(ac.HANDLERS["draft_approve"](orch, object(), "u1", [], {"draft_id": "d1"}))
+    run(ac.HANDLERS["draft_approve"](
+        orch, object(), "u1", [], {"draft_id": draft_uuid}
+    ))
 
-    assert ("approve", "d1") in orch.lifecycle_manager.calls
-    archive = da.get_archive()
+    assert ("approve", draft_uuid) in orch.lifecycle_manager.calls
+    archive = da.get_archive("u1")
     assert len(archive) == 1
     assert "do_thing" in archive[0].code

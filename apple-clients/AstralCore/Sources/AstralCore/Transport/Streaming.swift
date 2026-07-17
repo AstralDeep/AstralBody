@@ -8,16 +8,16 @@
 // terminal persist `ui_upsert` then replaces it in place (wire-contract §2).
 import Foundation
 
-public extension AstralComponent {
+extension AstralComponent {
     /// A copy with its component identity forced to `id` (for synthetic nodes).
-    func withComponentId(_ id: String) -> AstralComponent {
+    public func withComponentId(_ id: String) -> AstralComponent {
         var obj = raw.objectValue ?? [:]
         obj["component_id"] = .string(id)
         return AstralComponent(type: type, raw: .object(obj))
     }
 }
 
-public extension Array where Element == AstralComponent {
+extension Array where Element == AstralComponent {
     /// Feature 055 (US1) — the uniform welcome purge: drops the ephemeral
     /// welcome components (identity prefixed `wel_`, stamped server-side on
     /// both `id` and `component_id`). iOS/macOS apply it at turn start and
@@ -25,7 +25,7 @@ public extension Array where Element == AstralComponent {
     /// no turn state — applies it at every `ui_upsert` apply. Unconditional
     /// client-side: with the server flag off the welcome ships id-less,
     /// nothing matches, and this is a no-op (wire-contract §1).
-    func dropWelcome() -> [AstralComponent] {
+    public func dropWelcome() -> [AstralComponent] {
         filter { $0.componentId?.hasPrefix("wel_") != true }
     }
 }
@@ -61,43 +61,56 @@ func streamNodeId(_ streamId: String) -> String { "\(streamNodePrefix)\(streamId
 
 /// `componentId` (055) overrides the node — never the dedupe key, which stays
 /// on `stream_id` — so a bridged stream never grows a `stream-<id>` twin.
-private func nodeKey(streamId: String?, toolName: String?,
-                     componentId: String? = nil) -> (node: String, key: String)? {
+private func nodeKey(
+    streamId: String?, toolName: String?,
+    componentId: String? = nil
+) -> (node: String, key: String)? {
     let identity = componentId.flatMap { $0.isEmpty ? nil : $0 }
     if let streamId { return (identity ?? streamNodeId(streamId), streamId) }
     if let toolName { return (identity ?? "\(streamNodePrefix)tool-\(toolName)", "tool:\(toolName)") }
     return nil
 }
 
-private func alertComponent(node: String, message: String, retryable: Bool,
-                            title: String? = nil) -> AstralComponent {
-    AstralComponent(type: "alert", raw: .object([
-        "type": .string("alert"),
-        "component_id": .string(node),
-        "variant": .string(retryable ? "warning" : "error"),
-        "title": .string(title ?? (retryable ? "Live update interrupted" : "Live update failed")),
-        "message": .string(message),
-    ]))
+private func alertComponent(
+    node: String, message: String, retryable: Bool,
+    title: String? = nil
+) -> AstralComponent {
+    AstralComponent(
+        type: "alert",
+        raw: .object([
+            "type": .string("alert"),
+            "component_id": .string(node),
+            "variant": .string(retryable ? "warning" : "error"),
+            "title": .string(title ?? (retryable ? "Live update interrupted" : "Live update failed")),
+            "message": .string(message),
+        ]))
 }
 
 private func containerOf(node: String, comps: [AstralComponent]) -> AstralComponent {
-    AstralComponent(type: "container", raw: .object([
-        "type": .string("container"),
-        "component_id": .string(node),
-        "content": .array(comps.map { $0.raw }),
-    ]))
+    AstralComponent(
+        type: "container",
+        raw: .object([
+            "type": .string("container"),
+            "component_id": .string(node),
+            "content": .array(comps.map { $0.raw }),
+        ]))
 }
 
 /// Translate a `ui_stream_data` / `stream_data` frame into canvas ops. Returns
 /// `[]` when dropped (unaddressable / another chat / stale). `seqState`
 /// (stream-key → last seq) is mutated in place.
-public func streamFrameToOps(_ frame: InboundFrame, activeChat: String?,
-                             seqState: inout [String: Int]) -> [UpsertOp] {
+public func streamFrameToOps(
+    _ frame: InboundFrame, activeChat: String?,
+    seqState: inout [String: Int]
+) -> [UpsertOp] {
     let streamId = frame.payload["stream_id"]?.stringValue
     let toolName = frame.payload["tool_name"]?.stringValue
     let componentId = frame.payload["component_id"]?.stringValue
-    guard let (node, key) = nodeKey(streamId: streamId, toolName: toolName,
-                                    componentId: componentId) else { return [] }
+    guard
+        let (node, key) = nodeKey(
+            streamId: streamId, toolName: toolName,
+            componentId: componentId)
+    else { return [] }
 
     let session = frame.payload["session_id"]?.stringValue
     if let session, let activeChat, session != activeChat { return [] }
@@ -111,8 +124,11 @@ public func streamFrameToOps(_ frame: InboundFrame, activeChat: String?,
     if let error = frame.payload["error"], error.objectValue != nil {
         let message = error["message"]?.stringValue ?? error["code"]?.stringValue ?? "stream error"
         let retryable = error["retryable"]?.boolValue ?? false
-        return [UpsertOp(op: "upsert", componentId: node,
-                         component: alertComponent(node: node, message: message, retryable: retryable))]
+        return [
+            UpsertOp(
+                op: "upsert", componentId: node,
+                component: alertComponent(node: node, message: message, retryable: retryable))
+        ]
     }
 
     let comps = frame.streamComponents
@@ -129,14 +145,19 @@ public func subscribeAckOps(_ frame: InboundFrame, existingIds: Set<String> = []
     let streamId = frame.payload["stream_id"]?.stringValue
     let toolName = frame.payload["tool_name"]?.stringValue
     let componentId = frame.payload["component_id"]?.stringValue
-    guard let (node, _) = nodeKey(streamId: streamId, toolName: toolName,
-                                  componentId: componentId) else { return [] }
+    guard
+        let (node, _) = nodeKey(
+            streamId: streamId, toolName: toolName,
+            componentId: componentId)
+    else { return [] }
     if existingIds.contains(node) { return [] }
     let tool = toolName ?? "tool"
-    let comp = AstralComponent(type: "text", raw: .object([
-        "type": .string("text"), "component_id": .string(node),
-        "content": .string("Streaming \(tool)…"),
-    ]))
+    let comp = AstralComponent(
+        type: "text",
+        raw: .object([
+            "type": .string("text"), "component_id": .string(node),
+            "content": .string("Streaming \(tool)…"),
+        ]))
     return [UpsertOp(op: "upsert", componentId: node, component: comp)]
 }
 
@@ -147,7 +168,11 @@ public func streamErrorOps(_ frame: InboundFrame) -> [UpsertOp] {
     let toolName = payload?["tool_name"]?.stringValue ?? frame.payload["tool_name"]?.stringValue
     guard let (node, _) = nodeKey(streamId: streamId, toolName: toolName) else { return [] }
     let message = payload?["message"]?.stringValue ?? frame.payload["error"]?.stringValue ?? "stream error"
-    return [UpsertOp(op: "upsert", componentId: node,
-                     component: alertComponent(node: node, message: message, retryable: false,
-                                               title: "Stream error"))]
+    return [
+        UpsertOp(
+            op: "upsert", componentId: node,
+            component: alertComponent(
+                node: node, message: message, retryable: false,
+                title: "Stream error"))
+    ]
 }

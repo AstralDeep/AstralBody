@@ -8,22 +8,31 @@ Two generation targets, sharing one LLM-written ``mcp_tools.py``:
 - mcp_server.py    — from template (not LLM)
 - mcp_tools.py     — LLM-generated tool implementations
 
-**byo** (feature 058 — user-hosted desktop agents), 3 files:
+**byo** (feature 060 — user-hosted desktop agents), 3 executable files:
 - agent_main.py    — from template (not LLM): self-contained JSON-lines-over-stdio runner
+- astralprims_ui.py — deterministic tool-result/UI normalization boundary
 - mcp_tools.py     — LLM-generated tool implementations
-- manifest.json    — the host's record of what it was handed
+
+The three files are finalized together into one deterministic v2 runtime
+manifest.  ``manifest.json`` is metadata about those bytes, not a fourth input to
+their digest.  The legacy feature-058 helper remains available while older
+callers migrate to the finalized v2 result.
 
 The BYO bundle must be SELF-CONTAINED: it runs on the owner's desktop, which
 ships none of the backend package (no fastapi/uvicorn/a2a-sdk) and sits behind
 NAT, so ``BaseA2AAgent``'s inbound uvicorn server is both too heavy and the wrong
 topology. See specs/058-byo-agents-runtime/contracts/host-bundle.md.
 """
-import re
+import asyncio
+from dataclasses import dataclass
+import hashlib
 import json
 import logging
-import asyncio
+import re
 import time
-from typing import Dict, Any, Optional, List
+from types import MappingProxyType
+from typing import Any, Dict, List, Mapping, Optional
+import uuid
 
 from openai import OpenAI
 from httpx import Timeout
@@ -31,6 +40,51 @@ from httpx import Timeout
 from orchestrator.agent_spec import generate_llm_prompt_section
 
 logger = logging.getLogger("AgentGenerator")
+
+
+#: Feature-060 personal-agent runtime contract and the exact reviewed lock file
+#: shipped by the Windows host. Tests hash the tracked artifact and fail if the
+#: generator, neutral fixture, or packaged host metadata drifts.
+BYO_RUNTIME_CONTRACT_VERSION = 2
+BYO_RUNTIME_LOCK_ARTIFACT = "windows-client/requirements-release.lock.txt"
+BYO_RUNTIME_LOCK_SHA256 = (
+    "6041036906881c59868b9e53e16d1e22d8371b68af2f36701022a5a239dd43ba"
+)
+
+#: Exact executable files covered by the v2 immutable canonical-JSON digest.
+#: Mapping insertion order never changes the serialized hash input.
+BYO_BUNDLE_FILENAMES = (
+    "agent_main.py",
+    "astralprims_ui.py",
+    "mcp_tools.py",
+)
+
+
+@dataclass(frozen=True)
+class FinalizedBYOBundle:
+    """Immutable v2 bundle bytes and their canonical runtime manifest."""
+
+    files: Mapping[str, str]
+    bundle_sha256: str
+    manifest: Mapping[str, Any]
+    manifest_json: str
+
+    def manifest_dict(self) -> dict[str, Any]:
+        """Return a detached JSON-compatible copy of the frozen manifest."""
+
+        return json.loads(self.manifest_json)
+
+
+def _freeze_json(value: Any) -> Any:
+    """Recursively freeze one already-normalized JSON value."""
+
+    if isinstance(value, dict):
+        return MappingProxyType(
+            {str(key): _freeze_json(item) for key, item in value.items()}
+        )
+    if isinstance(value, list):
+        return tuple(_freeze_json(item) for item in value)
+    return value
 
 
 # ─── Templates ──────────────────────────────────────────────────────────
@@ -235,8 +289,11 @@ inbound server, no third-party import beyond astralprims (which mcp_tools uses).
 """
 import inspect
 import json
+import os
 import sys
+import uuid
 
+from astralprims_ui import normalize_tool_result
 from mcp_tools import TOOL_REGISTRY
 
 AGENT_ID = {agent_id!r}
@@ -274,8 +331,92 @@ def _emit(frame):
     No AGENT_API_KEY: authority on this path is the owner's authenticated UI
     session, never anything the frame presents.
     """
-    sys.stdout.write(json.dumps(frame) + "\\n")
+    sys.stdout.write(json.dumps(frame, separators=(",", ":")) + "\\n")
     sys.stdout.flush()
+
+
+def _canonical_uuid4(value, name):
+    if not isinstance(value, str):
+        raise ValueError("%s must be UUID4" % name)
+    parsed = uuid.UUID(value)
+    if parsed.version != 4 or str(parsed) != value:
+        raise ValueError("%s must be canonical UUID4" % name)
+    return value
+
+
+def _runtime_context():
+    """Load the host-owned v2 launch fence, or the explicit legacy test mode."""
+    names = (
+        "ASTRAL_RUNTIME_FENCE_JSON",
+        "ASTRAL_RUNTIME_CONTRACT_VERSION",
+        "ASTRAL_RUNTIME_BUNDLE_SHA256",
+    )
+    values = [os.environ.get(name) for name in names]
+    if values == [None, None, None]:
+        # ``generate_byo_files`` remains an explicit feature-058 compatibility
+        # helper.  The production v2 host always supplies all three values and
+        # never treats this legacy frame as a v2 registration.
+        return None
+    if any(value is None for value in values):
+        raise ValueError("runtime launch metadata is incomplete")
+    fence = json.loads(values[0])
+    expected = {
+        "agent_id", "host_id", "host_session_id", "delivery_id",
+        "revision_id", "runtime_instance_id", "process_id",
+        "lifecycle_generation",
+    }
+    if not isinstance(fence, dict) or set(fence) != expected:
+        raise ValueError("runtime fence is invalid")
+    if fence["agent_id"] != AGENT_ID:
+        raise ValueError("runtime agent identity is invalid")
+    for name in (
+        "host_id", "host_session_id", "delivery_id", "revision_id",
+        "runtime_instance_id", "process_id",
+    ):
+        _canonical_uuid4(fence[name], name)
+    generation = fence["lifecycle_generation"]
+    if (
+        isinstance(generation, bool)
+        or not isinstance(generation, int)
+        or generation < 0
+        or generation >= 1 << 64
+    ):
+        raise ValueError("lifecycle generation is invalid")
+    if values[1] != "2":
+        raise ValueError("runtime contract version is unsupported")
+    digest = values[2]
+    if (
+        not isinstance(digest, str)
+        or len(digest) != 64
+        or any(ch not in "0123456789abcdef" for ch in digest)
+    ):
+        raise ValueError("runtime bundle digest is invalid")
+    return {
+        "fence": fence,
+        "runtime_contract_version": 2,
+        "bundle_sha256": digest,
+    }
+
+
+def _valid_fenced_request(req, runtime):
+    if req.get("fence") != runtime["fence"]:
+        return False
+    try:
+        _canonical_uuid4(req.get("request_id"), "request_id")
+        _canonical_uuid4(req.get("request_generation"), "request_generation")
+    except (ValueError, AttributeError, TypeError):
+        return False
+    return True
+
+
+def _fence_response(req, response, runtime):
+    if runtime is None:
+        return response
+    response = dict(response)
+    response["fence"] = runtime["fence"]
+    response["request_id"] = req["request_id"]
+    response["request_generation"] = req["request_generation"]
+    return response
 
 
 def dispatch(req):
@@ -304,22 +445,18 @@ def dispatch(req):
             if not any(p.kind == p.VAR_KEYWORD for p in sig.parameters.values()):
                 args = {k: v for k, v in args.items() if k in sig.parameters}
             result = fn(**args)
-            comps = result.get("_ui_components") if isinstance(result, dict) else None
-            data = result.get("_data") if isinstance(result, dict) else result
+            data, comps, tool_error = normalize_tool_result(result)
             # The tool-error convention the backend MCPServer implements: a tool
             # that handled its own failure returns create_ui_response([
             # Alert(variant="error")]). That is an ERROR response, not a success
             # one — without this the orchestrator would treat a failed BYO tool
             # call as having succeeded.
-            if isinstance(comps, list):
-                for c in comps:
-                    if isinstance(c, dict) and c.get("variant") == "error":
-                        return {"type": "mcp_response", "request_id": rid,
-                                "error": {"code": -32000,
-                                          "message": c.get("message",
-                                                           "Tool returned an error"),
-                                          "retryable": True},
-                                "ui_components": comps}
+            if tool_error is not None:
+                return {"type": "mcp_response", "request_id": rid,
+                        "error": {"code": -32000,
+                                  "message": tool_error,
+                                  "retryable": True},
+                        "ui_components": comps}
             return {"type": "mcp_response", "request_id": rid,
                     "result": data, "ui_components": comps}
         except Exception as exc:
@@ -338,7 +475,22 @@ def main():
         if hasattr(stream, "reconfigure"):
             stream.reconfigure(encoding="utf-8")
 
-    _emit({"type": "register_agent", "agent_card": build_card()})
+    try:
+        runtime = _runtime_context()
+    except (ValueError, TypeError, AttributeError, json.JSONDecodeError):
+        sys.stderr.write("invalid personal-agent runtime launch metadata\\n")
+        return 78
+
+    if runtime is None:
+        _emit({"type": "register_agent", "agent_card": build_card()})
+    else:
+        _emit({
+            "type": "agent_runtime_register",
+            "fence": runtime["fence"],
+            "runtime_contract_version": runtime["runtime_contract_version"],
+            "bundle_sha256": runtime["bundle_sha256"],
+            "agent_card": build_card(),
+        })
 
     for line in sys.stdin:
         line = line.strip()
@@ -352,14 +504,40 @@ def main():
             continue
         if not isinstance(req, dict):
             continue
+        if runtime is not None and not _valid_fenced_request(req, runtime):
+            continue
         if req.get("type") == "mcp_request" or "method" in req:
-            _emit(dispatch(req))
+            _emit(_fence_response(req, dispatch(req), runtime))
 
     return 0   # EOF: the child dies with its parent
 
 
 if __name__ == "__main__":
     raise SystemExit(main())
+'''
+
+
+BYO_ASTRALPRIMS_UI = '''"""Deterministic BYO tool-result normalization.
+
+The LLM-written tool module may construct astralprims objects, but its public
+return contract is plain JSON-compatible data.  Keeping the normalization in a
+separate deterministic file makes the complete runtime bundle explicit and
+keeps generated tool code focused on the approved capabilities.
+"""
+
+
+def normalize_tool_result(result):
+    """Return ``(data, components, safe_error_message)`` for one tool result."""
+    components = result.get("_ui_components") if isinstance(result, dict) else None
+    data = result.get("_data") if isinstance(result, dict) else result
+    if isinstance(components, list):
+        for component in components:
+            if isinstance(component, dict) and component.get("variant") == "error":
+                message = component.get("message")
+                if not isinstance(message, str) or not message:
+                    message = "Tool returned an error"
+                return data, components, message[:1024]
+    return data, components, None
 '''
 
 #: A BYO bundle that reaches for the backend package would ImportError on the
@@ -536,14 +714,17 @@ class AgentCodeGenerator:
     def generate_byo_files(self, agent_name: str, description: str,
                            agent_id: str, skill_tags: List[str] = None,
                            constitution_version: Optional[str] = None) -> Dict[str, str]:
-        """The deterministic half of a BYO bundle (058 T008): the stdio runner and
-        the host's manifest. The LLM-written ``mcp_tools.py`` is added by the caller.
+        """Build the legacy feature-058 scaffold and provisional manifest.
+
+        New code MUST use :meth:`generate_byo_scaffold` and then
+        :meth:`finalize_byo_bundle` after ``mcp_tools.py`` exists.  This helper is
+        retained only so an older caller does not silently receive a different
+        return shape before the v2 delivery seam is wired.
 
         The runner bakes the OWNER-NAMESPACED ``agent_id`` it is handed; a
         slug-derived id here would be refused at registration and the refusal is
         silent on the wire (host-bundle.md §6)."""
         safe_desc = self._sanitize_description(description)
-
         agent_main = BYO_AGENT_MAIN_HEADER.format(
             service_name=agent_name.replace('"', '\\"'),
             docstring_description=safe_desc,
@@ -562,6 +743,137 @@ class AgentCodeGenerator:
         }, indent=2) + "\n"
 
         return {"agent_main.py": agent_main, "manifest.json": manifest}
+
+    def generate_byo_scaffold(
+        self,
+        *,
+        agent_name: str,
+        description: str,
+        agent_id: str,
+        skill_tags: Optional[List[str]] = None,
+    ) -> Dict[str, str]:
+        """Generate the deterministic executable half of a v2 BYO bundle.
+
+        ``mcp_tools.py`` is deliberately absent: the lifecycle manager adds the
+        final, statically validated LLM output and only then finalizes the
+        revision manifest and digest.
+        """
+
+        safe_desc = self._sanitize_description(description)
+        agent_main = BYO_AGENT_MAIN_HEADER.format(
+            service_name=agent_name.replace('"', '\\"'),
+            docstring_description=safe_desc,
+            agent_id=agent_id,
+            agent_name=agent_name,
+            agent_desc=safe_desc,
+            skill_tags=list(skill_tags or []),
+        ) + BYO_AGENT_MAIN_BODY
+        return {
+            "agent_main.py": agent_main,
+            "astralprims_ui.py": BYO_ASTRALPRIMS_UI,
+        }
+
+    @staticmethod
+    def _bundle_digest(files: Mapping[str, str]) -> str:
+        """Hash the exact three-file map using the host's canonical JSON rule."""
+
+        canonical = json.dumps(
+            {filename: files[filename] for filename in BYO_BUNDLE_FILENAMES},
+            ensure_ascii=False,
+            sort_keys=True,
+            separators=(",", ":"),
+            allow_nan=False,
+        ).encode("utf-8")
+        return hashlib.sha256(canonical).hexdigest()
+
+    def finalize_byo_bundle(
+        self,
+        *,
+        files: Mapping[str, str],
+        agent_id: str,
+        revision_id: str,
+        agent_name: str,
+        description: str,
+        constitution_version: str,
+        required_runtime_lock_sha256: str,
+    ) -> FinalizedBYOBundle:
+        """Finalize one immutable v2 revision after all three files exist.
+
+        The digest contains no timestamp, filesystem path, mapping order, or
+        serialization-dependent value.  ``manifest.json`` names the already
+        finalized bytes and therefore cannot create a circular hash.
+        """
+
+        if not isinstance(files, Mapping):
+            raise TypeError("files must be a mapping")
+        if set(files) != set(BYO_BUNDLE_FILENAMES):
+            raise ValueError("v2 BYO bundle must contain exactly three approved files")
+        ordered_files: dict[str, str] = {}
+        for filename in BYO_BUNDLE_FILENAMES:
+            content = files[filename]
+            if not isinstance(content, str):
+                raise TypeError(f"{filename} must be UTF-8 text")
+            # Encoding now makes malformed surrogate input fail before hashing or
+            # delivery, so every digest always identifies actual UTF-8 bytes.
+            content.encode("utf-8")
+            ordered_files[filename] = content
+
+        if not isinstance(agent_id, str) or not agent_id or len(agent_id) > 255:
+            raise ValueError("agent_id must be non-empty and bounded")
+        try:
+            revision_id = str(uuid.UUID(str(revision_id)))
+        except (TypeError, ValueError, AttributeError) as exc:
+            raise ValueError("revision_id must be a UUID") from exc
+        if (
+            not isinstance(required_runtime_lock_sha256, str)
+            or re.fullmatch(r"[0-9a-f]{64}", required_runtime_lock_sha256) is None
+        ):
+            raise ValueError("required runtime lock must be lowercase SHA-256")
+        if required_runtime_lock_sha256 != BYO_RUNTIME_LOCK_SHA256:
+            raise ValueError("required runtime lock must match packaged runtime lock")
+        if not isinstance(constitution_version, str) or not constitution_version:
+            raise ValueError("constitution_version must be present")
+
+        bundle_sha256 = self._bundle_digest(ordered_files)
+        file_manifest = []
+        for filename in BYO_BUNDLE_FILENAMES:
+            content_bytes = ordered_files[filename].encode("utf-8")
+            file_manifest.append(
+                {
+                    "name": filename,
+                    "sha256": hashlib.sha256(content_bytes).hexdigest(),
+                    "size_bytes": len(content_bytes),
+                }
+            )
+        manifest = {
+            "manifest_version": 2,
+            "runtime_contract_version": BYO_RUNTIME_CONTRACT_VERSION,
+            "revision_id": revision_id,
+            "agent_id": agent_id,
+            "agent_name": str(agent_name),
+            "description": self._sanitize_description(str(description)),
+            "constitution_version": constitution_version,
+            "required_runtime_lock_sha256": required_runtime_lock_sha256,
+            "digest_algorithm": "sha256",
+            "bundle_sha256": bundle_sha256,
+            "files": file_manifest,
+        }
+        manifest_json = json.dumps(
+            manifest,
+            sort_keys=True,
+            separators=(",", ":"),
+            ensure_ascii=False,
+            allow_nan=False,
+        ) + "\n"
+        if len(manifest_json.encode("utf-8")) > 64 * 1024:
+            raise ValueError("runtime manifest exceeds 64 KiB")
+        normalized_manifest = _freeze_json(json.loads(manifest_json))
+        return FinalizedBYOBundle(
+            files=MappingProxyType(ordered_files),
+            bundle_sha256=bundle_sha256,
+            manifest=normalized_manifest,
+            manifest_json=manifest_json,
+        )
 
     async def generate_tools_file(self, agent_name: str, description: str,
                                    tools_spec: List[Dict[str, Any]],

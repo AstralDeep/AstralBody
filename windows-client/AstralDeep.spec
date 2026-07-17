@@ -7,11 +7,20 @@ Output: dist/AstralDeep.exe
 """
 import pathlib
 import re
+import hashlib
+import json
+import sys
 
 from PyInstaller.utils.hooks import collect_submodules
 from PyInstaller.utils.win32.versioninfo import (
     FixedFileInfo, StringFileInfo, StringStruct, StringTable, VarFileInfo,
     VarStruct, VSVersionInfo,
+)
+
+sys.path.insert(0, str(pathlib.Path(SPECPATH)))
+from astral_client.deployment import (
+    resolve_effective_profile,
+    validate_packaged_deployment,
 )
 
 # Single version source: astral_client/__init__.py. Read textually (SPECPATH
@@ -21,6 +30,60 @@ __version__ = re.search(
     r'__version__\s*=\s*"([^"]+)"',
     (pathlib.Path(SPECPATH) / "astral_client" / "__init__.py").read_text(encoding="utf-8"),
 ).group(1)
+
+_root = pathlib.Path(SPECPATH)
+_profile_path = _root / "deployment" / "release-profile.json"
+_runtime_manifest_path = _root / "deployment" / "runtime-manifest.json"
+_release_lock_path = _root / "requirements-release.lock.txt"
+_requirements_input_path = _root / "requirements.in"
+for _required in (
+    _profile_path,
+    _runtime_manifest_path,
+    _release_lock_path,
+    _requirements_input_path,
+):
+    if not _required.is_file():
+        raise SystemExit(f"required Windows release input is missing: {_required.name}")
+
+_profile = json.loads(_profile_path.read_text(encoding="utf-8"))
+_manifest = json.loads(_runtime_manifest_path.read_text(encoding="utf-8"))
+_profile_canonical = json.dumps(
+    _profile, sort_keys=True, separators=(",", ":"), ensure_ascii=False
+).encode("utf-8")
+def _sha256(path):
+    return hashlib.sha256(path.read_bytes()).hexdigest()
+
+
+if __version__ != "0.4.0" or _profile.get("client_version") != __version__:
+    raise SystemExit("Windows release profile and client version must both be 0.4.0")
+if _manifest.get("client_version") != __version__:
+    raise SystemExit("Windows runtime manifest version does not match the client")
+if _manifest.get("release_id") != _profile.get("release_id"):
+    raise SystemExit("Windows profile/runtime release identities disagree")
+if _manifest.get("deployment_profile_sha256") != hashlib.sha256(_profile_canonical).hexdigest():
+    raise SystemExit("Windows release profile is not the reviewed manifest input")
+if _manifest.get("requirements_lock_sha256") != _sha256(_release_lock_path):
+    raise SystemExit("Windows release lock digest does not match the runtime manifest")
+if _manifest.get("requirements_input_sha256") != _sha256(_requirements_input_path):
+    raise SystemExit("Windows direct-requirements digest does not match the runtime manifest")
+if _manifest.get("required_runtime_lock_sha256") != _sha256(_release_lock_path):
+    raise SystemExit("Windows BYO runtime is not bound to the final release lock")
+
+# Run the same strict, duplicate-rejecting, exact-field validation used by the
+# frozen executable. This happens before Analysis/EXE construction, so malformed
+# or unapproved deployment/runtime inputs cannot produce candidate bytes.
+_effective_profile = resolve_effective_profile(
+    bundled_profile_path=_profile_path,
+    expected_client_version=__version__,
+    environment={},
+)
+validate_packaged_deployment(
+    _effective_profile,
+    runtime_manifest_path=_runtime_manifest_path,
+    requirements_lock_path=_release_lock_path,
+    requirements_input_path=_requirements_input_path,
+    expected_client_version=__version__,
+)
 
 # Windows VERSIONINFO resource derived from the single version constant, so
 # the shipped exe's file properties (FileVersion/ProductVersion) always match
@@ -72,7 +135,13 @@ a = Analysis(
     binaries=[],
     # The brand icon ships inside the bundle too, so the running app can set
     # its window/taskbar icon (assets resolve via sys._MEIPASS when frozen).
-    datas=[("assets/astraldeep.ico", "assets")],
+    datas=[
+        ("assets/astraldeep.ico", "assets"),
+        ("deployment/release-profile.json", "deployment"),
+        ("deployment/runtime-manifest.json", "deployment"),
+        ("requirements-release.lock.txt", "deployment"),
+        ("requirements.in", "deployment"),
+    ],
     hiddenimports=hiddenimports,
     hookspath=[],
     hooksconfig={},

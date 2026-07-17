@@ -13,11 +13,14 @@ from __future__ import annotations
 
 import argparse
 import base64
+import hashlib
+import inspect
 import json
 import logging
 import os
 import sys
 import threading
+import uuid
 from typing import Any, Dict, List, Optional
 
 from PySide6.QtCore import QAbstractListModel, QModelIndex, Qt, QSettings, QTimer, QUrl, Signal
@@ -55,7 +58,23 @@ from .auth import LoginCancelled
 from . import confirm as _confirm
 from . import integrity as _integrity
 from . import __version__ as _APP_VERSION
-from .protocol import OrchestratorClient, device_caps
+from .deployment import EffectiveDeploymentProfile
+from .deployment import write_redacted_report
+from .protocol import (
+    AdmissionRefusal,
+    AgentLifecycle,
+    ConversationContinuityReducer,
+    ConversationResumeStore,
+    LocalOperationSubmission,
+    OperationStatus,
+    OrchestratorClient,
+    QueuedReplayAcknowledgement,
+    QueuedReplayPreparation,
+    SemanticMessage,
+    WindowsProtocolError,
+    decode_semantic_transcript,
+    device_caps,
+)
 from .protocol_manifest import CLIENT_LOCAL_ACTIONS, is_classified, is_handled
 from .renderer import (
     RenderContext,
@@ -67,7 +86,11 @@ from .renderer import (
 from .streaming import stream_error_ops, stream_frame_to_ops, subscribe_ack_ops
 from .chrome import chrome_render_notice
 from . import rest
-from win_agent.byo_host import HOST_FRAME_TYPES, ByoAgentHost
+from win_agent.byo_host import (
+    HOST_FRAME_TYPES,
+    ByoAgentHost,
+    load_or_create_host_id,
+)
 
 logger = logging.getLogger("astral.client")
 
@@ -75,6 +98,16 @@ logger = logging.getLogger("astral.client")
 #: icon — by this id; without it a source run inherits python.exe's identity (and
 #: python.exe's icon). Keep it stable: changing it splits pinned taskbar entries.
 APP_USER_MODEL_ID = "AstralDeep.WindowsClient"
+
+
+def _canonical_uuid4(value: object) -> bool:
+    if not isinstance(value, str):
+        return False
+    try:
+        parsed = uuid.UUID(value)
+    except (ValueError, AttributeError):
+        return False
+    return parsed.version == 4 and str(parsed) == value
 
 
 def app_icon_path() -> str:
@@ -250,6 +283,7 @@ class ChatRail(QWidget):
         self._scroll.setWidget(self._inner)
         outer.addWidget(self._scroll, 1)
         self._hint: Optional[QWidget] = None
+        self._transient: Optional[QWidget] = None
 
     def _drop_hint(self) -> None:
         if self._hint is not None:
@@ -284,8 +318,133 @@ class ChatRail(QWidget):
         bar = self._scroll.verticalScrollBar()
         bar.setValue(bar.maximum())
 
+    def _semantic_bubble(self, message: SemanticMessage, ctx: RenderContext) -> QWidget:
+        """Build one detached semantic turn using the shared native renderer."""
+
+        bubble = QFrame()
+        is_user = message.role == "user"
+        bg = T.PRIMARY_SOFT if is_user else T.SURFACE
+        _scoped(
+            bubble, f"background:{bg}; border:1px solid {T.BORDER}; border-radius:10px;"
+        )
+        layout = QVBoxLayout(bubble)
+        layout.setContentsMargins(12, 8, 12, 8)
+        role_label = {
+            "user": "You",
+            "assistant": "Assistant",
+            "system": "System",
+            "tool": "Tool",
+        }[message.role]
+        who = QLabel(role_label)
+        who.setFrameShape(QFrame.Shape.NoFrame)
+        who.setStyleSheet(
+            f"color:{T.MUTED}; font-size:11px; font-weight:600; background:transparent;"
+        )
+        layout.addWidget(who)
+        for attachment in message.attachments:
+            label = next(
+                (
+                    str(attachment[key])
+                    for key in ("filename", "name", "attachment_id")
+                    if isinstance(attachment.get(key), str) and attachment[key]
+                ),
+                "file",
+            )
+            chip = QLabel(f"Attachment: {label}")
+            chip.setProperty("astral_attachment", True)
+            chip.setWordWrap(True)
+            chip.setStyleSheet(
+                f"color:{T.MUTED}; font-size:11px; background:{T.SURFACE_2};"
+            )
+            layout.addWidget(chip)
+        for part in message.parts:
+            if part.type == "text":
+                body = QLabel(part.text or "")
+                body.setWordWrap(True)
+                body.setTextFormat(Qt.TextFormat.MarkdownText)
+                body.setTextInteractionFlags(Qt.TextInteractionFlag.TextSelectableByMouse)
+                body.setStyleSheet(
+                    f"color:{T.TEXT}; font-size:13px; background:transparent;"
+                )
+                layout.addWidget(body)
+            elif part.type == "components":
+                for component in part.components:
+                    layout.addWidget(render(component, ctx, top_level=True))
+            elif part.type == "structured":
+                structured = QLabel(part.plain_text or "")
+                structured.setWordWrap(True)
+                structured.setTextInteractionFlags(
+                    Qt.TextInteractionFlag.TextSelectableByMouse
+                )
+                structured.setProperty(
+                    "astral_structured_value",
+                    json.dumps(
+                        part.value,
+                        ensure_ascii=False,
+                        allow_nan=False,
+                        separators=(",", ":"),
+                        sort_keys=True,
+                    ),
+                )
+                structured.setStyleSheet(
+                    f"color:{T.TEXT}; font-size:13px; background:transparent;"
+                )
+                layout.addWidget(structured)
+            elif part.type == "recovery":
+                recovery = QLabel(part.message or "A saved response could not be displayed.")
+                recovery.setWordWrap(True)
+                recovery.setProperty("astral_recovery_code", part.code or "unknown")
+                recovery.setStyleSheet(
+                    f"color:{T.VARIANT_COLORS['warning'][0]}; font-size:13px; "
+                    "background:transparent;"
+                )
+                layout.addWidget(recovery)
+        return bubble
+
+    def replace_semantic(
+        self, messages: list[SemanticMessage], ctx: RenderContext
+    ) -> None:
+        """Replace the committed transcript in one main-thread reducer action."""
+
+        prepared = [self._semantic_bubble(message, ctx) for message in messages]
+        self.clear()
+        for bubble in prepared:
+            self._lay.insertWidget(self._lay.count() - 1, bubble)
+        if not prepared:
+            # An empty committed chat is valid; it is not a generic new-chat
+            # welcome. Keep the rail intentionally blank.
+            return
+        bar = self._scroll.verticalScrollBar()
+        bar.setValue(bar.maximum())
+
+    def show_transient(self, text: str) -> None:
+        """Show disposable request output without changing committed bubbles."""
+
+        self.clear_transient()
+        if not text:
+            return
+        self._drop_hint()
+        frame = QFrame()
+        frame.setProperty("astral_transient_overlay", True)
+        layout = QVBoxLayout(frame)
+        layout.setContentsMargins(12, 8, 12, 8)
+        label = QLabel(text)
+        label.setWordWrap(True)
+        label.setStyleSheet(f"color:{T.MUTED}; font-size:12px;")
+        layout.addWidget(label)
+        self._lay.insertWidget(self._lay.count() - 1, frame)
+        self._transient = frame
+
+    def clear_transient(self) -> None:
+        frame = self._transient
+        self._transient = None
+        if frame is not None:
+            frame.setParent(None)
+            frame.deleteLater()
+
     def clear(self) -> None:
         self._hint = None
+        self._transient = None
         while self._lay.count() > 1:
             item = self._lay.takeAt(0)
             if item.widget():
@@ -368,6 +527,9 @@ class Canvas(QScrollArea):
         # of the turn (set_components / apply_ops, which streaming also routes
         # through) or explicitly when the turn ends without any.
         self._skeleton: Optional[QWidget] = None
+        # Feature 060 request-scoped preview. It is a sibling of committed
+        # widgets and never enters `_last_components` / `_by_id`.
+        self._transient_overlay: Optional[QWidget] = None
         # Mirrors the window's per-turn flag (feature 055 US1): an EMPTY full
         # render mid-turn keeps the loading state instead of swapping the
         # skeleton for the idle hint; out-of-turn empty renders remain
@@ -420,6 +582,30 @@ class Canvas(QScrollArea):
 
     def _insert(self, widget: QWidget) -> None:
         self._lay.insertWidget(self._lay.count() - 1, widget)
+
+    def set_transient_overlay(self, components: list[dict[str, Any]]) -> None:
+        """Render a disposable semantic preview above committed canvas state."""
+
+        self.clear_transient_overlay()
+        if not components:
+            return
+        frame = QFrame()
+        frame.setProperty("astral_transient_overlay", True)
+        layout = QVBoxLayout(frame)
+        layout.setContentsMargins(0, 0, 0, 0)
+        layout.setSpacing(10)
+        for component in components:
+            layout.addWidget(render(component, self.ctx, top_level=True))
+        self.hide_skeleton()
+        self._insert(frame)
+        self._transient_overlay = frame
+
+    def clear_transient_overlay(self) -> None:
+        frame = self._transient_overlay
+        self._transient_overlay = None
+        if frame is not None:
+            frame.setParent(None)
+            frame.deleteLater()
 
     def show_skeleton(self) -> None:
         """Append the loading placeholder below any existing components."""
@@ -904,6 +1090,9 @@ class TopBar(QFrame):
 
         # Small brand mark only — no wordmark, no visible status/identity text.
         self._mark = QLabel("◆")
+        self._mark.setObjectName("applicationStatus")
+        self._mark.setAccessibleName("Application status")
+        self._mark.setAccessibleDescription("Connecting")
         self._mark.setStyleSheet(
             f"color:{T.PRIMARY}; font-size:16px; font-weight:800; background:transparent;"
         )
@@ -1044,6 +1233,7 @@ class TopBar(QFrame):
         """Status/integrity is surfaced on the brand mark (tooltip + tint) so the
         top bar stays minimal (logo · New · Recent · Settings)."""
         self._mark.setToolTip(text)
+        self._mark.setAccessibleDescription(text or "No active operation")
         self._mark.setStyleSheet(
             f"color:{color}; font-size:16px; font-weight:800; background:transparent;"
         )
@@ -1209,9 +1399,23 @@ class AgentsDialog(QDialog):
         desc.setStyleSheet(f"color:{T.MUTED}; font-size:11px; background:transparent;")
         col.addWidget(name)
         col.addWidget(desc)
+        lifecycle_label = a.get("_lifecycle_label")
+        if lifecycle_label:
+            lifecycle = QLabel(str(lifecycle_label))
+            lifecycle.setObjectName("agentLifecycleStatus")
+            lifecycle.setAccessibleName(
+                f"{a.get('name', aid or 'Agent')} lifecycle status"
+            )
+            lifecycle.setAccessibleDescription(str(lifecycle_label))
+            lifecycle.setStyleSheet(
+                f"color:{T.MUTED}; font-size:11px; font-weight:600; "
+                "background:transparent;"
+            )
+            col.addWidget(lifecycle)
         lay.addLayout(col, 1)
+        agent_name = str(a.get("name", aid or "Agent"))
         if is_win_agent:
-            lay.addLayout(self._scope_toggles(aid, scopes))
+            lay.addLayout(self._scope_toggles(aid, scopes, agent_name))
         elif on:
             badge = QLabel("✓ Enabled")
             c = T.VARIANT_COLORS["success"][0]
@@ -1222,6 +1426,11 @@ class AgentsDialog(QDialog):
         elif public:
             btn = QPushButton("Enable")
             btn.setObjectName("primary")
+            btn.setProperty("astralAccessibilityControl", "agent-enable")
+            btn.setAccessibleName(f"Enable {agent_name}")
+            btn.setAccessibleDescription(
+                f"Allow chats to use the {agent_name} agent"
+            )
             btn.setCursor(Qt.CursorShape.PointingHandCursor)
             btn.clicked.connect(lambda _=False, x=aid: self._enable_one(x))
             lay.addWidget(btn)
@@ -1233,7 +1442,9 @@ class AgentsDialog(QDialog):
             lay.addWidget(tag)
         return card
 
-    def _scope_toggles(self, aid: str, scopes: dict) -> QHBoxLayout:
+    def _scope_toggles(
+        self, aid: str, scopes: dict, agent_name: str
+    ) -> QHBoxLayout:
         """Per-scope Read/Write/Execute checkboxes for the Windows coding agent.
 
         Execute is only enabled when the local ``ASTRAL_DANGEROUS_BYPASS`` flag
@@ -1248,6 +1459,12 @@ class AgentsDialog(QDialog):
             ("tools:execute", "Execute", True),
         ):
             cb = QCheckBox(label)
+            cb.setObjectName("agentScopeToggle")
+            cb.setProperty("astralAccessibilityControl", "agent-scope")
+            cb.setAccessibleName(f"{label} permission for {agent_name}")
+            cb.setAccessibleDescription(
+                f"Allow the {agent_name} agent to use {scope}"
+            )
             cb.setCursor(Qt.CursorShape.PointingHandCursor)
             cb.setChecked(bool(scopes.get(scope, False)))
             if needs_bypass and not bypass:
@@ -1482,11 +1699,30 @@ class MainWindow(QMainWindow):
     _byo_notice = Signal(str, str)
 
     def __init__(self, url: str, token: str, session=None, login_params=None,
-                 connect: bool = True):
+                 connect: bool = True,
+                 deployment_profile: Optional[EffectiveDeploymentProfile] = None):
         super().__init__()
+        if (
+            deployment_profile is not None
+            and url != deployment_profile.profile.websocket_endpoint
+        ):
+            raise ValueError("window endpoint differs from the effective deployment profile")
+        self._deployment_profile = deployment_profile
+        self.deployment_profile_digest = (
+            deployment_profile.digest if deployment_profile is not None else None
+        )
         self.setWindowTitle("AstralDeep — Windows")
         self.resize(1280, 860)
-        self.active_chat: Optional[str] = None
+        self._resume_store = ConversationResumeStore(
+            QSettings("AstralDeep", "WindowsClient")
+        )
+        self._resume_store.bind_token(token)
+        self.active_chat: Optional[str] = self._resume_store.active_chat()
+        self._continuity = ConversationContinuityReducer()
+        if self.active_chat is not None:
+            self._continuity.activate_chat(self.active_chat)
+        self._transient_canvas_components: list[dict[str, Any]] = []
+        self._transient_chat_lines: list[str] = []
         self._url = url
         self._auth_session = session
         # Login params (authority/client_id/bff) so an expired-and-unrefreshable
@@ -1503,6 +1739,12 @@ class MainWindow(QMainWindow):
         # deferred to the first file-tool use so no dialog blocks first paint.
         self._workspace_ready = False
         self._agents: List[dict] = []
+        self._operation_status_by_id: dict[str, OperationStatus] = {}
+        self._agent_lifecycle_by_id: dict[str, AgentLifecycle] = {}
+        self._pending_submissions_by_generation: dict[
+            str, LocalOperationSubmission
+        ] = {}
+        self._pending_submissions_by_id: dict[str, LocalOperationSubmission] = {}
         self._agents_dialog: Optional[AgentsDialog] = None
         self._history_dialog: Optional[HistoryDialog] = None
         # Live-stream seq tracker (stream-key -> last seq) for the push
@@ -1524,20 +1766,67 @@ class MainWindow(QMainWindow):
 
         ctx = RenderContext(emit=self._emit, download=self._download,
                             apply_theme=self._apply_theme_pref)
+        self._byo_host_id = load_or_create_host_id()
         self.client = OrchestratorClient(
-            url, token, device_caps(supported_types=native_types())
+            url,
+            token,
+            device_caps(supported_types=native_types()),
         )
+        configure_host = getattr(self.client, "configure_agent_host", None)
+        if callable(configure_host):
+            configure_host(self._byo_host_id)
+        configure_resume = getattr(self.client, "configure_resume", None)
+        if callable(configure_resume):
+            configure_resume(self.active_chat)
         self.client.message.connect(self._on_message)
         self.client.status.connect(self._on_status)
+        submission_signal = getattr(self.client, "submission", None)
+        if submission_signal is not None and hasattr(submission_signal, "connect"):
+            submission_signal.connect(self._project_local_submission)
+        dropped_submission_signal = getattr(self.client, "submission_dropped", None)
+        if (
+            dropped_submission_signal is not None
+            and hasattr(dropped_submission_signal, "connect")
+        ):
+            dropped_submission_signal.connect(self._discard_local_submission)
+        replay_signal = getattr(self.client, "queued_replay_preparation", None)
+        if replay_signal is not None and hasattr(replay_signal, "connect"):
+            replay_signal.connect(self._prepare_queued_replay)
+            require_replay = getattr(
+                self.client,
+                "require_queued_replay_preparation",
+                None,
+            )
+            if callable(require_replay):
+                require_replay()
 
-        self._win_agent_host = os.getenv("ASTRAL_AGENT_HOST", "host.docker.internal")
-        self._win_agent_port = int(os.getenv("WIN_AGENT_PORT", "8771"))
+        if deployment_profile is not None:
+            legacy_tools = deployment_profile.profile.agent_connection.legacy_tools
+            self._win_agent_enabled = legacy_tools.disposition == "managed_api_key"
+            self._byo_enabled = (
+                deployment_profile.profile.agent_connection.byo_host.disposition
+                == "authenticated_ui_tunnel"
+            )
+            # The legacy tools listener is a fixed local package topology, not a
+            # second deployment profile. Production disables it entirely.
+            self._win_agent_host = "host.docker.internal"
+            self._win_agent_port = 8771
+        else:
+            self._win_agent_enabled = os.getenv("ASTRAL_WIN_AGENT", "1") not in (
+                "0", "false", "no"
+            )
+            self._byo_enabled = True
+            self._win_agent_host = os.getenv("ASTRAL_AGENT_HOST", "host.docker.internal")
+            self._win_agent_port = int(os.getenv("WIN_AGENT_PORT", "8771"))
         self._win_agent_registered = False
-        if os.getenv("ASTRAL_WIN_AGENT", "1") not in ("0", "false", "no"):
+        if self._win_agent_enabled:
             try:
                 import win_agent.agent as _wa
 
-                _wa.start_agent_thread(port=self._win_agent_port)
+                _wa.start_agent_thread(
+                    port=self._win_agent_port,
+                    deployment_profile=deployment_profile,
+                )
             except Exception:
                 pass
 
@@ -1548,7 +1837,10 @@ class MainWindow(QMainWindow):
         # dumb pipe between the child's stdio and the server.
         self._byo = ByoAgentHost(
             send_event=lambda action, payload: self.client.send_event(action, payload),
+            send_frame=lambda frame: self.client.send_host_frame(frame),
             notify=self._byo_notice.emit,
+            host_id=self._byo_host_id,
+            deployment_profile_digest=self.deployment_profile_digest,
         )
         # Teardown hangs off APPLICATION shutdown, not off closeEvent: sign-out
         # calls QApplication.quit(), which leaves the event loop WITHOUT
@@ -1569,8 +1861,14 @@ class MainWindow(QMainWindow):
         )
 
         self.rail = ChatRail()
-        self.rail.show_empty_hint()
+        if self.active_chat is None:
+            self.rail.show_empty_hint()
+        else:
+            self.rail.add_note("Restoring conversation…")
         self.canvas = Canvas(ctx)
+        self.canvas.ctx.chat_id = self.active_chat
+        if self.active_chat is not None:
+            self.canvas.show_skeleton()
         # 055 US5: the canvas context menu opens export URLs against this origin.
         self.canvas.http_base = _http_base(url)
         split = QSplitter(Qt.Orientation.Horizontal)
@@ -1621,17 +1919,22 @@ class MainWindow(QMainWindow):
         # Feature 044 (FR-002/FR-003): a dismissible banner strip under the top
         # bar for connection state + server errors + queue-drop notices. Hidden
         # until there is something to say.
-        self._banner = QLabel("")
-        self._banner.setWordWrap(True)
+        self._banner = QPushButton("")
+        self._banner.setObjectName("statusBanner")
+        self._banner.setProperty("astralAccessibilityControl", "status-banner")
+        self._banner.setAccessibleName("Status message")
+        self._banner.setAccessibleDescription("")
+        self._banner.setFlat(True)
+        self._banner.setFocusPolicy(Qt.FocusPolicy.StrongFocus)
         self._banner.setVisible(False)
         self._banner.setCursor(Qt.CursorShape.PointingHandCursor)
         self._banner.setStyleSheet(
             f"background:{T.SURFACE_2}; color:{T.TEXT}; border-bottom:1px solid {T.BORDER};"
-            "padding:6px 14px; font-size:12px;"
+            "padding:6px 14px; font-size:12px; text-align:left;"
         )
         # Click to dismiss (errors/notices); the reconnect banner re-asserts
         # itself; during a startup sign-in the click cancels the login instead.
-        self._banner.mousePressEvent = lambda _ev: self._on_banner_clicked()
+        self._banner.clicked.connect(self._on_banner_clicked)
 
         root = QWidget()
         root.setObjectName("root")
@@ -1747,9 +2050,10 @@ class MainWindow(QMainWindow):
             "warning": T.VARIANT_COLORS["warning"][0],
         }.get(kind, T.TEXT)
         self._banner.setText(text)
+        self._banner.setAccessibleDescription(text)
         self._banner.setStyleSheet(
             f"background:{T.SURFACE_2}; color:{color}; border-bottom:1px solid {T.BORDER};"
-            "padding:6px 14px; font-size:12px;"
+            "padding:6px 14px; font-size:12px; text-align:left;"
         )
         self._banner.setVisible(True)
 
@@ -1757,6 +2061,7 @@ class MainWindow(QMainWindow):
         self._banner_chat = None
         self._banner.setVisible(False)
         self._banner.setText("")
+        self._banner.setAccessibleDescription("")
 
     def _on_banner_clicked(self) -> None:
         """Banner click: cancel an in-flight startup sign-in, open a linked
@@ -1781,18 +2086,105 @@ class MainWindow(QMainWindow):
         )
 
     # --- chrome actions -------------------------------------------------- #
-    def _set_active_chat(self, chat_id: Optional[str]) -> None:
-        """Single write point for the active chat: the canvas ctx follows it,
-        and the transport's register session_id tracks it so a reconnect's
-        re-register resumes this chat's fan-out + task replay (feature 055)."""
+    def _set_active_chat(self, chat_id: Optional[str], *, persist: bool = True) -> None:
+        """Select and fence an active chat, persisting before presentation."""
+
+        if chat_id is not None and _canonical_uuid4(chat_id) and persist:
+            self._resume_store.set_active_chat(chat_id)
         self.active_chat = chat_id
         self.canvas.ctx.chat_id = chat_id
         self.client.session_id = chat_id or "win-client"
+        configure_resume = getattr(self.client, "configure_resume", None)
+        if callable(configure_resume):
+            try:
+                configure_resume(chat_id if _canonical_uuid4(chat_id) else None)
+            except WindowsProtocolError:
+                logger.info("legacy non-UUID chat retained without 060 locator")
+        if chat_id is not None and _canonical_uuid4(chat_id):
+            self._continuity.activate_chat(chat_id)
+        else:
+            self._continuity.activate_chat(None)
+
+    def _clear_transient_conversation(self) -> None:
+        self._continuity.clear_transient()
+        self._transient_canvas_components.clear()
+        self._transient_chat_lines.clear()
+        self.canvas.clear_transient_overlay()
+        self.rail.clear_transient()
+
+    def _sync_transport_scope(self) -> None:
+        """Adopt the transport's register/queued-work generations on the GUI thread."""
+
+        connection = getattr(self.client, "connection_generation", None)
+        generation = getattr(self.client, "request_generation", None)
+        purpose = getattr(self.client, "request_purpose", None)
+        if not _canonical_uuid4(connection):
+            return
+        if self._continuity.connection_generation != connection:
+            self._continuity.bind_connection(connection)
+            self._clear_transient_conversation()
+        if (
+            _canonical_uuid4(generation)
+            and purpose in {"hydration", "commit"}
+            and (
+                self._continuity.request_generation != generation
+                or self._continuity.request_purpose != purpose
+            )
+        ):
+            try:
+                self._continuity.open_request(purpose, generation)
+            except WindowsProtocolError:
+                logger.warning("transport reused a conversation request generation")
+
+    def _begin_conversation_request(
+        self, purpose: str, chat_id: Optional[str]
+    ) -> Optional[str]:
+        if chat_id is not None and not _canonical_uuid4(chat_id):
+            return None
+        connection = getattr(self.client, "connection_generation", None)
+        if _canonical_uuid4(connection) and self._continuity.connection_generation != connection:
+            self._continuity.bind_connection(connection)
+        opener = getattr(self.client, "begin_conversation_request", None)
+        generation = (
+            opener(purpose, chat_id)
+            if callable(opener)
+            else str(uuid.uuid4())
+        )
+        self._continuity.open_request(purpose, generation)
+        self._clear_transient_conversation()
+        return generation
+
+    def _send_chat_transport(
+        self,
+        message: str,
+        chat_id: Optional[str],
+        *,
+        attachments: Optional[list] = None,
+        request_generation: Optional[str] = None,
+    ) -> None:
+        """Call the additive 060 transport API with bounded test compatibility."""
+
+        sender = self.client.send_chat
+        parameters = inspect.signature(sender).parameters.values()
+        accepts_generation = any(
+            parameter.name == "request_generation"
+            or parameter.kind == inspect.Parameter.VAR_KEYWORD
+            for parameter in parameters
+        )
+        kwargs: dict[str, Any] = {"attachments": attachments}
+        if request_generation is not None and accepts_generation:
+            kwargs["request_generation"] = request_generation
+        sender(message, chat_id, **kwargs)
 
     def _new_chat(self) -> None:
-        self._set_active_chat(None)
+        old_chat = self.active_chat
+        self._resume_store.clear("explicit_new_chat", old_chat)
+        if old_chat and _canonical_uuid4(old_chat):
+            self._continuity.clear_chat(old_chat)
+        self._set_active_chat(None, persist=False)
         self.rail.clear()
         self.rail.show_empty_hint()
+        self.canvas.clear_transient_overlay()
         self.canvas.set_components([])
         self._stream_seq.clear()
         self.client.send_event("new_chat", {})
@@ -2104,9 +2496,28 @@ class MainWindow(QMainWindow):
             self._audit_dialog.add_page(result.get("rows") or [], result.get("next_cursor"))
 
     def _load_chat(self, chat_id: str) -> None:
-        self.rail.clear()
+        if not _canonical_uuid4(chat_id):
+            # Bounded compatibility for pre-060/noncanonical test fixtures.
+            self.rail.clear()
+            self._stream_seq.clear()
+            self.client.send_event("load_chat", {"chat_id": chat_id})
+            return
+        self._resume_store.set_active_chat(chat_id)
+        self._set_active_chat(chat_id, persist=False)
         self._stream_seq.clear()
-        self.client.send_event("load_chat", {"chat_id": chat_id})
+        generation = self._begin_conversation_request("hydration", chat_id)
+        connection = getattr(self.client, "connection_generation", None)
+        self.topbar.set_status("Restoring conversation…", T.MUTED)
+        self.client.send_event(
+            "load_chat",
+            {
+                "chat_id": chat_id,
+                "connection_generation": connection,
+                "request_generation": generation,
+                "snapshot_purpose": "hydration",
+            },
+            session_id=chat_id,
+        )
 
     def _sign_out(self) -> None:
         if (
@@ -2114,6 +2525,10 @@ class MainWindow(QMainWindow):
             != QMessageBox.StandardButton.Yes
         ):
             return
+        old_chat = self.active_chat
+        self._resume_store.clear("definitive_sign_out", old_chat)
+        self._continuity.clear_chat(old_chat, all_accounts=True)
+        self._clear_transient_conversation()
         # Feature 044 (FR-005): server-revoking sign-out. Capture the refresh
         # credential BEFORE tearing down, then revoke best-effort on a worker
         # thread (backend → direct-Keycloak fallback → local-only) so the UI
@@ -2164,23 +2579,147 @@ class MainWindow(QMainWindow):
         QApplication.instance().quit()
 
     # --- outbound -------------------------------------------------------- #
+    def _project_local_submission(self, submission: object) -> bool:
+        """Render and retain one client-only state before transport I/O.
+
+        ``OrchestratorClient.submission`` is emitted synchronously before its
+        socket path runs. This projection therefore means only "the client is
+        submitting"; canonical server acceptance still arrives exclusively as
+        ``operation_status``.
+        """
+
+        if not isinstance(submission, LocalOperationSubmission):
+            return False
+        try:
+            submission.validate()
+        except WindowsProtocolError:
+            return False
+        prior_generation = self._pending_submissions_by_id.get(
+            submission.submission_id
+        )
+        if prior_generation is not None:
+            self._pending_submissions_by_generation.pop(
+                prior_generation.request_generation, None
+            )
+        prior_submission = self._pending_submissions_by_generation.get(
+            submission.request_generation
+        )
+        if prior_submission is not None:
+            self._pending_submissions_by_id.pop(prior_submission.submission_id, None)
+        self._pending_submissions_by_generation[
+            submission.request_generation
+        ] = submission
+        self._pending_submissions_by_id[submission.submission_id] = submission
+        self.topbar.set_status(
+            submission.label, T.VARIANT_COLORS["accent"][0]
+        )
+        self._show_banner(submission.label, "info")
+        return True
+
+    def _finish_local_submission_by_generation(
+        self, request_generation: str
+    ) -> Optional[LocalOperationSubmission]:
+        submission = self._pending_submissions_by_generation.pop(
+            request_generation, None
+        )
+        if submission is not None:
+            self._pending_submissions_by_id.pop(submission.submission_id, None)
+        return submission
+
+    def _finish_local_submission_by_id(
+        self, submission_id: str
+    ) -> Optional[LocalOperationSubmission]:
+        submission = self._pending_submissions_by_id.pop(submission_id, None)
+        if submission is not None:
+            self._pending_submissions_by_generation.pop(
+                submission.request_generation, None
+            )
+        return submission
+
+    def _discard_local_submission(self, submission: object) -> bool:
+        """Settle exactly one identity removed from the bounded queue."""
+
+        if not isinstance(submission, LocalOperationSubmission):
+            return False
+        try:
+            submission.validate()
+        except WindowsProtocolError:
+            return False
+        return self._finish_local_submission_by_id(submission.submission_id) is not None
+
+    def _prepare_queued_replay(
+        self,
+        preparation: object,
+        acknowledgement: object,
+    ) -> None:
+        """Install every reconnect fence before acknowledging socket send."""
+
+        if not isinstance(acknowledgement, QueuedReplayAcknowledgement):
+            return
+        try:
+            if not isinstance(preparation, QueuedReplayPreparation):
+                raise WindowsProtocolError("queued replay preparation is invalid")
+            preparation.validate()
+            if (
+                self._continuity.connection_generation
+                != preparation.connection_generation
+            ):
+                self._continuity.bind_connection(
+                    preparation.connection_generation
+                )
+                self._clear_transient_conversation()
+            if preparation.request_purpose is not None:
+                self._continuity.open_request(
+                    preparation.request_purpose,
+                    preparation.submission.request_generation,
+                )
+                self._clear_transient_conversation()
+            if not self._project_local_submission(preparation.submission):
+                raise WindowsProtocolError("queued local projection was rejected")
+        except (RuntimeError, WindowsProtocolError) as exc:
+            acknowledgement.complete(False, str(exc))
+            return
+        acknowledgement.complete(True)
+
+    def _clear_local_submissions(self) -> None:
+        self._pending_submissions_by_generation.clear()
+        self._pending_submissions_by_id.clear()
+
     def _send(self) -> None:
         text = self._input.text().strip()
         atts = self._sendable_attachments()
         if not text and not atts:
             return
         self._input.clear()
-        # Show the turn in the rail (auto-drops the empty-state hint), plus a
-        # small attachment line mirroring the web '📎 name'.
-        if text:
-            self.rail.add("user", text)
+        generation = (
+            self._begin_conversation_request("commit", self.active_chat)
+            if self.active_chat is None or _canonical_uuid4(self.active_chat)
+            else None
+        )
+        # A 060 turn is a disposable pending overlay until its one complete
+        # commit snapshot arrives. Legacy non-UUID sessions retain the prior
+        # direct-rail behavior during the bounded compatibility window.
+        lines = [text] if text else []
         if atts:
-            names = ", ".join(a["filename"] for a in atts)
-            if not text:
-                self.rail.add("user", "📎 " + names)
-            else:
-                self.rail.add_note("📎 " + names)
-        self.client.send_chat(text, self.active_chat, attachments=atts or None)
+            lines.append("📎 " + ", ".join(a["filename"] for a in atts))
+        if generation is not None:
+            self._transient_chat_lines = lines
+            self.rail.show_transient("\n".join(lines))
+        else:
+            if text:
+                self.rail.add("user", text)
+            if atts:
+                names = ", ".join(a["filename"] for a in atts)
+                if not text:
+                    self.rail.add("user", "📎 " + names)
+                else:
+                    self.rail.add_note("📎 " + names)
+        self._send_chat_transport(
+            text,
+            self.active_chat,
+            attachments=atts or None,
+            request_generation=generation,
+        )
         # Optimistic loading state until the turn's first canvas content — the
         # typed path matches _emit's chat_message twin (feature 055 US1):
         # retire the ephemeral welcome, then arm the skeleton.
@@ -2200,9 +2739,21 @@ class MainWindow(QMainWindow):
             return
         if action == "chat_message":
             msg = payload.get("message", "")
-            if msg:
+            generation = (
+                self._begin_conversation_request("commit", self.active_chat)
+                if self.active_chat is None or _canonical_uuid4(self.active_chat)
+                else None
+            )
+            if generation is not None:
+                self._transient_chat_lines = [msg] if msg else []
+                self.rail.show_transient(msg)
+            elif msg:
                 self.rail.add("user", msg)
-            self.client.send_chat(msg, self.active_chat)
+            self._send_chat_transport(
+                msg,
+                self.active_chat,
+                request_generation=generation,
+            )
             # Optimistic loading state until the turn's first canvas content
             # (parity with the Android twin's send-time skeleton); the welcome
             # is retired BEFORE the skeleton arms (feature 055 US1).
@@ -2230,6 +2781,34 @@ class MainWindow(QMainWindow):
                 f"Couldn't send while offline: {action}. It was not queued — "
                 "reconnect and try again.", "warning")
             return
+        if s.startswith("send_rejected:"):
+            action = s.split(":", 1)[1] or "message"
+            # Valid retained work restores its own projection before replay;
+            # malformed bytes cannot safely identify just one local attempt.
+            self._clear_local_submissions()
+            self._show_banner(
+                f"Couldn't send while offline: {action}. The queued identity "
+                "was invalid; reconnect and try again.",
+                "warning",
+            )
+            return
+        if s.startswith("replay_deferred:"):
+            action = s.split(":", 1)[1] or "message"
+            self._show_banner(
+                f"Queued {action} is still waiting for a safe reconnect; "
+                "nothing was sent.",
+                "warning",
+            )
+            return
+        if s == "agent_host_registered":
+            # The matching message frame drives the BYO host. Keep the visible
+            # transport status at Connected rather than flashing an internal
+            # handshake token in the top bar.
+            return
+        if s.startswith("agent_host_registration_refused:"):
+            # The exact refusal frame is also delivered to ByoAgentHost, whose
+            # notice is actionable and marshalled onto the GUI thread.
+            return
 
         nice = {"connecting": "Connecting…", "connected": "Connected"}.get(s, s)
         color = (
@@ -2243,10 +2822,13 @@ class MainWindow(QMainWindow):
         )
         if s.startswith("closed"):
             nice = "Disconnected"
+            self._clear_local_submissions()
             # C-3: a dropped connection (e.g. orchestrator restart) must re-send
             # register_external_agent on the next 'connected', or the win_agent
             # stays unreachable to the orchestrator until the app is relaunched.
             self._win_agent_registered = False
+            if self._byo_enabled:
+                self._byo.on_transport_disconnected()
             self._show_banner("Disconnected — reconnecting…", "warning")
         elif s.startswith("reconnecting"):
             attempt = s.split(":", 1)[1] if ":" in s else "?"
@@ -2259,17 +2841,19 @@ class MainWindow(QMainWindow):
             nice = "Re-authenticating…"
         self.topbar.set_status(nice, color)
         if s == "connected":
+            self._sync_transport_scope()
             self._reauth_tries = 0
             self._connected_once = True
             self._hide_banner()
-            if not self._win_agent_registered:
+            if self._win_agent_enabled and not self._win_agent_registered:
                 self._win_agent_registered = True
                 url = f"http://{self._win_agent_host}:{self._win_agent_port}"
                 self.client.send_event("register_external_agent", {"url": url})
             # 058: same reason as the win_agent re-registration above — the server
             # pops `agents[agent_id]` when the socket dies, so every still-running
             # BYO child must re-send its register_agent or it stays unreachable.
-            self._byo.on_ui_connected()
+            if self._byo_enabled:
+                self._byo.on_ui_connected()
             # Pull chrome state so the native dialogs + CTA are accurate.
             self.client.send_event("discover_agents", {})
             self.client.send_event("get_history", {})
@@ -2279,7 +2863,12 @@ class MainWindow(QMainWindow):
                 # background-task state) that landed while this device was
                 # away. Only a REconnect can get here with a chat open — the
                 # first connect precedes any chat.
-                self._load_chat(self.active_chat)
+                if _canonical_uuid4(self.active_chat):
+                    # The locator was persisted before this transport opened;
+                    # register_ui.resume is the authoritative hydration request.
+                    self.topbar.set_status("Restoring conversation…", T.MUTED)
+                else:
+                    self._load_chat(self.active_chat)
         elif s.startswith("auth_required"):
             self._begin_silent_refresh()
 
@@ -2339,6 +2928,8 @@ class MainWindow(QMainWindow):
             self._prompt_reauth()
 
     def _reconnect(self, token: str) -> None:
+        if self._byo_enabled:
+            self._byo.on_transport_disconnected()
         try:
             self.client.stop()
         except Exception:
@@ -2350,16 +2941,61 @@ class MainWindow(QMainWindow):
             self.client.status.disconnect(self._on_status)
         except (RuntimeError, TypeError, AttributeError):
             pass
+        previous_account_key = self._resume_store.storage_key
+        if self._resume_store.bind_token(token):
+            next_account_key = self._resume_store.storage_key
+            if previous_account_key and next_account_key != previous_account_key:
+                self._continuity.clear_chat(all_accounts=True)
+                self._clear_transient_conversation()
+                self.rail.clear()
+                self.canvas.set_components([])
+                self.active_chat = self._resume_store.active_chat()
+                if self.active_chat is None:
+                    self.rail.show_empty_hint()
+                else:
+                    self.rail.add_note("Restoring conversation…")
+                    self._continuity.activate_chat(self.active_chat)
+                    self.canvas.show_skeleton()
+        if self.active_chat and _canonical_uuid4(self.active_chat):
+            # Synchronous durability precedes construction/registration of the
+            # replacement transport.
+            self._resume_store.set_active_chat(self.active_chat)
         self._token = token
         self._win_agent_registered = False
         self.client = OrchestratorClient(
-            self._url, token, device_caps(supported_types=native_types())
+            self._url,
+            token,
+            device_caps(supported_types=native_types()),
         )
+        configure_host = getattr(self.client, "configure_agent_host", None)
+        if callable(configure_host):
+            configure_host(self._byo_host_id)
+        configure_resume = getattr(self.client, "configure_resume", None)
+        if callable(configure_resume):
+            configure_resume(
+                self.active_chat if _canonical_uuid4(self.active_chat) else None
+            )
         # The rebuilt transport keeps registering with the open chat's id so
         # the server resumes that chat's fan-out + task replay (055).
         self.client.session_id = self.active_chat or "win-client"
         self.client.message.connect(self._on_message)
         self.client.status.connect(self._on_status)
+        submission_signal = getattr(self.client, "submission", None)
+        if submission_signal is not None and hasattr(submission_signal, "connect"):
+            submission_signal.connect(self._project_local_submission)
+        dropped_signal = getattr(self.client, "submission_dropped", None)
+        if dropped_signal is not None and hasattr(dropped_signal, "connect"):
+            dropped_signal.connect(self._discard_local_submission)
+        replay_signal = getattr(self.client, "queued_replay_preparation", None)
+        if replay_signal is not None and hasattr(replay_signal, "connect"):
+            replay_signal.connect(self._prepare_queued_replay)
+            require_replay = getattr(
+                self.client,
+                "require_queued_replay_preparation",
+                None,
+            )
+            if callable(require_replay):
+                require_replay()
         self.client.start()
 
     def _prompt_reauth(self) -> None:
@@ -2481,9 +3117,274 @@ class MainWindow(QMainWindow):
         self.topbar.set_user(_user_from_token(token))
         self._reconnect(token)
 
+    def _apply_conversation_snapshot(self) -> None:
+        """Atomically replace both native committed surfaces from reducer state."""
+
+        snapshot = self._continuity.committed_snapshot
+        if snapshot is None:
+            return
+        messages = decode_semantic_transcript(snapshot.transcript)
+        components = snapshot.canvas["components"]
+        # Renderer construction is fail-soft, but pre-building every canvas
+        # widget ensures no unexpected Qt failure can occur after the transcript
+        # has changed. No prepared widget is attached to the live surface.
+        prepared = [render(component, self.canvas.ctx, top_level=True) for component in components]
+        for widget in prepared:
+            widget.deleteLater()
+        self._clear_transient_conversation()
+        self.rail.replace_semantic(messages, self.canvas.ctx)
+        self.canvas.set_components(components)
+        self._set_turn_active(False)
+        self.canvas.resolve_loading()
+        self._reset_status_line()
+
+    @staticmethod
+    def _component_identity(component: dict[str, Any]) -> Optional[str]:
+        value = component.get("component_id") or component.get("id")
+        return str(value) if value else None
+
+    def _apply_transient_frame(self, msg: dict[str, Any]) -> None:
+        """Reduce an accepted scoped frame into disposable native overlays."""
+
+        frame_type = msg.get("type")
+        components = msg.get("components")
+        if frame_type in {"ui_render", "ui_update"}:
+            if msg.get("target") == "chat":
+                text = _flatten_text(components or [])
+                if text:
+                    self._transient_chat_lines.append(text)
+                    self.rail.show_transient("\n".join(self._transient_chat_lines))
+            else:
+                self._transient_canvas_components = list(components or [])
+                self.canvas.set_transient_overlay(self._transient_canvas_components)
+            return
+        if frame_type == "ui_append":
+            self._transient_canvas_components.extend(components or [])
+            self.canvas.set_transient_overlay(self._transient_canvas_components)
+            return
+        if frame_type == "ui_upsert":
+            current = list(self._transient_canvas_components)
+            for op in msg.get("ops") or []:
+                if not isinstance(op, dict) or not op.get("component_id"):
+                    continue
+                component_id = str(op["component_id"])
+                index = next(
+                    (
+                        position
+                        for position, component in enumerate(current)
+                        if self._component_identity(component) == component_id
+                    ),
+                    None,
+                )
+                if op.get("op") == "remove":
+                    if index is not None:
+                        current.pop(index)
+                    continue
+                component = op.get("component")
+                if not isinstance(component, dict):
+                    continue
+                component = dict(component)
+                component.setdefault("component_id", component_id)
+                if index is None:
+                    current.append(component)
+                else:
+                    current[index] = component
+            self._transient_canvas_components = current
+            self.canvas.set_transient_overlay(current)
+            return
+        if frame_type == "ui_stream_data":
+            streamed = list(components or [])
+            if not streamed:
+                return
+            identity = msg.get("component_id") or msg.get("stream_id")
+            if identity:
+                component = dict(streamed[-1])
+                component.setdefault("component_id", str(identity))
+                synthetic = {
+                    "type": "ui_upsert",
+                    "ops": [
+                        {
+                            "op": "upsert",
+                            "component_id": str(identity),
+                            "component": component,
+                        }
+                    ],
+                }
+                self._apply_transient_frame(synthetic)
+            else:
+                self._transient_canvas_components.extend(streamed)
+                self.canvas.set_transient_overlay(self._transient_canvas_components)
+
+    def _scoped_status_matches(self, msg: dict[str, Any]) -> bool:
+        scoped = any(
+            key in msg
+            for key in ("chat_id", "connection_generation", "request_generation")
+        )
+        if not scoped:
+            # Bounded legacy compatibility applies only before a UUID-scoped
+            # continuity conversation has opened.
+            return not (
+                _canonical_uuid4(self.active_chat)
+                and self._continuity.request_generation is not None
+            )
+        return (
+            msg.get("chat_id") == self.active_chat
+            and msg.get("connection_generation")
+            == self._continuity.connection_generation
+            and msg.get("request_generation") == self._continuity.request_generation
+        )
+
+    def _reduce_operation_status(self, msg: dict[str, Any]) -> bool:
+        """Retain and visibly render one newer canonical operation state."""
+
+        try:
+            status = OperationStatus.from_dict(msg)
+        except (TypeError, WindowsProtocolError):
+            return False
+        if status.connection_generation != self._continuity.connection_generation:
+            return False
+        pending = self._pending_submissions_by_generation.get(
+            status.request_generation
+        )
+        if status.chat_id is not None:
+            in_scope = status.chat_id == self.active_chat and (
+                status.request_generation == self._continuity.request_generation
+                or (
+                    pending is not None
+                    and pending.action == status.action
+                    and (
+                        pending.chat_id == self.active_chat
+                        or (
+                            pending.action == "chat_message"
+                            and pending.chat_id is None
+                        )
+                    )
+                )
+            )
+        else:
+            in_scope = (
+                pending is not None
+                and pending.action == status.action
+                and (
+                    pending.action != "chat_message"
+                    or (pending.chat_id is None and self.active_chat is None)
+                )
+            )
+        if not in_scope:
+            return False
+        current = self._operation_status_by_id.get(status.operation_id)
+        if current is not None and (
+            current.terminal or status.sequence <= current.sequence
+        ):
+            return False
+        self._operation_status_by_id[status.operation_id] = status
+        visible = (status.error or {}).get("message") or status.label
+        color = (
+            T.VARIANT_COLORS["error"][0]
+            if status.state in {"failed", "cancelled", "retryable"}
+            else T.VARIANT_COLORS["accent"][0]
+        )
+        self.topbar.set_status(str(visible), color)
+        self._show_banner(
+            str(visible),
+            "error" if status.state in {"failed", "cancelled", "retryable"} else "info",
+        )
+        if status.terminal:
+            self._finish_local_submission_by_generation(
+                status.request_generation
+            )
+        if status.terminal and status.state in {"failed", "cancelled", "retryable"}:
+            self._clear_transient_conversation()
+        return True
+
+    def _reduce_admission_refusal(self, msg: dict[str, Any]) -> bool:
+        """Settle only the client submission named by a pre-admission refusal."""
+
+        try:
+            refusal = AdmissionRefusal.from_dict(msg)
+        except (TypeError, WindowsProtocolError):
+            return False
+        submission = self._finish_local_submission_by_id(refusal.submission_id)
+        if submission is None:
+            return False
+        visible = normalize_error(msg)
+        self._show_banner(visible, "error")
+        self.topbar.set_status(visible, T.VARIANT_COLORS["error"][0])
+        if submission.action == "chat_message":
+            self._set_turn_active(False)
+            self._clear_transient_conversation()
+            self.canvas.resolve_loading()
+        return True
+
+    def _reduce_agent_lifecycle(self, msg: dict[str, Any]) -> bool:
+        """Apply one lexicographically newer agent lifecycle projection."""
+
+        try:
+            lifecycle = AgentLifecycle.from_dict(msg)
+        except (TypeError, WindowsProtocolError):
+            return False
+        current = self._agent_lifecycle_by_id.get(lifecycle.agent_id)
+        if current is not None and (
+            lifecycle.lifecycle_generation < current.lifecycle_generation
+            or (
+                lifecycle.lifecycle_generation == current.lifecycle_generation
+                and lifecycle.state_revision <= current.state_revision
+            )
+        ):
+            return False
+        self._agent_lifecycle_by_id[lifecycle.agent_id] = lifecycle
+        for agent in self._agents:
+            if agent.get("id") == lifecycle.agent_id:
+                agent["_lifecycle_state"] = lifecycle.state
+                agent["_lifecycle_label"] = lifecycle.label
+        if self._agents_dialog is not None:
+            self._agents_dialog.set_agents(self._agents)
+        message = f"{lifecycle.agent_id}: {lifecycle.label}"
+        color = (
+            T.VARIANT_COLORS["error"][0]
+            if lifecycle.state == "failed"
+            else T.VARIANT_COLORS["accent"][0]
+        )
+        self.topbar.set_status(message, color)
+        self._show_banner(message, "error" if lifecycle.state == "failed" else "info")
+        return True
+
+    def _confirmed_chat_gone(self, chat_id: object, message: str) -> None:
+        if chat_id != self.active_chat or not isinstance(chat_id, str):
+            return
+        if not self._resume_store.clear("confirmed_deletion", chat_id):
+            return
+        self._continuity.clear_chat(chat_id)
+        self._clear_transient_conversation()
+        self._set_active_chat(None, persist=False)
+        self.rail.clear()
+        self.canvas.set_components([])
+        self._show_banner(message, "warning")
+
     def _on_message(self, msg: dict) -> None:
         t = msg.get("type")
-        if t == "ui_render":
+        if t == "conversation_commit_ready":
+            disposition = self._continuity.reduce_commit_ready(msg)
+            if disposition == "commit_ready":
+                adopt = getattr(self.client, "adopt_server_request", None)
+                if callable(adopt):
+                    adopt("commit", msg["chat_id"], msg["request_generation"])
+                self._clear_transient_conversation()
+            logger.info("conversation continuity: %s", disposition)
+        elif t == "conversation_snapshot":
+            disposition = self._continuity.reduce_snapshot(msg)
+            if disposition == "snapshot_applied":
+                self._apply_conversation_snapshot()
+            logger.info("conversation continuity: %s", disposition)
+        elif t in {"ui_render", "ui_update", "ui_upsert", "ui_append"} and (
+            _canonical_uuid4(self.active_chat)
+            and self._continuity.request_generation is not None
+        ):
+            disposition = self._continuity.reduce_transient(msg)
+            if disposition == "transient_overlay_applied":
+                self._apply_transient_frame(msg)
+            logger.info("conversation continuity: %s", disposition)
+        elif t == "ui_render":
             target = msg.get("target") or "canvas"
             comps = msg.get("components") or []
             if target == "chat":
@@ -2494,6 +3395,12 @@ class MainWindow(QMainWindow):
                 self._on_history_render(comps)
             else:
                 self.canvas.set_components(comps)
+        elif t == "ui_update":
+            self.canvas.set_components(msg.get("components") or [])
+        elif t == "ui_append":
+            components = list(self.canvas._last_components)
+            components.extend(msg.get("components") or [])
+            self.canvas.set_components(components)
         elif t == "ui_upsert":
             if not msg.get("chat_id") or msg.get("chat_id") == self.active_chat:
                 self.canvas.apply_ops(msg.get("ops") or [])
@@ -2530,15 +3437,30 @@ class MainWindow(QMainWindow):
         elif t == "saved_components_list":
             self._refresh_saved_components(msg.get("components") or [])
         elif t == "chat_created":
-            self._set_active_chat(
-                (msg.get("payload") or {}).get("chat_id") or self.active_chat
-            )
+            created_chat = (msg.get("payload") or {}).get("chat_id") or self.active_chat
+            self._set_active_chat(created_chat)
         elif t == "chat_loaded":
             chat = msg.get("chat") or {}
-            self._set_active_chat(chat.get("id") or self.active_chat)
-            self._replay_transcript(chat)
+            loaded_chat = chat.get("id") or self.active_chat
+            if _canonical_uuid4(loaded_chat):
+                # Compatibility acknowledgement only; the atomic snapshot is
+                # the sole hydration completion and committed-state mutation.
+                if self.active_chat is None:
+                    self._set_active_chat(loaded_chat)
+                if loaded_chat == self.active_chat:
+                    self.topbar.set_status("Restoring conversation…", T.MUTED)
+            else:
+                self._set_active_chat(loaded_chat)
+                self._replay_transcript(chat)
+        elif t == "chat_deleted":
+            self._confirmed_chat_gone(msg.get("chat_id"), "This chat was deleted.")
         elif t == "agent_list":
             self._agents = msg.get("agents") or []
+            for agent in self._agents:
+                lifecycle = self._agent_lifecycle_by_id.get(str(agent.get("id") or ""))
+                if lifecycle is not None:
+                    agent["_lifecycle_state"] = lifecycle.state
+                    agent["_lifecycle_label"] = lifecycle.label
             any_on = any(
                 any(bool(v) for v in (a.get("scopes") or {}).values())
                 for a in self._agents
@@ -2550,6 +3472,14 @@ class MainWindow(QMainWindow):
             chats = msg.get("chats") or []
             if self._history_dialog is not None:
                 self._history_dialog.set_chats(chats)
+        elif t == "ui_stream_data" and (
+            _canonical_uuid4(self.active_chat)
+            and self._continuity.request_generation is not None
+        ):
+            disposition = self._continuity.reduce_transient(msg)
+            if disposition == "transient_overlay_applied":
+                self._apply_transient_frame(msg)
+            logger.info("conversation continuity: %s", disposition)
         elif t in ("ui_stream_data", "stream_data"):
             self._on_stream_data(msg)
         elif t in ("stream_subscribed", "stream_error", "stream_unsubscribed", "stream_list"):
@@ -2563,29 +3493,47 @@ class MainWindow(QMainWindow):
         elif t == "chrome_surface":
             # Feature 043: a settings surface delivered as SDUI components.
             self._on_chrome_surface(msg)
+        elif t == "operation_status":
+            self._reduce_operation_status(msg)
+        elif t == "agent_lifecycle":
+            self._reduce_agent_lifecycle(msg)
         elif t == "chat_status":
-            st = msg.get("status")
-            if st in ("thinking", "executing", "fixing", "processing_async",
-                      "combining", "condensing"):
-                self._set_turn_active(True)
-                self.topbar.set_status(
-                    msg.get("message") or st, T.VARIANT_COLORS["accent"][0]
-                )
-            elif st == "done":
-                self._set_turn_active(False)
-                # The turn ended without canvas output (text-only answer,
-                # cancellation) — clear the query-start skeleton (and restore
-                # the idle hint when the canvas ended the turn empty).
-                self.canvas.resolve_loading()
-                # A per-turn status reset ONLY — not the full reconnect re-sync
-                # (which would hide banners + re-fire discover/history every turn).
-                self._reset_status_line()
+            if self._scoped_status_matches(msg):
+                st = msg.get("status")
+                if st in ("thinking", "executing", "fixing", "processing_async",
+                          "combining", "condensing"):
+                    self._set_turn_active(True)
+                    self.topbar.set_status(
+                        msg.get("message") or st, T.VARIANT_COLORS["accent"][0]
+                    )
+                elif st == "done":
+                    self._set_turn_active(False)
+                    # A success snapshot remains the authoritative overlay clear.
+                    self.canvas.resolve_loading()
+                    self._reset_status_line()
         elif t == "error":
-            # FR-002/SC-006 — never silent; resolve any stuck turn.
-            self._show_banner(normalize_error(msg), "error")
-            self._set_turn_active(False)
-            self.canvas.resolve_loading()
-            self.topbar.set_status("Connected", T.VARIANT_COLORS["success"][0])
+            # A strict refusal precedes any durable operation and therefore has
+            # no conversation scope. Any other shape stays on the legacy error
+            # path and cannot settle a client-local submission.
+            if self._reduce_admission_refusal(msg):
+                pass
+            elif self._scoped_status_matches(msg):
+                code = msg.get("code")
+                if code in {"chat_not_found", "chat_deleted", "not_found"}:
+                    self._confirmed_chat_gone(
+                        msg.get("chat_id"),
+                        "This chat is no longer available.",
+                    )
+                else:
+                    # FR-002/SC-006 — never silent; resolve any stuck turn and
+                    # discard only the request overlay, not committed state.
+                    self._show_banner(normalize_error(msg), "error")
+                    self._set_turn_active(False)
+                    self._clear_transient_conversation()
+                    self.canvas.resolve_loading()
+                    self.topbar.set_status(
+                        "Connected", T.VARIANT_COLORS["success"][0]
+                    )
         elif t == "notification":
             title = msg.get("title") or ""
             body = msg.get("body") or ""
@@ -2602,17 +3550,24 @@ class MainWindow(QMainWindow):
                 # Another (or no) chat: the banner carries a tap-to-open link.
                 self._show_banner(text, kind, chat_id=chat)
         elif t == "user_message_acked":
-            self._set_turn_active(True)
-            self.topbar.set_status("Working…", T.VARIANT_COLORS["accent"][0])
+            if self._scoped_status_matches(msg):
+                self._set_turn_active(True)
+                self.topbar.set_status("Working…", T.VARIANT_COLORS["accent"][0])
         elif t == "chat_step":
-            step = msg.get("step") or {}
-            name = step.get("name") or step.get("kind") or "step"
-            icon = {"completed": "✓", "errored": "✗"}.get(step.get("status"), "•")
-            self.topbar.set_status(f"{icon} {name}", T.VARIANT_COLORS["accent"][0])
+            if self._scoped_status_matches(msg):
+                step = msg.get("step") or {}
+                name = step.get("name") or step.get("kind") or "step"
+                icon = {"completed": "✓", "errored": "✗"}.get(step.get("status"), "•")
+                self.topbar.set_status(f"{icon} {name}", T.VARIANT_COLORS["accent"][0])
         elif t == "tool_progress":
-            label = (msg.get("label") or msg.get("tool_name")
-                     or msg.get("message") or "working")
-            self.topbar.set_status(str(label), T.VARIANT_COLORS["accent"][0])
+            if self._scoped_status_matches(msg):
+                label = (msg.get("label") or msg.get("tool_name")
+                         or msg.get("message") or "working")
+                self.topbar.set_status(str(label), T.VARIANT_COLORS["accent"][0])
+                if msg.get("terminal") and msg.get("status") in {
+                    "failed", "cancelled", "retryable"
+                }:
+                    self._clear_transient_conversation()
         elif t == "task_started":
             chat = frame_chat_id(msg)
             if chat and chat != self.active_chat:
@@ -2659,10 +3614,11 @@ class MainWindow(QMainWindow):
             # so a restart honors the stored preset.
             self._user_prefs = msg.get("preferences") or {}
             self._apply_theme_pref(self._user_prefs.get("theme"))
-        elif t in HOST_FRAME_TYPES:
-            # 058: bundle delivery / tunnel / stop for the agents THIS PC hosts.
+        elif t in HOST_FRAME_TYPES and self._byo_enabled:
+            # 060: acknowledgement/inventory plus fenced delivery/tunnel/stop
+            # for agents hosted by this installation.
             self._byo.handle_frame(msg)
-        elif t == "agent_registered":
+        elif t == "agent_registered" and self._byo_enabled:
             # 058: the only ack a BYO registration ever gets — a refusal is
             # silence (contract §6), so the host reaps on its absence.
             self._byo.on_agent_registered(msg.get("agent_id") or "")
@@ -3119,7 +4075,11 @@ def resolve_auth(args, cancel_event=None):
         except LoginCancelled:
             raise
         except Exception as exc:  # noqa: BLE001
+            if not getattr(args, "allow_dev_token_fallback", True):
+                raise RuntimeError("configured OIDC sign-in failed") from exc
             print(f"OIDC login failed ({exc}); falling back to dev-token.")
+    if not getattr(args, "allow_dev_token_fallback", True):
+        raise RuntimeError("the effective deployment profile has no usable authority")
     return "dev-token", None
 
 
@@ -3218,21 +4178,38 @@ def _resolve_config(args, *, settings, prompt) -> None:
         os.environ["AGENT_API_KEY"] = agent_key
 
 
-def main() -> int:
+def main(
+    *,
+    effective_profile: Optional[EffectiveDeploymentProfile] = None,
+    argv: Optional[list[str]] = None,
+) -> int:
     ap = argparse.ArgumentParser(description="AstralDeep native Windows client")
-    ap.add_argument(
-        "--url", default=os.getenv("ASTRAL_WS_URL", "ws://127.0.0.1:8001/ws")
-    )
+    if effective_profile is None:
+        ap.add_argument(
+            "--url", default=os.getenv("ASTRAL_WS_URL", "ws://127.0.0.1:8001/ws")
+        )
+        ap.add_argument("--authority", default=os.getenv("KEYCLOAK_AUTHORITY", ""))
     ap.add_argument("--token", default=os.getenv("ASTRAL_TOKEN", ""))
-    ap.add_argument("--authority", default=os.getenv("KEYCLOAK_AUTHORITY", ""))
+    smoke_reports = ap.add_mutually_exclusive_group()
+    smoke_reports.add_argument("--release-smoke-report")
+    smoke_reports.add_argument("--release-offline-smoke-report")
+    ap.add_argument(
+        "--release-smoke-prompt",
+        default="roll exactly 6 six-sided dice",
+    )
+    ap.add_argument("--release-smoke-timeout", type=float, default=60.0)
     # Dedicated public client (default): the desktop exchanges the auth code
     # directly against Keycloak. See docs/keycloak-windows-client-setup.md.
     ap.add_argument(
         "--client-id",
         default=(
-            os.getenv("ASTRAL_CLIENT_ID")
-            or os.getenv("KEYCLOAK_DESKTOP_CLIENT_ID")
-            or "astral-desktop"
+            effective_profile.profile.client_id
+            if effective_profile is not None
+            else (
+                os.getenv("ASTRAL_CLIENT_ID")
+                or os.getenv("KEYCLOAK_DESKTOP_CLIENT_ID")
+                or "astral-desktop"
+            )
         ),
     )
     # Legacy: reuse the web's confidential astral-frontend client by proxying
@@ -3240,24 +4217,247 @@ def main() -> int:
     ap.add_argument(
         "--bff",
         action="store_true",
-        default=os.getenv("ASTRAL_AUTH_BFF", "").lower() in ("1", "true", "yes"),
+        default=(
+            effective_profile.profile.auth_mode == "keycloak_bff"
+            if effective_profile is not None
+            else os.getenv("ASTRAL_AUTH_BFF", "").lower() in ("1", "true", "yes")
+        ),
     )
-    args = ap.parse_args()
+    args = ap.parse_args(argv)
+    if (args.release_smoke_report or args.release_offline_smoke_report) and (
+        effective_profile is None or not args.token
+    ):
+        ap.error("release smoke reports require the effective profile and --token")
+    if args.release_offline_smoke_report and not effective_profile.profile.local_only:
+        ap.error(
+            "--release-offline-smoke-report requires an explicit local-only "
+            "generic/developer profile"
+        )
+    if not 5.0 <= args.release_smoke_timeout <= 120.0:
+        ap.error("--release-smoke-timeout must be between 5 and 120 seconds")
+    if effective_profile is not None:
+        args.url = effective_profile.profile.websocket_endpoint
+        args.authority = effective_profile.profile.authority
+        args.client_id = effective_profile.profile.client_id
+        args.bff = effective_profile.profile.auth_mode == "keycloak_bff"
+        args.allow_dev_token_fallback = False
 
     app = QApplication(sys.argv)
     configure(app)
-    _win = _launch(args)  # keep the window referenced for the app's lifetime
-    return app.exec()
+    _win = _launch(
+        args,
+        effective_profile=effective_profile,
+    )  # keep the window referenced for the app's lifetime
+    if args.release_smoke_report:
+        _install_release_smoke(
+            _win,
+            effective_profile,
+            report_path=args.release_smoke_report,
+            prompt=args.release_smoke_prompt,
+            timeout_seconds=args.release_smoke_timeout,
+        )
+    elif args.release_offline_smoke_report:
+        _install_release_offline_smoke(
+            _win,
+            effective_profile,
+            report_path=args.release_offline_smoke_report,
+            timeout_seconds=args.release_smoke_timeout,
+        )
+    exit_code = app.exec()
+    return int(getattr(_win, "_release_smoke_exit_code", exit_code))
 
 
-def _launch(args, settings=None) -> "MainWindow":
+def _runtime_profile_checks(
+    window: MainWindow,
+    effective_profile: EffectiveDeploymentProfile,
+) -> dict[str, bool]:
+    """Compare every packaged Windows runtime consumer without exporting URLs."""
+
+    from win_agent.agent import build_card
+
+    metadata = build_card(effective_profile)["metadata"]
+    endpoint_digest = hashlib.sha256(
+        effective_profile.profile.websocket_endpoint.encode("utf-8")
+    ).hexdigest()
+    return {
+        "window_profile_match": (
+            window._deployment_profile is effective_profile
+            and window.deployment_profile_digest == effective_profile.digest
+            and window._url == effective_profile.profile.websocket_endpoint
+            and window.client.url == effective_profile.profile.websocket_endpoint
+        ),
+        "byo_profile_match": (
+            window._byo.deployment_profile_digest == effective_profile.digest
+        ),
+        "tools_agent_profile_match": (
+            metadata.get("deployment_profile_sha256") == effective_profile.digest
+            and metadata.get("deployment_release_id")
+            == effective_profile.profile.release_id
+            and metadata.get("deployment_endpoint_sha256") == endpoint_digest
+        ),
+    }
+
+
+def _install_release_smoke(
+    window: MainWindow,
+    effective_profile: EffectiveDeploymentProfile,
+    *,
+    report_path: str,
+    prompt: str,
+    timeout_seconds: float,
+) -> None:
+    """Drive one real rendered turn through the frozen GUI for release proof."""
+
+    state = {"sent": False, "complete": False}
+    window._release_smoke_exit_code = 1
+
+    def _finish(frame: Optional[dict] = None, error: Optional[str] = None) -> None:
+        if state["complete"]:
+            return
+        state["complete"] = True
+        report = effective_profile.redacted_report()
+        if error is None and frame is not None:
+            transcript = frame.get("transcript") or []
+            canvas = frame.get("canvas") or {}
+            report.update(
+                {
+                    "status": "passed",
+                    "chat_id": frame.get("chat_id"),
+                    "render_revision": frame.get("render_revision"),
+                    "transcript_turns": len(transcript),
+                    "canvas_components": len(canvas.get("components") or []),
+                    **_runtime_profile_checks(window, effective_profile),
+                }
+            )
+            passed = (
+                len(transcript) >= 2
+                and report["canvas_components"] >= 1
+                and report["window_profile_match"]
+                and report["byo_profile_match"]
+                and report["tools_agent_profile_match"]
+            )
+            report["status"] = "passed" if passed else "failed"
+            report["detail_code"] = "rendered_turn_complete" if passed else "incomplete_rendered_turn"
+            window._release_smoke_exit_code = 0 if passed else 1
+        else:
+            report.update({"status": "failed", "detail_code": error or "smoke_timeout"})
+        write_redacted_report(report_path, report)
+        window.close()
+        QApplication.instance().quit()
+
+    def _status(value: str) -> None:
+        if value == "connected" and not state["sent"]:
+            state["sent"] = True
+            window._input.setText(prompt)
+            window._send()
+
+    def _message(frame: dict) -> None:
+        if (
+            state["sent"]
+            and frame.get("type") == "conversation_snapshot"
+            and frame.get("snapshot_purpose") == "commit"
+        ):
+            QTimer.singleShot(0, lambda: _finish(frame=frame))
+
+    def _poll_connected() -> None:
+        if state["complete"] or state["sent"]:
+            return
+        if getattr(window, "_connected_once", False):
+            _status("connected")
+            return
+        QTimer.singleShot(100, _poll_connected)
+
+    window.client.status.connect(_status)
+    window.client.message.connect(_message)
+    # Retain callables explicitly for PySide builds where weakly held Python
+    # slots can otherwise be collected before a delayed frame arrives.
+    window._release_smoke_probe = (_status, _message, _finish)
+    QTimer.singleShot(0, _poll_connected)
+    QTimer.singleShot(int(timeout_seconds * 1000), lambda: _finish(error="smoke_timeout"))
+
+
+def _install_release_offline_smoke(
+    window: MainWindow,
+    effective_profile: EffectiveDeploymentProfile,
+    *,
+    report_path: str,
+    timeout_seconds: float,
+) -> None:
+    """Observe a real failed connection and retry without changing profile."""
+
+    state = {"complete": False, "failure_seen": False, "retry_attempt": 0}
+    window._release_smoke_exit_code = 1
+
+    def _finish(error: Optional[str] = None) -> None:
+        if state["complete"]:
+            return
+        state["complete"] = True
+        checks = _runtime_profile_checks(window, effective_profile)
+        passed = (
+            error is None
+            and state["failure_seen"]
+            and state["retry_attempt"] >= 1
+            and all(checks.values())
+        )
+        report = effective_profile.redacted_report()
+        report.update(
+            {
+                "status": "passed" if passed else "failed",
+                "detail_code": (
+                    "offline_retry_observed"
+                    if passed
+                    else (error or "offline_retry_incomplete")
+                ),
+                "connection_failure_observed": state["failure_seen"],
+                "retry_attempt": state["retry_attempt"],
+                **checks,
+            }
+        )
+        window._release_smoke_exit_code = 0 if passed else 1
+        write_redacted_report(report_path, report)
+        window.close()
+        QApplication.instance().quit()
+
+    def _status(value: str) -> None:
+        if state["complete"]:
+            return
+        if value.startswith("closed:"):
+            state["failure_seen"] = True
+            return
+        if value.startswith("reconnecting:") and state["failure_seen"]:
+            try:
+                attempt = int(value.split(":", 1)[1])
+            except (IndexError, ValueError):
+                return
+            state["retry_attempt"] = max(state["retry_attempt"], attempt)
+            QTimer.singleShot(0, _finish)
+
+    window.client.status.connect(_status)
+    window._release_offline_smoke_probe = (_status, _finish)
+    QTimer.singleShot(
+        int(timeout_seconds * 1000), lambda: _finish(error="offline_retry_timeout")
+    )
+
+
+def _launch(
+    args,
+    settings=None,
+    effective_profile: Optional[EffectiveDeploymentProfile] = None,
+) -> "MainWindow":
     """Window-first startup: show the shell immediately, then resolve the
     first-run config prompt and the (potentially slow) OIDC sign-in AFTER first
     paint — auth runs on a worker thread and the token is adopted through the
     existing rebuild-with-new-token flow. An explicit --token/ASTRAL_TOKEN
     keeps the original synchronous path (it resolves instantly)."""
     settings = settings or QSettings("AstralDeep", "WindowsClient")
-    _resolve_config(args, settings=settings, prompt=None)
+    if effective_profile is None:
+        _resolve_config(args, settings=settings, prompt=None)
+    else:
+        args.url = effective_profile.profile.websocket_endpoint
+        args.authority = effective_profile.profile.authority
+        args.client_id = effective_profile.profile.client_id
+        args.bff = effective_profile.profile.auth_mode == "keycloak_bff"
+        args.allow_dev_token_fallback = False
     login_params = {
         "authority": args.authority,
         "client_id": args.client_id,
@@ -3265,14 +4465,25 @@ def _launch(args, settings=None) -> "MainWindow":
     }
     if args.token:
         token, session = resolve_auth(args)
-        win = MainWindow(args.url, token, session=session, login_params=login_params)
+        win = MainWindow(
+            args.url,
+            token,
+            session=session,
+            login_params=login_params,
+            deployment_profile=effective_profile,
+        )
         win.show()
         win.raise_()
         win.activateWindow()
         return win
 
     win = MainWindow(
-        args.url, "", session=None, login_params=login_params, connect=False
+        args.url,
+        "",
+        session=None,
+        login_params=login_params,
+        connect=False,
+        deployment_profile=effective_profile,
     )
     win.show()
     win.raise_()
@@ -3282,7 +4493,7 @@ def _launch(args, settings=None) -> "MainWindow":
     def _after_first_paint() -> None:
         """Deferred startup tail: first-run config dialog (if still needed),
         then the background sign-in."""
-        if not args.authority:
+        if not args.authority and effective_profile is None:
             _resolve_config(args, settings=settings, prompt=_prompt_config)
             win._login_params.update(
                 authority=args.authority,

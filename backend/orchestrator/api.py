@@ -18,8 +18,9 @@ import os
 import re
 import time
 import logging
-from datetime import date
-from typing import Any, Dict, List, Optional
+import uuid
+from datetime import UTC, date, datetime
+from typing import Any, Dict, List, Optional, Union
 
 import aiohttp
 import websockets as ws_client
@@ -54,6 +55,14 @@ from orchestrator.auth import (
     require_user_id_or_web_session,
 )
 from shared.feature_flags import flags
+from orchestrator.work_admission import (
+    AdmissionClass,
+    AdmissionConfigurationError,
+    OperationNotFoundError,
+    OperationOwner,
+    OwnerScope,
+    SafeOperationProjection,
+)
 
 logger = logging.getLogger("API")
 
@@ -71,6 +80,433 @@ def _get_orchestrator(request: Request):
     if orch is None:
         raise HTTPException(status_code=503, detail="Orchestrator not initialized")
     return orch
+
+
+async def _run_atomic_canvas_mutation(
+    orchestrator,
+    *,
+    chat_id: str,
+    user_id: str,
+    mutation,
+):
+    """Use the production publication boundary while keeping narrow test fakes usable."""
+
+    runner = getattr(
+        type(orchestrator), "run_detached_conversation_mutation", None
+    )
+    if runner is None:
+        # Endpoint unit tests intentionally use a minimal SimpleNamespace or
+        # MagicMock. Exercise the same durable repository boundary without
+        # requiring the entire socket/delivery surface on that fake.
+        from orchestrator.conversation_publication import (
+            ConversationPublicationStage,
+            activate_conversation_publication,
+            reset_conversation_publication,
+        )
+        from orchestrator.history import ConversationCommitRepository
+
+        repository = ConversationCommitRepository(orchestrator.history.db)
+        request_generation = str(uuid.uuid4())
+        layouts = await orchestrator.workspace.alive_layouts(chat_id, user_id)
+        staged = await asyncio.to_thread(
+            repository.stage_commit,
+            chat_id=chat_id,
+            owner_user_id=user_id,
+            request_generation=request_generation,
+        )
+        await asyncio.to_thread(
+            repository.prepare_canvas_stage,
+            commit_id=staged["commit_id"],
+            owner_user_id=user_id,
+        )
+        stage = ConversationPublicationStage(
+            history=orchestrator.history,
+            commit_id=staged["commit_id"],
+            chat_id=chat_id,
+            user_id=user_id,
+            base_render_revision=staged["base_render_revision"],
+            next_render_revision=staged["base_render_revision"] + 1,
+            layouts=layouts,
+        )
+        token = activate_conversation_publication(stage)
+        try:
+            result = await mutation()
+            if not stage.dirty:
+                raise RuntimeError(
+                    "conversation mutation completed without a state change"
+                )
+            canvas = await orchestrator.workspace.alive_components(
+                chat_id, user_id
+            )
+            staged_layouts = await orchestrator.workspace.alive_layouts(
+                chat_id, user_id
+            )
+            await asyncio.to_thread(
+                repository.publish_commit,
+                commit_id=stage.commit_id,
+                owner_user_id=user_id,
+                messages=None,
+                canvas_components=canvas,
+                canvas_layouts=staged_layouts,
+            )
+            stage.seal(committed=True)
+            if stage.snapshot_cause:
+                await orchestrator.workspace.asnapshot(
+                    chat_id, user_id, cause=stage.snapshot_cause
+                )
+            return result
+        finally:
+            if not stage.sealed:
+                await asyncio.to_thread(
+                    repository.abort_commit,
+                    commit_id=stage.commit_id,
+                    owner_user_id=user_id,
+                )
+                stage.seal(committed=False)
+            reset_conversation_publication(token)
+    return await runner(
+        orchestrator,
+        chat_id=chat_id,
+        user_id=user_id,
+        mutation=mutation,
+    )
+
+
+async def _workspace_identity_for_saved_row(orchestrator, **kwargs):
+    from orchestrator.orchestrator import Orchestrator
+
+    return await Orchestrator._workspace_identity_for_saved_row(
+        orchestrator, **kwargs
+    )
+
+
+async def _replace_workspace_components(orchestrator, **kwargs):
+    from orchestrator.orchestrator import Orchestrator
+
+    return await Orchestrator._replace_workspace_components(
+        orchestrator, **kwargs
+    )
+
+
+async def _refresh_saved_component_rows(
+    orchestrator,
+    chat_id: str,
+    rows: List[Dict[str, Any]],
+    ops: List[Dict[str, Any]],
+    user_id: str,
+) -> List[Dict[str, Any]]:
+    """Replace staged physical row ids with the authoritative published ids."""
+
+    refreshed = []
+    for row, op in zip(rows, ops):
+        current = await orchestrator.workspace.aget_by_component_id(
+            chat_id, user_id, op["component_id"]
+        )
+        if current is None:
+            raise HTTPException(
+                status_code=500, detail="Published component unavailable"
+            )
+        item = dict(row)
+        item["id"] = current["id"]
+        item["component_data"] = current["component_data"]
+        item["created_at"] = current.get("created_at") or item.get("created_at")
+        refreshed.append(item)
+    return refreshed
+
+
+# =============================================================================
+# Durable Operation Reconciliation Router (Feature 060 / T030)
+# =============================================================================
+
+
+class SafeOperationResponse(BaseModel):
+    """Payload-free owner-visible operation projection."""
+
+    operation_id: str
+    operation_kind: str
+    admission_class: str
+    owner_scope: str
+    chat_id: Optional[str]
+    parent_operation_id: Optional[str]
+    connection_generation: Optional[str]
+    request_generation: Optional[str]
+    state: str
+    phase_code: Optional[str]
+    terminal_code: Optional[str]
+    safe_summary: Optional[str]
+    retry_after_ms: Optional[int]
+    state_revision: int
+    accepted_at: str
+    queue_deadline_at: Optional[str]
+    started_at: Optional[str]
+    terminal_at: Optional[str]
+    updated_at: str
+    purge_after: Optional[str]
+
+
+class AcceptedOperationSubmissionResponse(BaseModel):
+    accepted: bool
+    operation: SafeOperationResponse
+
+
+class RefusedOperationSubmissionResponse(BaseModel):
+    accepted: bool
+    code: str
+    retryable: bool
+    retry_after_ms: Optional[int]
+
+
+OperationSubmissionResponse = Union[
+    AcceptedOperationSubmissionResponse,
+    RefusedOperationSubmissionResponse,
+]
+
+
+class RuntimeMetricResponse(BaseModel):
+    """One payload-free, low-cardinality runtime metric sample."""
+
+    name: str
+    value: Union[int, float]
+    labels: Dict[str, str]
+
+
+class RuntimeMetricsResponse(BaseModel):
+    metrics: List[RuntimeMetricResponse]
+
+
+operation_router = APIRouter(prefix="/api", tags=["Operations"])
+
+
+def _utc_json(value: datetime | None) -> str | None:
+    if value is None:
+        return None
+    if value.tzinfo is None:
+        raise ValueError("operation timestamps must be timezone-aware")
+    return value.astimezone(UTC).isoformat().replace("+00:00", "Z")
+
+
+def _safe_operation_json(operation: SafeOperationProjection) -> dict[str, Any]:
+    """Serialize exactly the reviewed public operation fields."""
+
+    return {
+        "operation_id": str(operation.operation_id),
+        "operation_kind": operation.operation_kind,
+        "admission_class": operation.admission_class.value,
+        "owner_scope": operation.owner_scope.value,
+        "chat_id": operation.chat_id,
+        "parent_operation_id": (
+            str(operation.parent_operation_id)
+            if operation.parent_operation_id is not None
+            else None
+        ),
+        "connection_generation": (
+            str(operation.connection_generation)
+            if operation.connection_generation is not None
+            else None
+        ),
+        "request_generation": (
+            str(operation.request_generation)
+            if operation.request_generation is not None
+            else None
+        ),
+        "state": operation.state.value,
+        "phase_code": operation.phase_code,
+        "terminal_code": operation.terminal_code,
+        "safe_summary": operation.safe_summary,
+        "retry_after_ms": operation.retry_after_ms,
+        "state_revision": operation.state_revision,
+        "accepted_at": _utc_json(operation.accepted_at),
+        "queue_deadline_at": _utc_json(operation.queue_deadline_at),
+        "started_at": _utc_json(operation.started_at),
+        "terminal_at": _utc_json(operation.terminal_at),
+        "updated_at": _utc_json(operation.updated_at),
+        "purge_after": _utc_json(operation.purge_after),
+    }
+
+
+def _authenticated_owner_partitions(user_id: str) -> tuple[OperationOwner, ...]:
+    """Partitions an authenticated user may reconcile through the REST API."""
+
+    return tuple(
+        OperationOwner(
+            owner_scope=scope,
+            owner_user_id=user_id,
+            connection_scope_id=None,
+        )
+        for scope in (OwnerScope.USER, OwnerScope.SCHEDULE)
+    )
+
+
+def _parse_reconciliation_id(value: str, *, detail: str) -> uuid.UUID:
+    try:
+        return uuid.UUID(value)
+    except (AttributeError, TypeError, ValueError) as exc:
+        raise HTTPException(status_code=404, detail=detail) from exc
+
+
+def _query_visible_operation(coordinator, user_id: str, operation_id: uuid.UUID):
+    for owner in _authenticated_owner_partitions(user_id):
+        try:
+            return coordinator.query_operation(
+                owner=owner,
+                operation_id=operation_id,
+            )
+        except OperationNotFoundError:
+            continue
+    raise OperationNotFoundError("operation not found")
+
+
+def _query_visible_submission(coordinator, user_id: str, submission_id: uuid.UUID):
+    for owner in _authenticated_owner_partitions(user_id):
+        try:
+            return coordinator.reconcile_submission(
+                owner=owner,
+                submission_id=submission_id,
+            )
+        except OperationNotFoundError:
+            continue
+    raise OperationNotFoundError("operation submission not found")
+
+
+_ADMISSION_OPERATION_KINDS = {
+    AdmissionClass.GLOBAL: "global_capacity",
+    AdmissionClass.INTERACTIVE: "connection_frame",
+    AdmissionClass.BACKGROUND: "background_chat",
+    AdmissionClass.SCHEDULED: "scheduled_occurrence",
+    AdmissionClass.MAINTENANCE: "maintenance",
+    AdmissionClass.SYSTEM: "system",
+}
+
+
+def _refresh_runtime_admission_metrics(orchestrator) -> None:
+    """Refresh configured admission gauges without blocking the event loop."""
+
+    coordinator = orchestrator.work_admission
+    observability = orchestrator.runtime_observability
+    for admission_class, operation_kind in _ADMISSION_OPERATION_KINDS.items():
+        try:
+            class_status = coordinator.inspect_admission_class(admission_class)
+        except AdmissionConfigurationError:
+            # Tests and intentionally reduced deployments may configure only
+            # the classes they execute. An absent class is not reported as a
+            # misleading zero-capacity class.
+            continue
+        observability.observe_admission(
+            class_status,
+            operation_kind=operation_kind,
+        )
+
+
+@operation_router.get(
+    "/operations/{operation_id}",
+    response_model=SafeOperationResponse,
+    summary="Reconcile an accepted operation",
+    description=(
+        "Returns the authenticated user's retained, payload-free user- or "
+        "schedule-owned operation projection. Unknown, expired, connection-"
+        "owned, and non-owner-visible identities share the same non-disclosing "
+        "not-found response; UUID possession never grants access."
+    ),
+    responses={404: {"model": ErrorResponse}},
+)
+async def get_operation(
+    request: Request,
+    operation_id: str,
+    response: Response,
+    user_id: str = Depends(require_user_id),
+):
+    coordinator = _get_orchestrator(request).work_admission
+    parsed = _parse_reconciliation_id(operation_id, detail="Operation not found")
+    try:
+        operation = await asyncio.to_thread(
+            _query_visible_operation,
+            coordinator,
+            user_id,
+            parsed,
+        )
+    except OperationNotFoundError as exc:
+        raise HTTPException(status_code=404, detail="Operation not found") from exc
+    response.headers["Cache-Control"] = "no-store"
+    return _safe_operation_json(operation)
+
+
+@operation_router.get(
+    "/operation-submissions/{submission_id}",
+    response_model=OperationSubmissionResponse,
+    summary="Reconcile an operation submission",
+    description=(
+        "Returns the authenticated user's original retained user- or schedule-"
+        "owned acceptance or safe admission refusal without exposing the "
+        "submitted payload or digest. Unknown, expired, connection-owned, and "
+        "non-owner-visible identities are not distinguished."
+    ),
+    responses={404: {"model": ErrorResponse}},
+)
+async def get_operation_submission(
+    request: Request,
+    submission_id: str,
+    response: Response,
+    user_id: str = Depends(require_user_id),
+):
+    coordinator = _get_orchestrator(request).work_admission
+    parsed = _parse_reconciliation_id(
+        submission_id,
+        detail="Operation submission not found",
+    )
+    try:
+        result = await asyncio.to_thread(
+            _query_visible_submission,
+            coordinator,
+            user_id,
+            parsed,
+        )
+    except OperationNotFoundError as exc:
+        raise HTTPException(
+            status_code=404,
+            detail="Operation submission not found",
+        ) from exc
+
+    response.headers["Cache-Control"] = "no-store"
+    if result.accepted:
+        return {
+            "accepted": True,
+            "operation": _safe_operation_json(result.operation),
+        }
+    return {
+        "accepted": False,
+        "code": result.code,
+        "retryable": result.retryable,
+        "retry_after_ms": result.retry_after_ms,
+    }
+
+
+@operation_router.get(
+    "/runtime-reliability/metrics",
+    response_model=RuntimeMetricsResponse,
+    summary="Inspect runtime reliability metrics",
+    description=(
+        "Returns the authenticated operator a payload-free snapshot of "
+        "effective admission gauges and bounded reliability counters."
+    ),
+)
+async def get_runtime_reliability_metrics(
+    request: Request,
+    response: Response,
+    _user_id: str = Depends(require_user_id),
+):
+    orchestrator = _get_orchestrator(request)
+    await asyncio.to_thread(_refresh_runtime_admission_metrics, orchestrator)
+    response.headers["Cache-Control"] = "no-store"
+    return {
+        "metrics": [
+            {
+                "name": sample.name,
+                "value": sample.value,
+                "labels": dict(sample.labels),
+            }
+            for sample in orchestrator.runtime_observability.snapshot()
+        ]
+    }
 
 
 # =============================================================================
@@ -292,10 +728,6 @@ async def send_message(
     if not await asyncio.to_thread(orch.history.get_chat, chat_id, user_id=user_id):
         await asyncio.to_thread(orch.history.create_chat, chat_id, user_id=user_id)
 
-    # Save the user message to history
-    msg_to_save = body.display_message if body.display_message else body.message
-    await asyncio.to_thread(orch.history.add_message, chat_id, "user", msg_to_save, user_id=user_id)
-
     # Try to dispatch the message for processing via the orchestrator.
     # If a WebSocket client is connected for this user, results stream to them.
     # If not, results are still saved to history.
@@ -388,29 +820,45 @@ async def save_component(
     # dict payloads through the workspace so the row gets a stable identity
     # and every connected client sees the mutation (ui_upsert), mirroring the
     # WS save_component reconciliation.
-    component_id = None
-    if isinstance(body.component_data, dict):
-        ops = await orch.workspace.aupsert(chat_id, user_id, [body.component_data])
-        if ops:
-            await orch.send_ui_upsert(None, chat_id, user_id, ops)
-            row = await orch.workspace.aget_by_component_id(
-                chat_id, user_id, ops[0]["component_id"]
-            )
-            component_id = (row or {}).get("id")
-    if component_id is None:
-        component_id = await asyncio.to_thread(
-            orch.history.save_component,
-            chat_id,
-            body.component_data,
-            body.component_type,
-            body.title,
-            user_id=user_id,
+    if not isinstance(body.component_data, dict):
+        raise HTTPException(
+            status_code=400,
+            detail="component_data must be a component object",
         )
+
+    async def _save():
+        ops = await orch.workspace.aupsert(
+            chat_id, user_id, [dict(body.component_data)]
+        )
+        if not ops:
+            raise RuntimeError("component save produced no workspace mutation")
+        await orch.workspace.asnapshot(chat_id, user_id, cause="save")
+        return ops[0]["component_id"]
+
+    semantic_id = await _run_atomic_canvas_mutation(
+        orch,
+        chat_id=chat_id,
+        user_id=user_id,
+        mutation=_save,
+    )
+    row = await orch.workspace.aget_by_component_id(
+        chat_id, user_id, semantic_id
+    )
+    if row is None:
+        raise HTTPException(status_code=500, detail="Saved component unavailable")
+    component_id = row["id"]
+    await orch.send_ui_upsert(
+        None,
+        chat_id,
+        user_id,
+        [{"op": "upsert", "component_id": semantic_id,
+          "component": row["component_data"], "created": True}],
+    )
     return ComponentSaveResponse(
         component=SavedComponent(
             id=component_id,
             chat_id=chat_id,
-            component_data=body.component_data,
+            component_data=row["component_data"],
             component_type=body.component_type,
             title=body.title or body.component_type.replace("_", " ").title(),
             created_at=int(time.time() * 1000),
@@ -436,25 +884,42 @@ async def delete_component(
     row = await asyncio.to_thread(orch.history.get_component_by_id, component_id, user_id=user_id)
     ws_component_id = None
     chat_id_for_row = row.get("chat_id") if row else None
-    if row and isinstance(row.get("component_data"), dict):
-        ws_component_id = row["component_data"].get("component_id")
-
-    success = await asyncio.to_thread(orch.history.delete_component, component_id, user_id=user_id)
-    if not success:
+    if not row or not chat_id_for_row:
         raise HTTPException(status_code=404, detail="Component not found")
-    if ws_component_id and chat_id_for_row:
-        await orch.send_ui_upsert(None, chat_id_for_row, user_id, [
-            {"op": "remove", "component_id": ws_component_id}
-        ])
-        try:
-            await orch.workspace.asnapshot(chat_id_for_row, user_id, cause="remove")
-            from audit.hooks import record_workspace_event
-            asyncio.create_task(record_workspace_event(
-                user_id=user_id, action="component_removed",
-                chat_id=chat_id_for_row, component_id=ws_component_id,
-            ))
-        except Exception:
-            logger.debug("workspace remove bookkeeping failed (REST)", exc_info=True)
+    async def _delete():
+        identity = await _workspace_identity_for_saved_row(
+            orch,
+            chat_id=chat_id_for_row,
+            user_id=user_id,
+            row=row,
+            supplied_id=component_id,
+        )
+        if not identity or not await orch.workspace.aremove(
+            chat_id_for_row, user_id, identity
+        ):
+            raise HTTPException(status_code=404, detail="Component not found")
+        await orch.workspace.asnapshot(
+            chat_id_for_row, user_id, cause="remove"
+        )
+        return identity
+
+    ws_component_id = await _run_atomic_canvas_mutation(
+        orch,
+        chat_id=chat_id_for_row,
+        user_id=user_id,
+        mutation=_delete,
+    )
+    await orch.send_ui_upsert(None, chat_id_for_row, user_id, [
+        {"op": "remove", "component_id": ws_component_id}
+    ])
+    try:
+        from audit.hooks import record_workspace_event
+        asyncio.create_task(record_workspace_event(
+            user_id=user_id, action="component_removed",
+            chat_id=chat_id_for_row, component_id=ws_component_id,
+        ))
+    except Exception:
+        logger.debug("workspace remove audit failed (REST)", exc_info=True)
     return DeleteResponse(message=f"Component {component_id} deleted")
 
 
@@ -477,22 +942,63 @@ async def combine_components(
     if not source or not target:
         raise HTTPException(status_code=404, detail="One or both components not found")
 
-    result = await orch._combine_components_llm([source, target], mode="combine")
-
-    if result.get("error"):
-        raise HTTPException(status_code=400, detail=result["error"])
-
     chat_id = source["chat_id"]
-    new_components = await asyncio.to_thread(
-        orch.history.replace_components,
-        [body.source_id, body.target_id],
-        result["components"],
-        chat_id,
-        user_id=user_id,
+    if target["chat_id"] != chat_id:
+        raise HTTPException(status_code=400, detail="Components belong to different chats")
+
+    async def _combine():
+        fresh = []
+        for original, supplied_id in (
+            (source, body.source_id),
+            (target, body.target_id),
+        ):
+            identity = await _workspace_identity_for_saved_row(
+                orch,
+                chat_id=chat_id,
+                user_id=user_id,
+                row=original,
+                supplied_id=supplied_id,
+            )
+            current = (
+                await orch.workspace.aget_by_component_id(
+                    chat_id, user_id, identity
+                )
+                if identity
+                else None
+            )
+            if current is None:
+                raise HTTPException(status_code=404, detail="Component not found")
+            fresh.append(current)
+        result = await orch._combine_components_llm(fresh, mode="combine")
+        if result.get("error"):
+            raise HTTPException(status_code=400, detail=result["error"])
+        return await _replace_workspace_components(
+            orch,
+            chat_id=chat_id,
+            user_id=user_id,
+            source_rows=fresh,
+            replacements=result["components"],
+            cause="combine",
+        )
+
+    removed_semantic, new_components, ops = (
+        await _run_atomic_canvas_mutation(
+            orch,
+            chat_id=chat_id,
+            user_id=user_id,
+            mutation=_combine,
+        )
     )
-    # Feature 028 (D18/FR-026): stamp workspace identities on the fresh rows,
-    # snapshot, and push the new canvas to the user's connected clients.
-    await orch._reconcile_legacy_replacement(None, chat_id, user_id, cause="combine")
+    new_components = await _refresh_saved_component_rows(
+        orch, chat_id, new_components, ops, user_id
+    )
+    await orch.send_ui_upsert(
+        None,
+        chat_id,
+        user_id,
+        ([{"op": "remove", "component_id": cid} for cid in removed_semantic]
+         + ops),
+    )
     return ComponentCombineResponse(
         removed_ids=[body.source_id, body.target_id],
         new_components=[SavedComponent(**c) for c in new_components],
@@ -512,30 +1018,70 @@ async def condense_components(
     user_id: str = Depends(require_user_id),
 ):
     orch = _get_orchestrator(request)
-    components = []
+    component_pairs = []
     for cid in body.component_ids:
         comp = await asyncio.to_thread(orch.history.get_component_by_id, cid, user_id=user_id)
         if comp:
-            components.append(comp)
+            component_pairs.append((cid, comp))
 
-    if len(components) < 2:
+    if len(component_pairs) < 2:
         raise HTTPException(status_code=400, detail="Not enough valid components found (need at least 2)")
 
-    result = await orch._combine_components_llm(components, mode="condense")
-
-    if result.get("error"):
-        raise HTTPException(status_code=400, detail=result["error"])
-
+    components = [component for _cid, component in component_pairs]
     chat_id = components[0]["chat_id"]
-    new_components = await asyncio.to_thread(
-        orch.history.replace_components,
-        body.component_ids,
-        result["components"],
-        chat_id,
-        user_id=user_id,
+    if any(component["chat_id"] != chat_id for component in components):
+        raise HTTPException(status_code=400, detail="Components belong to different chats")
+
+    async def _condense():
+        fresh = []
+        for supplied_id, original in component_pairs:
+            identity = await _workspace_identity_for_saved_row(
+                orch,
+                chat_id=chat_id,
+                user_id=user_id,
+                row=original,
+                supplied_id=supplied_id,
+            )
+            current = (
+                await orch.workspace.aget_by_component_id(
+                    chat_id, user_id, identity
+                )
+                if identity
+                else None
+            )
+            if current is None:
+                raise HTTPException(status_code=404, detail="Component not found")
+            fresh.append(current)
+        result = await orch._combine_components_llm(fresh, mode="condense")
+        if result.get("error"):
+            raise HTTPException(status_code=400, detail=result["error"])
+        return await _replace_workspace_components(
+            orch,
+            chat_id=chat_id,
+            user_id=user_id,
+            source_rows=fresh,
+            replacements=result["components"],
+            cause="condense",
+        )
+
+    removed_semantic, new_components, ops = (
+        await _run_atomic_canvas_mutation(
+            orch,
+            chat_id=chat_id,
+            user_id=user_id,
+            mutation=_condense,
+        )
     )
-    # Feature 028 (D18/FR-026): same reconciliation as the WS condense path.
-    await orch._reconcile_legacy_replacement(None, chat_id, user_id, cause="condense")
+    new_components = await _refresh_saved_component_rows(
+        orch, chat_id, new_components, ops, user_id
+    )
+    await orch.send_ui_upsert(
+        None,
+        chat_id,
+        user_id,
+        ([{"op": "remove", "component_id": cid} for cid in removed_semantic]
+         + ops),
+    )
     return ComponentCombineResponse(
         removed_ids=body.component_ids,
         new_components=[SavedComponent(**c) for c in new_components],
@@ -1570,6 +2116,7 @@ async def get_dashboard(
     return DashboardResponse(
         agents=agents,
         total_tools=total_tools,
+        capabilities=orch.get_personal_agent_capabilities(),
     )
 
 

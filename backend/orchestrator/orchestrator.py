@@ -10,14 +10,19 @@ Responsibilities:
 """
 import asyncio
 import contextvars
+import hashlib
 import json
 import time
 import os
 import sys
 import logging
 import re
+from contextlib import asynccontextmanager
+from collections import deque
+from dataclasses import dataclass, field
+from datetime import UTC, datetime, timedelta
 from enum import Enum
-from typing import Any, Dict, List, NamedTuple, Optional, Tuple
+from typing import TYPE_CHECKING, Any, Dict, List, NamedTuple, Optional, Tuple
 
 import websockets
 import websockets.exceptions
@@ -30,7 +35,12 @@ from jose import jwt as jose_jwt
 from dotenv import load_dotenv
 
 sys.path.insert(0, os.path.abspath(os.path.join(os.path.dirname(__file__), '..')))
-from orchestrator.history import HistoryManager
+from orchestrator.history import (
+    ConversationCommitRepository,
+    ConversationNotFound,
+    HistoryManager,
+    augment_conversation_snapshot_for_target,
+)
 from orchestrator.tool_permissions import ToolPermissionManager
 from orchestrator.credential_manager import CredentialManager
 from orchestrator.delegation import DelegationService
@@ -42,13 +52,33 @@ from orchestrator import model_router
 from orchestrator import viewport
 from orchestrator.hooks import HookManager, HookEvent, HookContext
 from orchestrator.task_state import TaskManager, TaskState
+from orchestrator.work_admission import (
+    AdmissionClass,
+    ExecutionFence,
+    InMemoryWorkAdmissionRepository,
+    OperationOwner,
+    OperationRecord,
+    OperationRequest,
+    OperationState,
+    OwnerScope,
+    SafeOperationProjection,
+    StaleExecutionFenceError,
+    WorkAdmissionCoordinator,
+)
+from orchestrator.runtime_observability import RuntimeObservability
 from orchestrator.concurrency_cap import ConcurrencyCap
 
 import uuid as _uuid
 
+if TYPE_CHECKING:
+    from scheduler.store import ScheduledAttempt, ScheduledJobStore
+
 from shared.protocol import (
     Message, MCPRequest, MCPResponse, UIEvent, UIRender, UIUpdate,
     RegisterAgent, RegisterUI, AgentCard, ToolProgress,
+    AgentHostRegistration, AgentHostRegistered, CandidateCapabilityMap,
+    AGENT_LIFECYCLE_REASON_CODES, ProtocolValidationError, RuntimeFence,
+    ConversationCommitReady,
     ToolStreamData, ToolStreamEnd, ToolStreamCancel,
     AgentHopRequest, AgentHopResponse,
     validate_streaming_metadata,
@@ -65,6 +95,145 @@ from orchestrator.stream_manager import StreamManager, markdown_safe_prefix_len
 load_dotenv(override=False)
 
 PORT = int(os.getenv("ORCHESTRATOR_PORT", 8001))
+
+# Feature 060 / T025: connection-runtime policy.  These are module constants so
+# operators and the contract suite can inspect the exact production defaults.
+REGISTRATION_TIMEOUT_SECONDS = 5.0
+CONNECTION_DRAIN_TIMEOUT_SECONDS = 5.0
+REGISTRATION_QUEUE_LIMIT = 16
+CONNECTION_INGRESS_LIMIT = 4096
+CONNECTION_LEASE_RENEW_SECONDS = 5.0
+# The status contract requires the current phase to be visible once an
+# operation has remained active for one second.  The client-local
+# ``submitting`` projection covers the pre-admission interval; this timer owns
+# the first durable server phase.
+OPERATION_PROGRESS_PHASE_SECONDS = 1.0
+_CONNECTION_CLAIM_POLL_SECONDS = 0.25
+LLM_CREDENTIAL_ATTEMPT_TIMEOUT_SECONDS = 10.0
+PERSONAL_AGENT_STARTUP_TIMEOUT_SECONDS = 5.0
+PERSONAL_AGENT_HEARTBEAT_TIMEOUT_SECONDS = 5.0
+PERSONAL_AGENT_WATCHDOG_INTERVAL_SECONDS = 1.0
+_PERSONAL_AGENT_HOST_FRAME_TYPES = frozenset(
+    {
+        "agent_host_inventory",
+        "agent_runtime_state",
+        "agent_runtime_register",
+        "agent_runtime_heartbeat",
+        "agent_runtime_exit",
+    }
+)
+_LLM_CREDENTIAL_SAVE_ACTIONS = frozenset(
+    {"chrome_llm_save", "llm_config_set"}
+)
+
+_READ_ONLY_UI_ACTIONS = frozenset(
+    {
+        "discover_agents",
+        "get_agent_permissions",
+        "get_dashboard",
+        "get_history",
+        "get_saved_components",
+        "stream_list",
+    }
+)
+_CONVERSATION_MUTATION_ACTIONS = frozenset(
+    {
+        "save_component",
+        "delete_saved_component",
+        "combine_components",
+        "condense_components",
+        "component_action",
+        "component_refine",
+        "component_restore",
+        "table_paginate",
+    }
+)
+_CONNECTION_IDENTITY_FIELDS = frozenset(
+    {
+        "agent_id",
+        "async_mode",
+        "attachment_id",
+        "chat_id",
+        "component_id",
+        "limit",
+        "offset",
+        "page",
+        "probe_id",
+        "schedule_id",
+        "stream_id",
+        "task_id",
+    }
+)
+
+# The admission wrapper and the application handler execute in the same
+# context.  This lets the existing UI router stay wire-compatible while the
+# normal synchronous-chat path reuses the already-owned operation/fence.
+_CONNECTION_OPERATION_CONTEXT: contextvars.ContextVar[dict[str, Any] | None] = (
+    contextvars.ContextVar("connection_operation_context", default=None)
+)
+_WORKSPACE_MUTATION_LOCKS: contextvars.ContextVar[frozenset[str]] = (
+    contextvars.ContextVar("workspace_mutation_locks", default=frozenset())
+)
+
+
+@dataclass
+class _ConnectionIngressFrame:
+    """One parsed, post-registration frame awaiting durable admission."""
+
+    raw: str
+    parsed: dict[str, Any]
+    action: str
+    surface: str | None
+    chat_id: str | None
+    submission_id: _uuid.UUID
+    request_generation: _uuid.UUID
+    normalized_digest: str
+    read_only: bool
+    operation_kind: str
+    deadline_at_monotonic: float | None
+    deadline_at_utc: datetime | None
+
+
+@dataclass
+class _ConnectionOperation:
+    """Connection-local execution metadata for one accepted operation."""
+
+    frame: _ConnectionIngressFrame
+    owner: OperationOwner
+    operation_id: _uuid.UUID
+    fence: Any | None = None
+    task: asyncio.Task[Any] | None = None
+    predecessors: tuple[asyncio.Future[None], ...] = ()
+    lane_complete: asyncio.Future[None] | None = None
+    lease_lost: bool = False
+    auth_principal: str | None = None
+    committed_operation: OperationRecord | None = None
+    subscribers: dict[int, tuple[Any, _ConnectionIngressFrame]] = field(
+        default_factory=dict
+    )
+
+
+@dataclass
+class ConnectionContext:
+    """Finite, tracked lifetime scope for one accepted UI socket."""
+
+    websocket: Any
+    connection_scope_id: _uuid.UUID
+    registration_deadline: float
+    preregistration: deque[str] = field(default_factory=deque)
+    ingress: deque[_ConnectionIngressFrame] = field(default_factory=deque)
+    tracked_tasks: set[asyncio.Task[Any]] = field(default_factory=set)
+    operation_tasks: set[asyncio.Task[Any]] = field(default_factory=set)
+    operations: dict[_uuid.UUID, _ConnectionOperation] = field(default_factory=dict)
+    submission_digests: dict[_uuid.UUID, str] = field(default_factory=dict)
+    terminal_emitted: set[_uuid.UUID] = field(default_factory=set)
+    connection_generation: _uuid.UUID | None = None
+    mutation_tail: asyncio.Future[None] | None = None
+    pending_reads: set[asyncio.Future[None]] = field(default_factory=set)
+    admission_task: asyncio.Task[Any] | None = None
+    claim_lock: asyncio.Lock = field(default_factory=asyncio.Lock)
+    registered: bool = False
+    closing: bool = False
 
 debug_mode = os.getenv("DEBUG", "false").lower() == "true"
 log_level = logging.INFO if debug_mode else logging.WARNING
@@ -724,6 +893,18 @@ class Orchestrator:
         self.cancelled_sessions: Dict[str, bool] = {}  # websocket id -> cancelled flag
         self._chat_locks: Dict[int, asyncio.Lock] = {}  # per-websocket lock for chat serialization
         self._registered_events: Dict[int, asyncio.Event] = {}  # gate non-register messages until auth completes
+        # Feature 060: every accepted UI socket owns one finite connection
+        # scope.  The capacity signal is loop-local and lazily created.
+        self._connection_contexts: Dict[int, ConnectionContext] = {}
+        # Reconnectable USER-owned operations outlive any one socket.  This
+        # process-local registry is a single-flight execution reservation and
+        # a strong task reference; durable reconciliation remains PostgreSQL.
+        self._reconnectable_operations: Dict[
+            _uuid.UUID, _ConnectionOperation
+        ] = {}
+        self._reconnectable_operation_tasks: set[asyncio.Task[Any]] = set()
+        self._interactive_capacity_event: asyncio.Event | None = None
+        self._interactive_capacity_revision = 0
 
         # Live streaming subscriptions (existing POLLING path — kept for tools
         # that declare streaming_kind == "poll")
@@ -743,6 +924,10 @@ class Orchestrator:
         # active chat — pausing/resuming one tab must not affect others).
         # Keyed by id(websocket).
         self._ws_active_chat: Dict[int, str] = {}
+        # Feature 060: the exact committed/transient generation currently
+        # selected by each socket. Values are server-bound only after owner
+        # validation (hydration) or a fenced turn stage (commit).
+        self._conversation_scopes: Dict[int, Dict[str, Any]] = {}
 
         # Feature 028 — per-socket read-only timeline mode (mutating
         # component actions are refused server-side while set) and per-chat
@@ -831,11 +1016,81 @@ class Orchestrator:
         data_dir = os.path.join(backend_dir, 'data')
         self.history = HistoryManager(data_dir=data_dir)
 
+        # Feature 060: one PostgreSQL operation/admission authority shared by
+        # every compatibility manager.  The migration has already established
+        # all six class rows; load their effective persisted values so operator
+        # tuning is preserved across restart instead of reapplying defaults.
+        operation_retention_seconds = int(
+            os.getenv("OPERATION_RETENTION_SECONDS", "86400")
+        )
+        if operation_retention_seconds <= 0:
+            raise ValueError("OPERATION_RETENTION_SECONDS must be positive")
+        self.work_admission = WorkAdmissionCoordinator.from_database(
+            database=self.history.db,
+            operation_retention=timedelta(seconds=operation_retention_seconds),
+        )
+        # Feature 060: PostgreSQL is the sole authority for personal-agent
+        # host selection, immutable revisions, runtime generations, and calls.
+        # The process-local maps below are wake-up/routing projections only;
+        # every transition validates the durable fence before using them.
+        from orchestrator.agent_generator import (
+            BYO_RUNTIME_CONTRACT_VERSION,
+            BYO_RUNTIME_LOCK_SHA256,
+        )
+        from orchestrator.agent_lifecycle import PostgresPersonalAgentRevisionStore
+        from orchestrator.artifact_publication import ImmutableAgentArtifactStore
+        from orchestrator.user_agents import (
+            PersonalAgentRuntimeRepository,
+            RuntimeCompatibilityPolicy,
+        )
+
+        personal_agent_policy = RuntimeCompatibilityPolicy(
+            runtime_contract_version=BYO_RUNTIME_CONTRACT_VERSION,
+            runtime_lock_sha256=BYO_RUNTIME_LOCK_SHA256,
+        )
+        self.personal_agent_runtime = PersonalAgentRuntimeRepository(
+            self.history.db,
+            compatibility_policy=personal_agent_policy,
+            operation_repository=self.work_admission.repository,
+            operation_retention=timedelta(seconds=operation_retention_seconds),
+        )
+        self.personal_agent_revisions = PostgresPersonalAgentRevisionStore(
+            self.personal_agent_runtime
+        )
+        self.personal_agent_artifacts = ImmutableAgentArtifactStore()
+        self.personal_agent_capabilities = CandidateCapabilityMap()
+        self._personal_agent_host_sessions: Dict[int, Any] = {}
+        self._personal_agent_session_sockets: Dict[str, Any] = {}
+        self._personal_agent_ready_waiters: Dict[str, asyncio.Future[str]] = {}
+        self._personal_agent_request_waiters: Dict[str, asyncio.Future[Any]] = {}
+        self._personal_agent_runtime_sockets: Dict[str, Any] = {}
+        self._personal_agent_candidate_cards: Dict[str, AgentCard] = {}
+        self._personal_agent_activation_locks: Dict[
+            tuple[str, str, str], asyncio.Lock
+        ] = {}
+        self._personal_agent_watchdog_task: asyncio.Task[Any] | None = None
+        self.runtime_observability = RuntimeObservability(
+            retention_seconds=operation_retention_seconds,
+            deployment_instance=os.getenv(
+                "RUNTIME_METRICS_INSTANCE",
+                "astraldeep",
+            ),
+        )
+        self.task_manager = TaskManager(self.work_admission)
+        self.conversation_commits = ConversationCommitRepository(
+            self.history.db,
+            operation_coordinator=self.work_admission,
+        )
+
         # 055 bg-continuity: durable task records + a completion fan that
         # reaches every socket of the user (the originator may be gone). The
         # manager itself is constructed above, before the DB exists.
         self.async_task_manager.bind(
-            db=self.history.db, on_complete=self._fan_task_completed)
+            coordinator=self.work_admission,
+            db=self.history.db,
+            on_complete=self._fan_task_completed,
+            observability=self.runtime_observability,
+        )
 
         # Feature 054: persisted per-user + system LLM configuration store
         # (user_llm_config / system_llm_config tables; Fernet under
@@ -930,12 +1185,11 @@ class Orchestrator:
         global _ORCH_INSTANCE
         _ORCH_INSTANCE = self
 
-        # Task State Machine — tracks Re-Act loop execution state
-        self.task_manager = TaskManager()
-
         # Agent Lifecycle Manager — handles user-created draft agents
         from orchestrator.agent_lifecycle import AgentLifecycleManager
         self.lifecycle_manager = AgentLifecycleManager(db=self.history.db, orchestrator=self)
+        self.lifecycle_manager.personal_agent_runtime = self.personal_agent_runtime
+        self.lifecycle_manager.personal_agent_revisions = self.personal_agent_revisions
 
         # Knowledge Synthesis ("Dreamer") — learns from tool interactions
         if flags.is_enabled("knowledge_synthesis"):
@@ -1060,6 +1314,1346 @@ class Orchestrator:
         return [ui for ui in list(self.ui_clients)
                 if self.is_agent_host_socket(ui) and self._get_user_id(ui) == owner_sub]
 
+    async def _refuse_personal_agent_host(
+        self,
+        websocket: Any,
+        *,
+        code: str,
+        details: Dict[str, Any],
+    ) -> None:
+        """Send the exact non-disclosing v2 host-registration refusal."""
+
+        await self._safe_send(
+            websocket,
+            json.dumps(
+                {
+                    "type": "agent_host_registration_refused",
+                    "code": code,
+                    "retryable": False,
+                    "details": details,
+                    "refused_at": self._rfc3339(),
+                },
+                separators=(",", ":"),
+            ),
+        )
+
+    async def _register_personal_agent_host(
+        self,
+        websocket: Any,
+        *,
+        owner_user_id: str,
+        registration: AgentHostRegistration,
+    ) -> Any | None:
+        """Durably validate and acknowledge one structured desktop host.
+
+        Authentication and the finite connection scope are already established
+        by the caller. No socket becomes delivery-eligible until the repository
+        commits and this method emits the server-owned session acknowledgement.
+        """
+
+        from orchestrator.user_agents import HostRegistrationRefused
+
+        context = (getattr(self, "_connection_contexts", None) or {}).get(
+            id(websocket)
+        )
+        if context is None:
+            # Direct unit seams predate the finite connection runtime. Product
+            # WebSockets always have a context; a UUID4 test seam still exercises
+            # the exact durable host contract without trusting a client value.
+            connection_scope_id = str(_uuid.uuid4())
+        else:
+            connection_scope_id = str(context.connection_scope_id)
+        try:
+            record = await asyncio.to_thread(
+                self.personal_agent_runtime.register_host_session,
+                owner_user_id=owner_user_id,
+                connection_scope_id=connection_scope_id,
+                host_id=registration.host_id,
+                platform=registration.platform,
+                client_version=registration.client_version,
+                supported_runtime_contract_versions=(
+                    registration.supported_runtime_contract_versions
+                ),
+                runtime_lock_sha256=registration.runtime_lock_sha256,
+            )
+        except HostRegistrationRefused as exc:
+            await self._refuse_personal_agent_host(
+                websocket,
+                code=exc.code,
+                details=dict(exc.details),
+            )
+            return None
+
+        # A reconnect of the same stable installation supersedes its prior
+        # server session. Remove only the stale projection; the repository has
+        # already fenced and settled the old session transactionally.
+        sessions = getattr(self, "_personal_agent_host_sessions", None)
+        session_sockets = getattr(self, "_personal_agent_session_sockets", None)
+        if sessions is None:
+            sessions = self._personal_agent_host_sessions = {}
+        if session_sockets is None:
+            session_sockets = self._personal_agent_session_sockets = {}
+        for socket_id, prior in list(sessions.items()):
+            if (
+                prior.owner_user_id == owner_user_id
+                and prior.host_id == record.host_id
+                and prior.host_session_id != record.host_session_id
+            ):
+                sessions.pop(socket_id, None)
+                session_sockets.pop(prior.host_session_id, None)
+        sessions[id(websocket)] = record
+        session_sockets[record.host_session_id] = websocket
+        self._agent_host_sockets[id(websocket)] = record.host_session_id
+
+        acknowledgement = AgentHostRegistered(
+            host_id=record.host_id,
+            host_session_id=record.host_session_id,
+            inventory_required=True,
+            accepted_at=self._rfc3339(record.accepted_at),
+        )
+        await self._safe_send(websocket, acknowledgement.to_json())
+        return record
+
+    @staticmethod
+    def _strict_uuid4(value: Any, field_name: str) -> str:
+        try:
+            parsed = _uuid.UUID(str(value))
+        except (TypeError, ValueError, AttributeError) as exc:
+            raise ProtocolValidationError(f"{field_name} must be UUID4") from exc
+        if (
+            not isinstance(value, str)
+            or parsed.version != 4
+            or parsed.variant != _uuid.RFC_4122
+            or str(parsed) != value
+        ):
+            raise ProtocolValidationError(f"{field_name} must be canonical UUID4")
+        return value
+
+    @staticmethod
+    def _validate_host_timestamp(value: Any, field_name: str) -> None:
+        if not isinstance(value, str) or not value.endswith("Z"):
+            raise ProtocolValidationError(f"{field_name} must be UTC")
+        try:
+            parsed = datetime.fromisoformat(value[:-1] + "+00:00")
+        except ValueError as exc:
+            raise ProtocolValidationError(f"{field_name} must be UTC") from exc
+        if parsed.utcoffset() != timedelta(0):
+            raise ProtocolValidationError(f"{field_name} must be UTC")
+
+    def _bound_personal_agent_host(self, websocket: Any) -> Any:
+        record = (getattr(self, "_personal_agent_host_sessions", None) or {}).get(
+            id(websocket)
+        )
+        if record is None:
+            raise ProtocolValidationError("socket has no acknowledged host session")
+        bound_socket = (
+            getattr(self, "_personal_agent_session_sockets", None) or {}
+        ).get(record.host_session_id)
+        if bound_socket is not websocket:
+            raise ProtocolValidationError("host session belongs to another socket")
+        return record
+
+    @classmethod
+    def _invalid_host_registration_field(cls, value: Any) -> str:
+        expected = {
+            "host_id",
+            "supported_runtime_contract_versions",
+            "runtime_lock_sha256",
+            "platform",
+            "client_version",
+        }
+        if not isinstance(value, dict) or set(value) != expected:
+            return "agent_host"
+        try:
+            cls._strict_uuid4(value.get("host_id"), "host_id")
+        except ProtocolValidationError:
+            return "host_id"
+        versions = value.get("supported_runtime_contract_versions")
+        if (
+            not isinstance(versions, list)
+            or not versions
+            or any(type(item) is not int or item <= 0 for item in versions)
+            or versions != sorted(set(versions))
+        ):
+            return "supported_runtime_contract_versions"
+        lock_digest = value.get("runtime_lock_sha256")
+        if (
+            not isinstance(lock_digest, str)
+            or re.fullmatch(r"[0-9a-f]{64}", lock_digest) is None
+        ):
+            return "runtime_lock_sha256"
+        if value.get("platform") not in {"windows", "macos"}:
+            return "platform"
+        client_version = value.get("client_version")
+        if (
+            not isinstance(client_version, str)
+            or re.fullmatch(
+                r"(0|[1-9][0-9]*)\."
+                r"(0|[1-9][0-9]*)\."
+                r"(0|[1-9][0-9]*)"
+                r"(?:-[0-9A-Za-z-]+(?:\.[0-9A-Za-z-]+)*)?"
+                r"(?:\+[0-9A-Za-z-]+(?:\.[0-9A-Za-z-]+)*)?",
+                client_version,
+            )
+            is None
+        ):
+            return "client_version"
+        return "agent_host"
+
+    @staticmethod
+    def _fence_without_process(fence: RuntimeFence) -> RuntimeFence:
+        return RuntimeFence(
+            agent_id=fence.agent_id,
+            host_id=fence.host_id,
+            host_session_id=fence.host_session_id,
+            delivery_id=fence.delivery_id,
+            revision_id=fence.revision_id,
+            runtime_instance_id=fence.runtime_instance_id,
+            process_id=None,
+            lifecycle_generation=fence.lifecycle_generation,
+        )
+
+    @staticmethod
+    def _assert_host_fence(record: Any, fence: RuntimeFence) -> None:
+        if not (
+            fence.host_id == record.host_id
+            and fence.host_session_id == record.host_session_id
+            and record.state == "connected"
+        ):
+            raise ProtocolValidationError("host runtime fence is stale")
+
+    async def _personal_agent_revision_metadata(
+        self, revision_id: str
+    ) -> Dict[str, Any]:
+        row = await asyncio.to_thread(
+            self.history.db.fetch_one,
+            "SELECT artifact_digest, runtime_contract_version, "
+            "release_lock_digest FROM user_agent_revision WHERE revision_id = ?",
+            (revision_id,),
+        )
+        if row is None:
+            raise ProtocolValidationError("runtime revision is unknown")
+        return dict(row)
+
+    async def _fail_personal_agent_waiters(
+        self, request_ids: Any, *, code: str
+    ) -> None:
+        waiters = getattr(self, "_personal_agent_request_waiters", None) or {}
+        for request_id in request_ids or ():
+            waiter = waiters.get(str(request_id))
+            if waiter is not None and not waiter.done():
+                waiter.set_result(
+                    MCPResponse(
+                        request_id=str(request_id),
+                        error={"message": code, "retryable": True, "code": code},
+                    )
+                )
+
+    def _personal_agent_owner_for_fence(
+        self, fence: RuntimeFence
+    ) -> str | None:
+        """Resolve an owner only from the acknowledged host-session binding."""
+
+        for record in (
+            getattr(self, "_personal_agent_host_sessions", None) or {}
+        ).values():
+            if record.host_session_id == fence.host_session_id:
+                return str(record.owner_user_id)
+        projected = (
+            getattr(self, "_personal_agent_runtime_sockets", None) or {}
+        ).get(fence.runtime_instance_id)
+        owner = getattr(projected, "owner_sub", None)
+        return owner if isinstance(owner, str) and owner else None
+
+    @staticmethod
+    def _canonical_personal_agent_failure_code(failure_code: str) -> str:
+        """Map historical/internal diagnostics to the public stable contract."""
+
+        aliases = {
+            "child_failed": "child_exited",
+            "child_exit": "child_exited",
+            "child_offline": "agent_offline",
+            "disconnected": "host_lost",
+            "revision_activation_failed": "revision_promotion_failed",
+            "standby_recovery_failed": "child_start_failed",
+            "process_exit": "child_exited",
+        }
+        canonical = aliases.get(failure_code, failure_code)
+        return (
+            canonical
+            if canonical in AGENT_LIFECYCLE_REASON_CODES
+            else "agent_offline"
+        )
+
+    @classmethod
+    def _personal_agent_terminal_lifecycle_state(cls, failure_code: str) -> str:
+        canonical = cls._canonical_personal_agent_failure_code(failure_code)
+        if canonical in {"host_lost", "agent_offline", "agent_deleted"}:
+            return "offline"
+        return "failed"
+
+    async def _emit_personal_agent_lifecycle(
+        self,
+        owner_user_id: str | None,
+        runtime: Any,
+        *,
+        state: str,
+        reason_code: str | None = None,
+    ) -> None:
+        """Best-effort owner-scoped projection of one committed runtime row."""
+
+        if not owner_user_id:
+            return
+        try:
+            from orchestrator.agent_lifecycle import publish_agent_lifecycle
+
+            await publish_agent_lifecycle(
+                self,
+                owner_user_id,
+                agent_id=runtime.fence.agent_id,
+                revision_id=runtime.fence.revision_id,
+                runtime_instance_id=runtime.fence.runtime_instance_id,
+                lifecycle_generation=runtime.fence.lifecycle_generation,
+                state_revision=runtime.state_revision,
+                state=state,
+                reason_code=reason_code,
+            )
+        except Exception:
+            logger.debug(
+                "Personal-agent lifecycle projection failed agent=%s state=%s",
+                runtime.fence.agent_id,
+                state,
+                exc_info=True,
+            )
+
+    @classmethod
+    def _personal_agent_lifecycle_from_runtime(
+        cls, runtime: Any
+    ) -> tuple[str, str | None]:
+        """Project one durable runtime row into the canonical public state."""
+
+        state = str(getattr(runtime, "state", "offline"))
+        if state in {"delivering", "starting"}:
+            return "starting", None
+        if state == "ready":
+            # ``ready`` is asserted by the host after registration/liveness but
+            # precedes the server-owned promotion.  A candidate replacing a
+            # different durable active revision is visibly updating; a first
+            # install or same-revision recovery is still starting.  Neither is
+            # routable and neither may be projected as public online.
+            active_revision_id = getattr(runtime, "active_revision_id", None)
+            authoritative_instance_id = getattr(
+                runtime, "authoritative_instance_id", None
+            )
+            if (
+                (
+                    isinstance(active_revision_id, str)
+                    and active_revision_id
+                    and active_revision_id != runtime.fence.revision_id
+                )
+                or (
+                    isinstance(authoritative_instance_id, str)
+                    and authoritative_instance_id
+                    and authoritative_instance_id
+                    != runtime.fence.runtime_instance_id
+                )
+            ):
+                return "updating", None
+            return "starting", None
+        if state == "online":
+            return "online", None
+        if state == "updating":
+            return "updating", None
+        failure = getattr(runtime, "failure_code", None)
+        reason = cls._canonical_personal_agent_failure_code(
+            str(failure)
+            if failure
+            else ("child_exited" if state == "failed" else "agent_offline")
+        )
+        return cls._personal_agent_terminal_lifecycle_state(reason), reason
+
+    async def _replay_personal_agent_lifecycles(
+        self, websocket: Any, owner_user_id: str
+    ) -> int:
+        """Hydrate one reconnecting owner from durable lifecycle rows."""
+
+        repository = getattr(self, "personal_agent_runtime", None)
+        loader = getattr(repository, "list_latest_runtime_instances", None)
+        if not callable(loader):
+            return 0
+        runtimes = await asyncio.to_thread(loader, owner_user_id=owner_user_id)
+        from orchestrator.agent_lifecycle import canonical_agent_lifecycle
+
+        delivered = 0
+        for runtime in runtimes:
+            state, reason_code = self._personal_agent_lifecycle_from_runtime(runtime)
+            frame = canonical_agent_lifecycle(
+                agent_id=runtime.fence.agent_id,
+                revision_id=runtime.fence.revision_id,
+                runtime_instance_id=runtime.fence.runtime_instance_id,
+                lifecycle_generation=runtime.fence.lifecycle_generation,
+                state_revision=runtime.state_revision,
+                state=state,
+                reason_code=reason_code,
+                updated_at=getattr(runtime, "terminal_at", None)
+                or getattr(runtime, "last_liveness_at", None)
+                or getattr(runtime, "created_at", None),
+            )
+            if await self._safe_send(websocket, frame.to_json()):
+                delivered += 1
+        return delivered
+
+    async def _terminalize_personal_agent_runtime(
+        self,
+        fence: RuntimeFence,
+        *,
+        failure_code: str,
+    ) -> Any:
+        failure_code = self._canonical_personal_agent_failure_code(failure_code)
+        owner_user_id = self._personal_agent_owner_for_fence(fence)
+        result = await asyncio.to_thread(
+            self.personal_agent_runtime.terminalize_runtime,
+            fence,
+            failure_code=failure_code,
+        )
+        ready = (getattr(self, "_personal_agent_ready_waiters", None) or {}).get(
+            fence.runtime_instance_id
+        )
+        if ready is not None and not ready.done():
+            ready.set_exception(RuntimeError(failure_code))
+        await self._fail_personal_agent_waiters(
+            result.settled_request_ids, code=failure_code
+        )
+        socket = (getattr(self, "_personal_agent_runtime_sockets", None) or {}).pop(
+            fence.runtime_instance_id, None
+        )
+        if socket is not None and self.agents.get(fence.agent_id) is socket:
+            self.agents.pop(fence.agent_id, None)
+        await self._emit_personal_agent_lifecycle(
+            owner_user_id,
+            result.instance,
+            state=self._personal_agent_terminal_lifecycle_state(failure_code),
+            reason_code=failure_code,
+        )
+        return result
+
+    async def _disconnect_personal_agent_host(self, websocket: Any) -> Any | None:
+        sessions = getattr(self, "_personal_agent_host_sessions", None) or {}
+        record = sessions.get(id(websocket))
+        if record is None:
+            return None
+        try:
+            result = await asyncio.to_thread(
+                self.personal_agent_runtime.disconnect_host_session,
+                record.fence,
+                failure_code="host_lost",
+            )
+        except Exception:
+            logger.warning("Personal-agent host disconnect failed closed", exc_info=True)
+            return None
+
+        # PostgreSQL loss/settlement is the authority boundary.  Only after it
+        # commits may the process-local socket projections disappear; otherwise
+        # a transient database failure could strand a still-selected durable
+        # session while making it look disconnected in this process.
+        if sessions.get(id(websocket)) == record:
+            sessions.pop(id(websocket), None)
+        session_sockets = (
+            getattr(self, "_personal_agent_session_sockets", None) or {}
+        )
+        if session_sockets.get(record.host_session_id) is websocket:
+            session_sockets.pop(record.host_session_id, None)
+        (getattr(self, "_agent_host_sockets", None) or {}).pop(
+            id(websocket), None
+        )
+        await self._fail_personal_agent_waiters(
+            result.settled_request_ids, code="host_lost"
+        )
+        for settlement in getattr(result, "settlements", ()):
+            await self._emit_personal_agent_lifecycle(
+                record.owner_user_id,
+                settlement.instance,
+                state="offline",
+                reason_code="host_lost",
+            )
+        for runtime_id, socket in list(
+            (getattr(self, "_personal_agent_runtime_sockets", None) or {}).items()
+        ):
+            if getattr(socket, "ui_websocket", None) is websocket:
+                self._personal_agent_runtime_sockets.pop(runtime_id, None)
+                if self.agents.get(getattr(socket, "agent_id", None)) is socket:
+                    self.agents.pop(socket.agent_id, None)
+
+        # The disconnect transaction has already selected every replacement
+        # standby and fenced the lost authority. Re-open the exact immutable
+        # artifact before asking only that selected session to start a fresh
+        # delivery/runtime generation. Recovery failures are isolated per
+        # agent and durably terminalize their allocated delivery operation.
+        selected_recoveries = [
+            (agent_id, selected_session_id)
+            for agent_id, selected_session_id in result.selected_sessions.items()
+            if selected_session_id is not None
+        ]
+        if selected_recoveries:
+            recovery_limit = asyncio.Semaphore(8)
+
+            async def recover(agent_id: str, selected_session_id: str) -> None:
+                async with recovery_limit:
+                    await self._recover_personal_agent_on_selected_standby(
+                        owner_user_id=record.owner_user_id,
+                        agent_id=agent_id,
+                        lost_host_session_id=record.host_session_id,
+                        selected_host_session_id=selected_session_id,
+                    )
+
+            await asyncio.gather(
+                *(recover(agent_id, selected_session_id)
+                  for agent_id, selected_session_id in selected_recoveries)
+            )
+        return result
+
+    async def _recover_personal_agent_on_selected_standby(
+        self,
+        *,
+        owner_user_id: str,
+        agent_id: str,
+        lost_host_session_id: str,
+        selected_host_session_id: str,
+    ) -> bool:
+        """Deliver one active immutable revision to its selected standby.
+
+        Durable selection/allocation remains in PostgreSQL. The filesystem is
+        consulted only after that transaction returns the exact revision, and
+        the bytes are re-hashed before they cross the selected host socket.
+        """
+
+        recovery_identity = {
+            "agent_id": agent_id,
+            "lost_host_session_id": lost_host_session_id,
+            "selected_host_session_id": selected_host_session_id,
+        }
+        idempotency_key = hashlib.sha256(
+            json.dumps(
+                recovery_identity,
+                sort_keys=True,
+                separators=(",", ":"),
+                ensure_ascii=False,
+                allow_nan=False,
+            ).encode("utf-8")
+        ).hexdigest()
+        try:
+            claimed = await self._claim_personal_agent_operation(
+                owner_user_id=owner_user_id,
+                operation_kind="agent_runtime_delivery",
+                idempotency_namespace="personal_agent_standby_recovery",
+                idempotency_key=idempotency_key,
+                normalized_identity=recovery_identity,
+                wait_seconds=5.0,
+            )
+        except Exception:
+            logger.warning(
+                "Personal-agent standby recovery admission failed agent=%s",
+                agent_id,
+                exc_info=True,
+            )
+            return False
+        if claimed is None:
+            logger.warning(
+                "Personal-agent standby recovery was not admitted agent=%s",
+                agent_id,
+            )
+            return False
+
+        _operation_owner, operation_claim = claimed
+        recovery = None
+        try:
+            recovery = await asyncio.to_thread(
+                self.personal_agent_runtime.create_selected_recovery_instance,
+                owner_user_id=owner_user_id,
+                agent_id=agent_id,
+                operation_fence=operation_claim.fence,
+            )
+            if recovery.host.host_session_id != selected_host_session_id:
+                raise RuntimeError("selected standby changed before recovery")
+
+            artifact_store = getattr(self, "personal_agent_artifacts", None)
+            if artifact_store is None:
+                from orchestrator.artifact_publication import (
+                    ImmutableAgentArtifactStore,
+                )
+
+                artifact_store = self.personal_agent_artifacts = (
+                    ImmutableAgentArtifactStore()
+                )
+            artifact = await asyncio.to_thread(
+                artifact_store.load,
+                recovery.revision.artifact_relative_path,
+                expected_digest=recovery.revision.artifact_digest,
+            )
+            if not (
+                artifact.manifest.get("runtime_contract_version")
+                == recovery.revision.runtime_contract_version
+                and artifact.manifest.get("required_runtime_lock_sha256")
+                == recovery.revision.release_lock_digest
+            ):
+                raise RuntimeError("standby artifact compatibility metadata is stale")
+            selected_socket = (
+                getattr(self, "_personal_agent_session_sockets", None) or {}
+            ).get(selected_host_session_id)
+            if selected_socket is None:
+                raise RuntimeError("selected standby socket is unavailable")
+            if not await self._safe_send(
+                selected_socket,
+                json.dumps(
+                    {
+                        "type": "agent_bundle_deliver",
+                        "fence": recovery.instance.fence.to_dict(),
+                        "runtime_contract_version": (
+                            recovery.revision.runtime_contract_version
+                        ),
+                        "required_runtime_lock_sha256": (
+                            recovery.revision.release_lock_digest
+                        ),
+                        "bundle_sha256": artifact.bundle_sha256,
+                        "files": dict(artifact.files),
+                    },
+                    separators=(",", ":"),
+                ),
+            ):
+                raise RuntimeError("selected standby send failed")
+            await self._emit_personal_agent_lifecycle(
+                owner_user_id,
+                recovery.instance,
+                state="starting",
+            )
+            return True
+        except Exception:
+            if recovery is not None:
+                try:
+                    await self._terminalize_personal_agent_runtime(
+                        recovery.instance.fence,
+                        failure_code="standby_recovery_failed",
+                    )
+                except Exception:
+                    logger.debug(
+                        "Standby recovery runtime was already terminal",
+                        exc_info=True,
+                    )
+            else:
+                try:
+                    await self._call_work_admission(
+                        self.work_admission.terminalize,
+                        operation_claim.fence,
+                        state=OperationState.RETRYABLE,
+                        terminal_code="standby_recovery_failed",
+                        safe_summary="Personal-agent standby recovery failed",
+                        retry_after_ms=0,
+                    )
+                except Exception:
+                    logger.debug(
+                        "Standby recovery operation was already terminal",
+                        exc_info=True,
+                    )
+            logger.warning(
+                "Personal-agent standby recovery failed agent=%s selected=%s",
+                agent_id,
+                selected_host_session_id,
+                exc_info=True,
+            )
+            return False
+
+    async def _claim_personal_agent_operation(
+        self,
+        *,
+        owner_user_id: str,
+        operation_kind: str,
+        idempotency_namespace: str,
+        idempotency_key: str,
+        normalized_identity: Dict[str, Any],
+        admission_class: AdmissionClass = AdmissionClass.BACKGROUND,
+        parent_operation_id: _uuid.UUID | None = None,
+        request_generation: _uuid.UUID | None = None,
+        wait_seconds: float = 2.0,
+    ) -> tuple[OperationOwner, Any] | None:
+        owner = OperationOwner(
+            owner_scope=OwnerScope.USER,
+            owner_user_id=owner_user_id,
+            connection_scope_id=None,
+        )
+        digest = hashlib.sha256(
+            json.dumps(
+                normalized_identity,
+                sort_keys=True,
+                separators=(",", ":"),
+                ensure_ascii=False,
+                allow_nan=False,
+            ).encode("utf-8")
+        ).hexdigest()
+        request = OperationRequest(
+            operation_kind=operation_kind,
+            admission_class=admission_class,
+            owner=owner,
+            submission_id=_uuid.uuid4(),
+            idempotency_namespace=idempotency_namespace,
+            idempotency_key=idempotency_key,
+            normalized_input_digest=digest,
+            chat_id=None,
+            parent_operation_id=parent_operation_id,
+            connection_generation=None,
+            request_generation=request_generation,
+        )
+        admitted = await self._call_work_admission(
+            self.work_admission.submit, request
+        )
+        if not admitted.accepted:
+            return None
+        deadline = time.monotonic() + wait_seconds
+        while True:
+            claim = await self._call_work_admission(
+                self.work_admission.claim_operation,
+                admission_class,
+                admitted.operation_id,
+            )
+            if claim is not None:
+                return owner, claim
+            projection = await self._call_work_admission(
+                self.work_admission.query_operation,
+                owner=owner,
+                operation_id=admitted.operation_id,
+            )
+            if projection.state in {
+                OperationState.COMPLETED,
+                OperationState.FAILED,
+                OperationState.CANCELLED,
+                OperationState.RETRYABLE,
+            }:
+                return None
+            if time.monotonic() >= deadline:
+                await self._call_work_admission(
+                    self.work_admission.terminalize_unselected,
+                    admitted.operation_id,
+                    terminal_code="capacity_exceeded",
+                    safe_summary="Personal-agent operation was not selected",
+                    retry_after_ms=1000,
+                )
+                return None
+            await asyncio.sleep(0.05)
+
+    async def _renew_personal_agent_operation_lease(
+        self,
+        fence: ExecutionFence,
+        stop: asyncio.Event,
+    ) -> None:
+        """Keep a selected personal-agent operation current until settlement.
+
+        Tool calls may legitimately outlive the admission slot's default lease.
+        Renewal therefore begins immediately after assignment and remains active
+        through the durable request-settlement transaction. A stale lease is
+        already a fail-closed authority loss; the eventual result/timeout path
+        cannot publish through that obsolete execution fence.
+        """
+
+        interval = max(0.001, CONNECTION_LEASE_RENEW_SECONDS)
+        while not stop.is_set():
+            try:
+                await asyncio.wait_for(stop.wait(), timeout=interval)
+                return
+            except TimeoutError:
+                pass
+            try:
+                await self._call_work_admission(
+                    self.work_admission.renew_execution_lease,
+                    fence,
+                )
+            except StaleExecutionFenceError:
+                logger.warning(
+                    "Personal-agent operation lease was lost operation_id=%s",
+                    fence.operation_id,
+                )
+                return
+            except Exception:
+                # A transient database failure is retried on the next bounded
+                # interval. PostgreSQL remains authoritative; this task never
+                # invents or reselects an execution generation in memory.
+                logger.warning(
+                    "Personal-agent operation lease renewal failed",
+                    exc_info=True,
+                )
+
+    async def _reconcile_personal_agent_inventory(
+        self,
+        websocket: Any,
+        frame: Dict[str, Any],
+    ) -> None:
+        """Validate and atomically reconcile one complete retained inventory."""
+
+        if set(frame) != {
+            "type",
+            "host_id",
+            "host_session_id",
+            "inventory_id",
+            "entries",
+        }:
+            raise ProtocolValidationError("host inventory fields are invalid")
+        record = self._bound_personal_agent_host(websocket)
+        if not (
+            frame["host_id"] == record.host_id
+            and frame["host_session_id"] == record.host_session_id
+        ):
+            raise ProtocolValidationError("host inventory session is stale")
+        inventory_id = self._strict_uuid4(frame["inventory_id"], "inventory_id")
+        entries = frame["entries"]
+        if not isinstance(entries, list):
+            raise ProtocolValidationError("host inventory entries must be an array")
+
+        expected_entry_fields = {
+            "agent_id",
+            "revision_id",
+            "bundle_sha256",
+            "runtime_contract_version",
+            "required_runtime_lock_sha256",
+        }
+        seen: set[tuple[str, str]] = set()
+        delivery_fences: Dict[tuple[str, str], ExecutionFence] = {}
+        claimed_operations: list[tuple[OperationOwner, Any]] = []
+        for entry in entries:
+            if not isinstance(entry, dict) or set(entry) != expected_entry_fields:
+                raise ProtocolValidationError("host inventory entry is invalid")
+            revision_id = self._strict_uuid4(entry["revision_id"], "revision_id")
+            agent_id = entry["agent_id"]
+            if not isinstance(agent_id, str) or not agent_id or len(agent_id) > 255:
+                raise ProtocolValidationError("inventory agent_id is invalid")
+            key = (agent_id, revision_id)
+            if key in seen:
+                raise ProtocolValidationError("host inventory entry is duplicated")
+            seen.add(key)
+            if (
+                not isinstance(entry["bundle_sha256"], str)
+                or re.fullmatch(r"[0-9a-f]{64}", entry["bundle_sha256"]) is None
+                or not isinstance(entry["required_runtime_lock_sha256"], str)
+                or re.fullmatch(
+                    r"[0-9a-f]{64}", entry["required_runtime_lock_sha256"]
+                )
+                is None
+                or type(entry["runtime_contract_version"]) is not int
+            ):
+                raise ProtocolValidationError("inventory compatibility data is invalid")
+            try:
+                selected = await asyncio.to_thread(
+                    self.personal_agent_runtime.get_selected_session_revision,
+                    record.fence,
+                    agent_id=agent_id,
+                )
+            except Exception:
+                continue
+            revision = selected.revision
+            if not (
+                revision.revision_id == revision_id
+                and revision.artifact_digest == entry["bundle_sha256"]
+                and revision.runtime_contract_version
+                == entry["runtime_contract_version"]
+                and revision.release_lock_digest
+                == entry["required_runtime_lock_sha256"]
+                and revision.state == "active"
+            ):
+                continue
+            operation = await self._claim_personal_agent_operation(
+                owner_user_id=record.owner_user_id,
+                operation_kind="agent_runtime_delivery",
+                idempotency_namespace="personal_agent_inventory_delivery",
+                idempotency_key=f"{inventory_id}:{agent_id}:{revision_id}",
+                normalized_identity={
+                    "inventory_id": inventory_id,
+                    "agent_id": agent_id,
+                    "revision_id": revision_id,
+                    "host_session_id": record.host_session_id,
+                },
+            )
+            if operation is None:
+                raise RuntimeError("personal-agent inventory delivery was not admitted")
+            claimed_operations.append(operation)
+            delivery_fences[key] = operation[1].fence
+
+        try:
+            reconciliation = await asyncio.to_thread(
+                self.personal_agent_runtime.reconcile_host_inventory,
+                record.fence,
+                inventory_id=inventory_id,
+                entries=entries,
+                delivery_operation_fences=delivery_fences,
+            )
+        except Exception:
+            for _owner, claim in claimed_operations:
+                try:
+                    await self._call_work_admission(
+                        self.work_admission.terminalize,
+                        claim.fence,
+                        state=OperationState.RETRYABLE,
+                        terminal_code="inventory_reconciliation_failed",
+                        safe_summary="Host inventory reconciliation failed",
+                        retry_after_ms=0,
+                    )
+                except Exception:
+                    logger.debug("inventory operation cleanup failed", exc_info=True)
+            raise
+
+        actions = []
+        for action in reconciliation.actions:
+            selected = action.selected_delivery
+            actions.append(
+                {
+                    "agent_id": action.agent_id,
+                    "revision_id": action.revision_id,
+                    "action": action.action,
+                    "reason_code": action.reason_code,
+                    "selected_delivery": (
+                        None
+                        if selected is None
+                        else {
+                            "delivery_id": selected.delivery_id,
+                            "runtime_instance_id": selected.runtime_instance_id,
+                            "lifecycle_generation": selected.lifecycle_generation,
+                            "runtime_contract_version": (
+                                selected.runtime_contract_version
+                            ),
+                            "required_runtime_lock_sha256": (
+                                selected.required_runtime_lock_sha256
+                            ),
+                            "bundle_sha256": selected.bundle_sha256,
+                        }
+                    ),
+                }
+            )
+        inventory_sent = await self._safe_send(
+            websocket,
+            json.dumps(
+                {
+                    "type": "agent_host_inventory_reconciled",
+                    "host_id": reconciliation.host.host_id,
+                    "host_session_id": reconciliation.host.host_session_id,
+                    "inventory_id": reconciliation.inventory_id,
+                    "actions": actions,
+                    "reconciled_at": self._rfc3339(reconciliation.reconciled_at),
+                },
+                separators=(",", ":"),
+            ),
+        )
+        if inventory_sent:
+            for action in reconciliation.actions:
+                selected = action.selected_delivery
+                if selected is None or action.action != "start":
+                    continue
+                try:
+                    starting_runtime = await asyncio.to_thread(
+                        self.personal_agent_runtime.get_runtime_instance,
+                        selected.runtime_instance_id,
+                    )
+                except Exception:
+                    logger.debug(
+                        "Inventory lifecycle runtime lookup failed",
+                        exc_info=True,
+                    )
+                    continue
+                await self._emit_personal_agent_lifecycle(
+                    record.owner_user_id,
+                    starting_runtime,
+                    state="starting",
+                )
+
+    async def _personal_agent_watchdog_once(self) -> int:
+        """Fence runtimes whose PostgreSQL receipt-time liveness expired."""
+
+        rows = await asyncio.to_thread(
+            self.history.db.fetch_all,
+            """
+            SELECT runtime_instance_id,
+                   state
+            FROM agent_runtime_instance
+            WHERE (
+                state IN ('delivering', 'starting')
+                AND COALESCE(started_at, created_at) <
+                    clock_timestamp() - (? * interval '1 second')
+            ) OR (
+                state IN ('ready', 'online', 'updating')
+                AND last_liveness_at IS NOT NULL
+                AND last_liveness_at <
+                    clock_timestamp() - (? * interval '1 second')
+            )
+            ORDER BY runtime_instance_id
+            """,
+            (
+                PERSONAL_AGENT_STARTUP_TIMEOUT_SECONDS,
+                PERSONAL_AGENT_HEARTBEAT_TIMEOUT_SECONDS,
+            ),
+        )
+        fenced = 0
+        for row in rows:
+            try:
+                runtime = await asyncio.to_thread(
+                    self.personal_agent_runtime.get_runtime_instance,
+                    str(row["runtime_instance_id"]),
+                )
+                if str(row["state"]) in {"delivering", "starting"}:
+                    settlement = await asyncio.to_thread(
+                        self.personal_agent_runtime.terminalize_expired_startup,
+                        runtime.fence,
+                        timeout_seconds=PERSONAL_AGENT_STARTUP_TIMEOUT_SECONDS,
+                    )
+                else:
+                    settlement = await asyncio.to_thread(
+                        self.personal_agent_runtime.terminalize_expired_liveness,
+                        runtime.fence,
+                        timeout_seconds=PERSONAL_AGENT_HEARTBEAT_TIMEOUT_SECONDS,
+                    )
+                owner_user_id = self._personal_agent_owner_for_fence(
+                    runtime.fence
+                )
+                await self._fail_personal_agent_waiters(
+                    settlement.settled_request_ids,
+                    code=(
+                        "child_registration_timeout"
+                        if str(row["state"]) in {"delivering", "starting"}
+                        else "child_hung"
+                    ),
+                )
+                ready = (
+                    getattr(self, "_personal_agent_ready_waiters", None) or {}
+                ).get(runtime.fence.runtime_instance_id)
+                if ready is not None and not ready.done():
+                    ready.set_exception(
+                        RuntimeError(settlement.instance.failure_code)
+                    )
+                projected = (
+                    getattr(self, "_personal_agent_runtime_sockets", None) or {}
+                ).pop(runtime.fence.runtime_instance_id, None)
+                if (
+                    projected is not None
+                    and self.agents.get(runtime.fence.agent_id) is projected
+                ):
+                    self.agents.pop(runtime.fence.agent_id, None)
+                host_socket = (
+                    getattr(self, "_personal_agent_session_sockets", None) or {}
+                ).get(runtime.fence.host_session_id)
+                if host_socket is not None and runtime.fence.process_id is not None:
+                    await self._safe_send(
+                        host_socket,
+                        json.dumps(
+                            {
+                                "type": "agent_stop",
+                                "fence": runtime.fence.to_dict(),
+                            },
+                            separators=(",", ":"),
+                        ),
+                    )
+                await self._emit_personal_agent_lifecycle(
+                    owner_user_id,
+                    settlement.instance,
+                    state=self._personal_agent_terminal_lifecycle_state(
+                        settlement.instance.failure_code
+                    ),
+                    reason_code=settlement.instance.failure_code,
+                )
+                fenced += 1
+            except Exception:
+                # Another frame/watchdog may have won the same terminal CAS.
+                logger.debug("personal-agent watchdog race lost", exc_info=True)
+        return fenced
+
+    async def _personal_agent_watchdog_loop(self) -> None:
+        while True:
+            try:
+                await self._personal_agent_watchdog_once()
+            except asyncio.CancelledError:
+                raise
+            except Exception:
+                logger.warning("personal-agent watchdog pass failed", exc_info=True)
+            await asyncio.sleep(PERSONAL_AGENT_WATCHDOG_INTERVAL_SECONDS)
+
+    async def _handle_personal_agent_result(
+        self,
+        websocket: Any,
+        frame: Dict[str, Any],
+    ) -> None:
+        allowed = {
+            "type",
+            "request_id",
+            "request_generation",
+            "fence",
+            "result",
+            "error",
+            "ui_components",
+            "correlation_id",
+        }
+        required = {"type", "request_id", "request_generation", "fence"}
+        if not required.issubset(frame) or not set(frame).issubset(allowed):
+            raise ProtocolValidationError("personal-agent response fields are invalid")
+        record = self._bound_personal_agent_host(websocket)
+        fence = RuntimeFence.from_dict(frame["fence"])
+        self._assert_host_fence(record, fence)
+        request_id = self._strict_uuid4(frame["request_id"], "request_id")
+        request_generation = self._strict_uuid4(
+            frame["request_generation"], "request_generation"
+        )
+        request = await asyncio.to_thread(
+            self.personal_agent_runtime.get_runtime_request, request_id
+        )
+        if not (
+            request.fence.runtime == fence
+            and request.fence.request_generation == request_generation
+        ):
+            raise ProtocolValidationError("personal-agent response fence is stale")
+        error = frame.get("error")
+        if error is None:
+            terminal_state = "completed"
+            terminal_code = None
+            canonical = json.dumps(
+                {
+                    "result": frame.get("result"),
+                    "ui_components": frame.get("ui_components"),
+                },
+                sort_keys=True,
+                separators=(",", ":"),
+                ensure_ascii=False,
+                allow_nan=False,
+            ).encode("utf-8")
+            result_digest = hashlib.sha256(canonical).hexdigest()
+        else:
+            if not isinstance(error, dict):
+                raise ProtocolValidationError("personal-agent error must be an object")
+            terminal_state = "retryable" if error.get("retryable") is True else "failed"
+            terminal_code = (
+                "agent_retryable" if terminal_state == "retryable" else "agent_error"
+            )
+            result_digest = None
+        await asyncio.to_thread(
+            self.personal_agent_runtime.settle_request,
+            request.fence,
+            state=terminal_state,
+            terminal_code=terminal_code,
+            result_digest=result_digest,
+        )
+        waiter = (
+            getattr(self, "_personal_agent_request_waiters", None) or {}
+        ).get(request_id)
+        if waiter is not None and not waiter.done():
+            waiter.set_result(
+                MCPResponse(
+                    request_id=request_id,
+                    result=frame.get("result"),
+                    error=error,
+                    ui_components=frame.get("ui_components"),
+                    correlation_id=frame.get("correlation_id"),
+                )
+            )
+
+    async def _publish_personal_agent_runtime(self, runtime: Any) -> Any:
+        """Expose one already-online durable authority to the tool router."""
+
+        from shared.local_transport import FencedTunnelSocket
+
+        fence = runtime.fence
+        websocket = (
+            getattr(self, "_personal_agent_session_sockets", None) or {}
+        ).get(fence.host_session_id)
+        if websocket is None:
+            raise RuntimeError("selected personal-agent host is offline")
+        host = self._bound_personal_agent_host(websocket)
+        self._assert_host_fence(host, fence)
+        card = (
+            getattr(self, "_personal_agent_candidate_cards", None) or {}
+        ).get(fence.runtime_instance_id)
+        if card is None:
+            raise RuntimeError("personal-agent runtime has no accepted card")
+        socket = FencedTunnelSocket(
+            websocket,
+            host.owner_user_id,
+            fence,
+            self._safe_send,
+        )
+        self._personal_agent_runtime_sockets[fence.runtime_instance_id] = socket
+        await self.register_agent(socket, RegisterAgent(agent_card=card))
+        await self._emit_personal_agent_lifecycle(
+            host.owner_user_id,
+            runtime,
+            state="online",
+        )
+        return socket
+
+    async def _handle_personal_agent_host_frame(
+        self,
+        websocket: Any,
+        frame: Dict[str, Any],
+    ) -> None:
+        """Reduce one exact v2 host frame through the durable repository."""
+
+        try:
+            frame_type = frame.get("type")
+            if frame_type == "agent_host_inventory":
+                await self._reconcile_personal_agent_inventory(websocket, frame)
+                return
+            if frame_type == "mcp_response":
+                await self._handle_personal_agent_result(websocket, frame)
+                return
+
+            record = self._bound_personal_agent_host(websocket)
+            if not isinstance(frame.get("fence"), dict):
+                raise ProtocolValidationError("runtime frame fence is required")
+            fence = RuntimeFence.from_dict(frame["fence"])
+            self._assert_host_fence(record, fence)
+
+            if frame_type == "agent_runtime_state":
+                if set(frame) != {
+                    "type",
+                    "fence",
+                    "state",
+                    "runtime_contract_version",
+                    "bundle_sha256",
+                    "observed_at",
+                    "reason_code",
+                }:
+                    raise ProtocolValidationError("runtime-state fields are invalid")
+                state = frame["state"]
+                if state not in {"starting", "ready", "failed", "offline"}:
+                    raise ProtocolValidationError("runtime state is invalid")
+                self._validate_host_timestamp(frame["observed_at"], "observed_at")
+                reason = frame["reason_code"]
+                if reason is not None and (
+                    not isinstance(reason, str)
+                    or re.fullmatch(r"[a-z][a-z0-9_]{0,127}", reason) is None
+                ):
+                    raise ProtocolValidationError("runtime reason is invalid")
+                revision = await self._personal_agent_revision_metadata(
+                    fence.revision_id
+                )
+                if not (
+                    frame["runtime_contract_version"]
+                    == int(revision["runtime_contract_version"])
+                    and frame["bundle_sha256"] == revision["artifact_digest"]
+                ):
+                    raise ProtocolValidationError("runtime compatibility fence is stale")
+                if state == "starting":
+                    current = await asyncio.to_thread(
+                        self.personal_agent_runtime.get_runtime_instance,
+                        fence.runtime_instance_id,
+                    )
+                    if self._fence_without_process(fence) != current.fence:
+                        raise ProtocolValidationError("prelaunch runtime fence is stale")
+                    await asyncio.to_thread(
+                        self.personal_agent_runtime.bind_runtime_process,
+                        current.fence,
+                        process_id=fence.process_id,
+                        expected_state_revision=current.state_revision,
+                    )
+                    return
+                if state == "ready":
+                    ready_runtime = await asyncio.to_thread(
+                        self.personal_agent_runtime.mark_runtime_ready, fence
+                    )
+                    waiter = (
+                        getattr(self, "_personal_agent_ready_waiters", None) or {}
+                    ).get(fence.runtime_instance_id)
+                    if waiter is not None and not waiter.done():
+                        waiter.set_result(ready_runtime.fence.runtime_instance_id)
+                    elif hasattr(
+                        self.personal_agent_runtime, "promote_recovered_runtime"
+                    ):
+                        # Inventory recovery uses an already-active immutable
+                        # revision, so there is no candidate-revision promotion
+                        # waiter. Restore only its runtime authority pointer.
+                        online = await asyncio.to_thread(
+                            self.personal_agent_runtime.promote_recovered_runtime,
+                            ready_runtime.fence,
+                        )
+                        await self._publish_personal_agent_runtime(online)
+                    return
+                await self._terminalize_personal_agent_runtime(
+                    fence,
+                    failure_code=reason or (
+                        "child_exited" if state == "failed" else "agent_offline"
+                    ),
+                )
+                return
+
+            if frame_type == "agent_runtime_register":
+                if set(frame) != {
+                    "type",
+                    "fence",
+                    "runtime_contract_version",
+                    "bundle_sha256",
+                    "agent_card",
+                }:
+                    raise ProtocolValidationError("runtime-register fields are invalid")
+                card_value = frame["agent_card"]
+                if not isinstance(card_value, dict) or set(card_value) != {
+                    "name",
+                    "description",
+                    "agent_id",
+                    "version",
+                    "skills",
+                    "metadata",
+                }:
+                    raise ProtocolValidationError("runtime agent card is invalid")
+                card = AgentCard.from_dict(card_value)
+                if card.agent_id != fence.agent_id:
+                    raise ProtocolValidationError("runtime agent identity is stale")
+                await asyncio.to_thread(
+                    self.personal_agent_runtime.accept_runtime_registration,
+                    fence,
+                    runtime_contract_version=frame["runtime_contract_version"],
+                    bundle_sha256=frame["bundle_sha256"],
+                )
+                self._personal_agent_candidate_cards[
+                    fence.runtime_instance_id
+                ] = card
+                return
+
+            if frame_type == "agent_runtime_heartbeat":
+                if set(frame) != {"type", "fence", "heartbeat_sequence"}:
+                    raise ProtocolValidationError("runtime-heartbeat fields are invalid")
+                await asyncio.to_thread(
+                    self.personal_agent_runtime.record_runtime_heartbeat,
+                    fence,
+                    heartbeat_sequence=frame["heartbeat_sequence"],
+                )
+                return
+
+            if frame_type == "agent_runtime_exit":
+                if set(frame) != {"type", "fence", "exit_kind", "exit_code"}:
+                    raise ProtocolValidationError("runtime-exit fields are invalid")
+                exit_kind = frame["exit_kind"]
+                exit_code = frame["exit_code"]
+                if exit_kind not in {"process_exit", "protocol_eof", "explicit_stop"}:
+                    raise ProtocolValidationError("runtime exit kind is invalid")
+                if (exit_kind == "process_exit") != (type(exit_code) is int):
+                    raise ProtocolValidationError("runtime exit code is invalid")
+                await self._terminalize_personal_agent_runtime(
+                    fence,
+                    failure_code={
+                        "process_exit": "child_exited",
+                        "protocol_eof": "child_exited",
+                        "explicit_stop": "agent_offline",
+                    }[exit_kind],
+                )
+                return
+            raise ProtocolValidationError("unknown personal-agent host frame")
+        except (
+            ProtocolValidationError,
+            ValueError,
+        ) as exc:
+            # Stale/malformed host frames are no-ops by contract. Do not echo
+            # attacker-controlled values or allow arrival order to promote them.
+            logger.warning(
+                "Dropping personal-agent host frame type=%s: %s",
+                frame.get("type"),
+                type(exc).__name__,
+            )
+        except Exception:
+            logger.warning(
+                "Personal-agent host frame failed closed type=%s",
+                frame.get("type"),
+                exc_info=True,
+            )
+
     def _is_user_agent(self, agent_id) -> bool:
         """True iff ``agent_id`` is a feature-057/058 user-created agent (has a
         ``user_agent`` registry row). Sync DB read — call via ``asyncio.to_thread``
@@ -1105,20 +2699,87 @@ class Orchestrator:
             logger.debug("058: user-agent audit record failed (%s)", action_type,
                          exc_info=True)
 
-    async def deliver_agent_bundle(self, owner_sub, agent_id, files,
-                                   constitution_version=None):
-        """058 (code-delivery seam, T006/FR-004): push a generated user-agent
-        bundle to the owner's DESKTOP HOST sockets. The host writes the files
-        locally and runs the agent as a supervised CHILD PROCESS, which then dials
-        back in over the tunnel (register → go_live). The orchestrator NEVER runs
-        the agent as a subprocess (SC-002).
+    async def deliver_agent_bundle(
+        self,
+        owner_sub,
+        agent_id,
+        files,
+        constitution_version=None,
+        *,
+        runtime_manifest=None,
+        bundle_sha256=None,
+        revision_id=None,
+        artifact_relative_path=None,
+        runtime_contract_version=None,
+        required_runtime_lock_sha256=None,
+    ):
+        """Prepare, deliver, and promote one immutable personal-agent revision.
 
-        Only host-capable sockets are counted AND sent to: a browser tab cannot
-        run the bundle, and pushing generated code into one would be both a lie
-        ("delivered") and a needless spray of the user's code. Returns the number
-        of desktop-host sockets the bundle reached (0 ⇒ no host online; the caller
-        reports 'no_host' and the user re-runs Generate with the client open —
-        the server does NOT queue a re-delivery)."""
+        A legacy feature-058 bundle without v2 metadata keeps its compatibility
+        behavior. Production generation always supplies the finalized manifest
+        and follows the durable prepare/start/ready/promote boundary below.
+        """
+        from orchestrator.agent_generator import BYO_BUNDLE_FILENAMES
+
+        if runtime_manifest is None and isinstance(files, dict):
+            manifest_text = files.get("manifest.json")
+            if isinstance(manifest_text, str):
+                try:
+                    parsed_manifest = json.loads(manifest_text)
+                except (TypeError, ValueError):
+                    parsed_manifest = None
+                # Feature-058 compatibility bundles also contain a
+                # ``manifest.json`` file, and some fixtures intentionally use
+                # an empty object.  Only infer the durable v2 path when the
+                # embedded manifest actually carries the complete v2 runtime
+                # identity.  An explicitly supplied ``runtime_manifest`` still
+                # enters the v2 validator and fails closed if malformed.
+                v2_identity = {
+                    "runtime_contract_version",
+                    "revision_id",
+                    "bundle_sha256",
+                    "required_runtime_lock_sha256",
+                }
+                if (
+                    isinstance(parsed_manifest, dict)
+                    and parsed_manifest.get("runtime_contract_version") == 2
+                    and v2_identity.issubset(parsed_manifest)
+                ):
+                    runtime_manifest = parsed_manifest
+        if runtime_manifest is not None:
+            manifest = dict(runtime_manifest)
+            bundle_sha256 = bundle_sha256 or manifest.get("bundle_sha256")
+            revision_id = revision_id or manifest.get("revision_id")
+            runtime_contract_version = (
+                runtime_contract_version
+                if runtime_contract_version is not None
+                else manifest.get("runtime_contract_version")
+            )
+            required_runtime_lock_sha256 = (
+                required_runtime_lock_sha256
+                or manifest.get("required_runtime_lock_sha256")
+            )
+            executable_files = {
+                name: files[name]
+                for name in BYO_BUNDLE_FILENAMES
+                if isinstance(files, dict) and name in files
+            }
+            if set(executable_files) != set(BYO_BUNDLE_FILENAMES):
+                raise ValueError("v2 personal-agent delivery requires exactly three files")
+            return await self._deliver_personal_agent_revision(
+                owner_sub=owner_sub,
+                agent_id=agent_id,
+                files=executable_files,
+                runtime_manifest=manifest,
+                bundle_sha256=bundle_sha256,
+                revision_id=revision_id,
+                artifact_relative_path=artifact_relative_path,
+                runtime_contract_version=runtime_contract_version,
+                required_runtime_lock_sha256=required_runtime_lock_sha256,
+            )
+
+        # Explicit compatibility path for old clients/tests. It never treats an
+        # implicit v1 bundle as v2 and never enters the durable v2 host maps.
         frame = json.dumps({
             "type": "agent_bundle_deliver",
             "agent_id": agent_id,
@@ -1142,30 +2803,422 @@ class Orchestrator:
             agent_id, outcome=("success" if delivered else "failure"))
         return delivered
 
+    async def _deliver_personal_agent_revision(
+        self,
+        *,
+        owner_sub: str,
+        agent_id: str,
+        files: Dict[str, str],
+        runtime_manifest: Dict[str, Any],
+        bundle_sha256: str,
+        revision_id: str,
+        artifact_relative_path: str,
+        runtime_contract_version: int,
+        required_runtime_lock_sha256: str,
+        _activation_locked: bool = False,
+    ) -> int:
+        from orchestrator.agent_lifecycle import (
+            AgentRevisionActivator,
+            CandidatePreparation,
+        )
+
+        revision_id = self._strict_uuid4(revision_id, "revision_id")
+        if runtime_manifest.get("revision_id") != revision_id:
+            raise ValueError("runtime manifest revision identity is stale")
+        if runtime_manifest.get("agent_id") != agent_id:
+            raise ValueError("runtime manifest agent identity is stale")
+        if (
+            not isinstance(bundle_sha256, str)
+            or re.fullmatch(r"[0-9a-f]{64}", bundle_sha256) is None
+            or runtime_manifest.get("bundle_sha256") != bundle_sha256
+        ):
+            raise ValueError("runtime bundle digest is invalid")
+        if (
+            not isinstance(artifact_relative_path, str)
+            or not artifact_relative_path
+        ):
+            raise ValueError("immutable artifact path is required")
+
+        # Duplicate authoring requests for the same immutable revision share one
+        # activation in this process. The durable submission/revision fences are
+        # still the cross-replica authority; this lock merely prevents a local
+        # replay from waiting on (or trying to terminalize) its already-running
+        # delivery operation.
+        activation_key = (owner_sub, agent_id, revision_id)
+        if not _activation_locked:
+            locks = getattr(self, "_personal_agent_activation_locks", None)
+            if locks is None:
+                locks = self._personal_agent_activation_locks = {}
+            lock = locks.setdefault(activation_key, asyncio.Lock())
+            try:
+                async with lock:
+                    return await self._deliver_personal_agent_revision(
+                        owner_sub=owner_sub,
+                        agent_id=agent_id,
+                        files=files,
+                        runtime_manifest=runtime_manifest,
+                        bundle_sha256=bundle_sha256,
+                        revision_id=revision_id,
+                        artifact_relative_path=artifact_relative_path,
+                        runtime_contract_version=runtime_contract_version,
+                        required_runtime_lock_sha256=(
+                            required_runtime_lock_sha256
+                        ),
+                        _activation_locked=True,
+                    )
+            finally:
+                if (
+                    locks.get(activation_key) is lock
+                    and not lock.locked()
+                ):
+                    locks.pop(activation_key, None)
+
+        # A same-process replay after commit is already successful. Re-publish
+        # only if its exact durable route projection is absent; never create a
+        # second delivery/runtime generation for the active revision.
+        try:
+            online = await asyncio.to_thread(
+                self.personal_agent_runtime.get_current_online_authority,
+                owner_user_id=owner_sub,
+                agent_id=agent_id,
+            )
+        except Exception:
+            online = None
+        if online is not None and online.fence.revision_id == revision_id:
+            projected = self.agents.get(agent_id)
+            if getattr(projected, "runtime_fence", None) != online.fence:
+                await self._publish_personal_agent_runtime(online)
+            return 1
+
+        selection = await asyncio.to_thread(
+            self.personal_agent_runtime.select_host_for_agent,
+            owner_user_id=owner_sub,
+            agent_id=agent_id,
+        )
+        host = selection.session
+        if host is None or host.inventory_state != "reconciled":
+            await self._audit_user_agent(
+                owner_sub,
+                "agent.bundle_delivered",
+                "No reconciled selected desktop host was available.",
+                agent_id,
+                outcome="failure",
+            )
+            return 0
+        websocket = (
+            getattr(self, "_personal_agent_session_sockets", None) or {}
+        ).get(host.host_session_id)
+        if websocket is None:
+            return 0
+
+        claimed = await self._claim_personal_agent_operation(
+            owner_user_id=owner_sub,
+            operation_kind="agent_runtime_delivery",
+            idempotency_namespace="personal_agent_revision_delivery",
+            idempotency_key=f"{agent_id}:{revision_id}",
+            normalized_identity={
+                "agent_id": agent_id,
+                "revision_id": revision_id,
+                "bundle_sha256": bundle_sha256,
+                "host_session_id": host.host_session_id,
+            },
+            wait_seconds=5.0,
+        )
+        if claimed is None:
+            return 0
+        _operation_owner, operation_claim = claimed
+        preparation = CandidatePreparation(
+            owner_user_id=owner_sub,
+            agent_id=agent_id,
+            revision_id=revision_id,
+            bundle_sha256=bundle_sha256,
+            runtime_manifest=runtime_manifest,
+            artifact_relative_path=artifact_relative_path,
+            runtime_contract_version=runtime_contract_version,
+            required_runtime_lock_sha256=required_runtime_lock_sha256,
+            host_session_id=host.host_session_id,
+            operation_fence=operation_claim.fence,
+        )
+        activation_runtime_id: str | None = None
+
+        async def _start_candidate(candidate: Any) -> str:
+            nonlocal activation_runtime_id
+            runtime = await asyncio.to_thread(
+                self.personal_agent_runtime.get_runtime_instance,
+                candidate.runtime_instance_id,
+            )
+            if runtime.fence.process_id is not None:
+                raise RuntimeError("candidate runtime process was already bound")
+            selected_socket = (
+                getattr(self, "_personal_agent_session_sockets", None) or {}
+            ).get(runtime.fence.host_session_id)
+            if selected_socket is not websocket:
+                raise RuntimeError("candidate selected host session is stale")
+            loop = asyncio.get_running_loop()
+            waiter = loop.create_future()
+            self._personal_agent_ready_waiters[
+                runtime.fence.runtime_instance_id
+            ] = waiter
+            activation_runtime_id = runtime.fence.runtime_instance_id
+            delivered = await self._safe_send(
+                selected_socket,
+                json.dumps(
+                    {
+                        "type": "agent_bundle_deliver",
+                        "fence": runtime.fence.to_dict(),
+                        "runtime_contract_version": runtime_contract_version,
+                        "required_runtime_lock_sha256": (
+                            required_runtime_lock_sha256
+                        ),
+                        "bundle_sha256": bundle_sha256,
+                        "files": files,
+                    },
+                    separators=(",", ":"),
+                ),
+            )
+            if not delivered:
+                raise RuntimeError("candidate selected-host send failed")
+            await self._emit_personal_agent_lifecycle(
+                owner_sub,
+                runtime,
+                state=(
+                    "updating"
+                    if candidate.previous_runtime_instance_id is not None
+                    else "starting"
+                ),
+            )
+            return runtime.fence.runtime_instance_id
+
+        async def _await_candidate_ready(candidate: Any) -> str:
+            waiter = self._personal_agent_ready_waiters.get(
+                candidate.runtime_instance_id
+            )
+            if waiter is None:
+                raise RuntimeError("candidate ready waiter is missing")
+            async with asyncio.timeout(PERSONAL_AGENT_STARTUP_TIMEOUT_SECONDS):
+                return await asyncio.shield(waiter)
+
+        async def _stop_runtime(runtime_instance_id: str) -> None:
+            try:
+                runtime = await asyncio.to_thread(
+                    self.personal_agent_runtime.get_runtime_instance,
+                    runtime_instance_id,
+                )
+            except Exception:
+                return
+            if runtime.fence.process_id is not None:
+                selected_socket = (
+                    getattr(self, "_personal_agent_session_sockets", None) or {}
+                ).get(runtime.fence.host_session_id)
+                if selected_socket is not None:
+                    await self._safe_send(
+                        selected_socket,
+                        json.dumps(
+                            {"type": "agent_stop", "fence": runtime.fence.to_dict()},
+                            separators=(",", ":"),
+                        ),
+                    )
+            try:
+                await self._terminalize_personal_agent_runtime(
+                    runtime.fence,
+                    failure_code="revision_promotion_failed",
+                )
+            except Exception:
+                logger.debug("candidate runtime was already terminal", exc_info=True)
+
+        activator = AgentRevisionActivator(
+            store=self.personal_agent_revisions,
+            start_candidate=_start_candidate,
+            await_candidate_ready=_await_candidate_ready,
+            stop_runtime=_stop_runtime,
+        )
+        try:
+            activation = await activator.activate(preparation)
+            online = await asyncio.to_thread(
+                self.personal_agent_runtime.get_runtime_instance,
+                activation.commit.runtime_instance_id,
+            )
+            await self._call_work_admission(
+                self.work_admission.terminalize,
+                operation_claim.fence,
+                state=OperationState.COMPLETED,
+                terminal_code=None,
+                safe_summary="Personal-agent revision is online",
+                retry_after_ms=None,
+            )
+            await self._publish_personal_agent_runtime(online)
+        except Exception:
+            try:
+                await self._call_work_admission(
+                    self.work_admission.terminalize,
+                    operation_claim.fence,
+                    state=OperationState.FAILED,
+                    terminal_code="revision_promotion_failed",
+                    safe_summary="Personal-agent revision activation failed",
+                    retry_after_ms=None,
+                )
+            except Exception:
+                logger.debug("delivery operation already terminal", exc_info=True)
+            logger.warning(
+                "Personal-agent revision activation failed agent=%s revision=%s",
+                agent_id,
+                revision_id,
+                exc_info=True,
+            )
+            await self._audit_user_agent(
+                owner_sub,
+                "agent.bundle_delivered",
+                "Personal-agent revision failed before durable promotion.",
+                agent_id,
+                outcome="failure",
+            )
+            return 0
+        finally:
+            if activation_runtime_id is not None:
+                self._personal_agent_ready_waiters.pop(
+                    activation_runtime_id, None
+                )
+
+        await self._audit_user_agent(
+            owner_sub,
+            "agent.bundle_delivered",
+            "Delivered and durably promoted one immutable personal-agent revision.",
+            agent_id,
+            outcome="success",
+        )
+        return 1
+
     async def delete_user_agent(self, owner_sub, agent_id):
-        """058 (soft delete, T028/FR-027): stop the host agent, remove routing +
-        the tunnel socket, and soft-delete the registry row (status='disabled' +
-        deleted_at; the row + audit are RETAINED, Constitution VII). Refuses
-        (returns False) unless the agent is this owner's user agent."""
+        """Commit the durable tombstone generation before any host cleanup."""
         from shared.local_transport import TunnelSocket
         from orchestrator import user_agents as _ua
         row = await asyncio.to_thread(_ua.get_user_agent, self.history.db, agent_id)
         if row is None or row.get("owner_user_id") != owner_sub:
             return False
-        self._tunnel_sockets.pop((owner_sub, agent_id), None)
-        if isinstance(self.agents.get(agent_id), TunnelSocket):
+        try:
+            tombstone = await asyncio.to_thread(
+                self.personal_agent_runtime.tombstone_agent,
+                owner_user_id=owner_sub,
+                agent_id=agent_id,
+                expected_state_revision=row.get("state_revision"),
+            )
+        except _ua.PersonalAgentNotFoundError:
+            return False
+
+        cleanup = None
+        try:
+            cleanup = await asyncio.to_thread(
+                self.personal_agent_runtime.cleanup_tombstoned_agent,
+                tombstone,
+            )
+            await self._fail_personal_agent_waiters(
+                cleanup.settled_request_ids,
+                code="agent_deleted",
+            )
+        except Exception:
+            # The tombstone is already authoritative and must never be rolled
+            # back. A repeated delete replays the same tombstone and retries this
+            # fenced cleanup; local routing is removed below in either case.
+            logger.warning(
+                "Personal-agent tombstone cleanup will require reconciliation",
+                exc_info=True,
+            )
+
+        try:
+            from orchestrator.agent_lifecycle import publish_agent_lifecycle
+
+            await publish_agent_lifecycle(
+                self,
+                owner_sub,
+                agent_id=agent_id,
+                revision_id=None,
+                runtime_instance_id=None,
+                lifecycle_generation=tombstone.lifecycle_generation,
+                state_revision=tombstone.state_revision,
+                state="offline",
+                reason_code="agent_deleted",
+            )
+        except Exception:
+            logger.debug(
+                "Personal-agent delete lifecycle projection failed",
+                exc_info=True,
+            )
+
+        # Only the committed tombstone authorizes destructive projection and
+        # process cleanup. Delayed registration/delivery frames now fail their
+        # durable generation checks and cannot resurrect this identity.
+        fenced_sockets = [
+            (runtime_id, socket)
+            for runtime_id, socket in list(
+                (getattr(self, "_personal_agent_runtime_sockets", None) or {}).items()
+            )
+            if getattr(socket, "agent_id", None) == agent_id
+            and getattr(socket, "owner_sub", None) == owner_sub
+        ]
+        legacy_socket = self._tunnel_sockets.pop((owner_sub, agent_id), None)
+        projected_socket = self.agents.get(agent_id)
+        if (
+            isinstance(projected_socket, TunnelSocket)
+            or getattr(projected_socket, "owner_sub", None) == owner_sub
+        ):
             self.agents.pop(agent_id, None)
         self.agent_cards.pop(agent_id, None)
-        for ui in list(self.ui_clients):
-            if self._get_user_id(ui) != owner_sub:
-                continue
+        sent_runtime_ids: set[str] = set()
+        for runtime_id, socket in fenced_sockets:
+            fence = socket.runtime_fence
+            sent_runtime_ids.add(runtime_id)
+            self._personal_agent_runtime_sockets.pop(runtime_id, None)
+            if self.agents.get(agent_id) is socket:
+                self.agents.pop(agent_id, None)
             try:
-                await self._safe_send(ui, json.dumps(
-                    {"type": "agent_stop", "agent_id": agent_id}))
+                await self._safe_send(
+                    socket.ui_websocket,
+                    json.dumps(
+                        {"type": "agent_stop", "fence": fence.to_dict()},
+                        separators=(",", ":"),
+                    ),
+                )
             except Exception:
-                logger.debug("agent_stop send failed", exc_info=True)
-        await asyncio.to_thread(_ua.soft_delete, self.history.db, agent_id)
-        logger.info("058: soft-deleted user agent %s (owner=%s)", agent_id, owner_sub)
+                logger.debug("fenced agent_stop send failed", exc_info=True)
+        if cleanup is not None:
+            for settlement in cleanup.settlements:
+                fence = settlement.instance.fence
+                if (
+                    fence.runtime_instance_id in sent_runtime_ids
+                    or fence.process_id is None
+                ):
+                    continue
+                host_socket = (
+                    getattr(self, "_personal_agent_session_sockets", None) or {}
+                ).get(fence.host_session_id)
+                if host_socket is None:
+                    continue
+                try:
+                    await self._safe_send(
+                        host_socket,
+                        json.dumps(
+                            {"type": "agent_stop", "fence": fence.to_dict()},
+                            separators=(",", ":"),
+                        ),
+                    )
+                except Exception:
+                    logger.debug("fenced agent_stop send failed", exc_info=True)
+        if legacy_socket is not None:
+            # Explicit feature-058 compatibility only. V2 cleanup is never
+            # broadcast to unrelated owner sockets or unselected standbys.
+            try:
+                await self._safe_send(
+                    legacy_socket.ui_websocket,
+                    json.dumps({"type": "agent_stop", "agent_id": agent_id}),
+                )
+            except Exception:
+                logger.debug("legacy agent_stop send failed", exc_info=True)
+        logger.info(
+            "060: tombstoned user agent %s generation=%s (owner=%s)",
+            agent_id,
+            tombstone.lifecycle_generation,
+            owner_sub,
+        )
         await self._audit_user_agent(
             owner_sub, "agent.deleted",
             "Soft-deleted user agent (row + audit retained, host stopped).",
@@ -1186,6 +3239,9 @@ class Orchestrator:
         # status). Non-tunnel agents (built-in loopback, external WS) keep the
         # 028 shared-key check.
         is_tunnel = bool(getattr(websocket, "is_user_agent_tunnel", False))
+        is_fenced_tunnel = bool(
+            getattr(websocket, "is_fenced_user_agent_tunnel", False)
+        )
         if is_tunnel:
             from orchestrator.user_agents import authorize_registration
             owner_sub = getattr(websocket, "owner_sub", None)
@@ -1235,17 +3291,27 @@ class Orchestrator:
         # agent_ownership row is_public=FALSE) and record the owner-scoped socket.
         if is_tunnel:
             from orchestrator import user_agents as _ua
-            self._tunnel_sockets[(getattr(websocket, "owner_sub", None), card.agent_id)] = websocket
-            try:
-                await asyncio.to_thread(
-                    _ua.go_live, self.history.db, card.agent_id,
-                    host_session_id=getattr(websocket, "host_session_id", None))
-                await self._audit_user_agent(
-                    getattr(websocket, "owner_sub", None), "agent.went_live",
-                    "User agent registered inward and went live on its owner's host.",
-                    card.agent_id)
-            except Exception:
-                logger.warning("go_live failed for user agent %s", card.agent_id, exc_info=True)
+            if is_fenced_tunnel:
+                runtime_id = websocket.runtime_fence.runtime_instance_id
+                self._personal_agent_runtime_sockets[runtime_id] = websocket
+            else:
+                self._tunnel_sockets[
+                    (getattr(websocket, "owner_sub", None), card.agent_id)
+                ] = websocket
+                try:
+                    await asyncio.to_thread(
+                        _ua.go_live, self.history.db, card.agent_id,
+                        host_session_id=getattr(websocket, "host_session_id", None))
+                except Exception:
+                    logger.warning(
+                        "go_live failed for user agent %s",
+                        card.agent_id,
+                        exc_info=True,
+                    )
+            await self._audit_user_agent(
+                getattr(websocket, "owner_sub", None), "agent.went_live",
+                "User agent registered inward and went live on its owner's host.",
+                card.agent_id)
 
         # Extract capabilities for routing and tool→scope mapping
         caps = []
@@ -1682,53 +3748,2411 @@ class Orchestrator:
         except Exception as e:
             logger.error(f"Error handling agent message: {e}")
 
-    async def _safe_handle_ui_message(self, websocket, message: str):
-        """Wrapper that catches exceptions from fire-and-forget UI message tasks.
-        Non-register messages wait for registration to complete first."""
+    @staticmethod
+    def _parsed_ui_frame(message: str) -> dict[str, Any] | None:
+        """Parse one UI frame without inferring its type from payload text."""
+
         try:
-            # Quick parse to check if this is a register_ui message
-            is_register = '"register_ui"' in message
-            if not is_register:
-                evt = self._registered_events.get(id(websocket))
-                if evt and not evt.is_set():
-                    await evt.wait()
+            value = json.loads(message)
+        except (TypeError, json.JSONDecodeError):
+            return None
+        return value if isinstance(value, dict) else None
+
+    @staticmethod
+    def _ui_control_kind(frame: dict[str, Any] | None) -> str | None:
+        """Return the structurally declared transport/control kind, if any."""
+
+        if frame is None:
+            return None
+        frame_type = frame.get("type")
+        if not isinstance(frame_type, str):
+            return None
+        if frame_type in {"register_ui", "close", "ping", "pong"}:
+            return frame_type
+        if frame_type == "ui_event" and frame.get("action") == "cancel_task":
+            return "cancel_task"
+        if frame_type in {"cancel", "cancel_task"}:
+            return "cancel_task"
+        return None
+
+    @staticmethod
+    def _optional_uuid(value: Any) -> _uuid.UUID | None:
+        if value in (None, ""):
+            return None
+        try:
+            return _uuid.UUID(str(value))
+        except (TypeError, ValueError, AttributeError):
+            return None
+
+    @classmethod
+    def _optional_uuid4(cls, value: Any) -> _uuid.UUID | None:
+        parsed = cls._optional_uuid(value)
+        if (
+            parsed is None
+            or parsed.version != 4
+            or parsed.variant != _uuid.RFC_4122
+        ):
+            return None
+        return parsed
+
+    @classmethod
+    def _canonical_uuid4(cls, value: Any) -> _uuid.UUID | None:
+        """Return only exact lowercase, hyphenated RFC 4122 UUID4 text."""
+
+        if not isinstance(value, str):
+            return None
+        parsed = cls._optional_uuid4(value)
+        if parsed is None or str(parsed) != value:
+            return None
+        return parsed
+
+    def _new_connection_context(self, websocket: Any) -> ConnectionContext:
+        contexts = getattr(self, "_connection_contexts", None)
+        if contexts is None:
+            contexts = {}
+            self._connection_contexts = contexts
+        context = ConnectionContext(
+            websocket=websocket,
+            connection_scope_id=_uuid.uuid4(),
+            registration_deadline=(
+                time.monotonic() + REGISTRATION_TIMEOUT_SECONDS
+            ),
+        )
+        contexts[id(websocket)] = context
+        return context
+
+    def connection_diagnostics(self) -> dict[str, int]:
+        """Return non-sensitive aggregate connection-runtime gauges."""
+
+        contexts = tuple(
+            getattr(self, "_connection_contexts", {}).values()
+        )
+        return {
+            "active_connections": len(contexts),
+            "tracked_tasks": sum(
+                1
+                for context in contexts
+                for task in context.tracked_tasks
+                if not task.done()
+            ),
+            "registration_waiters": sum(
+                1
+                for context in contexts
+                if not context.registered and not context.closing
+            ),
+            "preregistration_queued": sum(
+                len(context.preregistration) for context in contexts
+            ),
+        }
+
+    def _capacity_event(self) -> asyncio.Event:
+        event = getattr(self, "_interactive_capacity_event", None)
+        if event is None:
+            event = asyncio.Event()
+            self._interactive_capacity_event = event
+            self._interactive_capacity_revision = 0
+        return event
+
+    async def _notify_interactive_capacity(self) -> None:
+        event = self._capacity_event()
+        self._interactive_capacity_revision = (
+            getattr(self, "_interactive_capacity_revision", 0) + 1
+        )
+        event.set()
+        self._interactive_capacity_event = asyncio.Event()
+
+    async def _call_work_admission(
+        self,
+        method: Any,
+        /,
+        *args: Any,
+        **kwargs: Any,
+    ) -> Any:
+        """Run PostgreSQL authority calls off-loop.
+
+        The explicitly named in-memory repository is a lock-only deterministic
+        test dependency, so calling it inline avoids manufacturing hundreds of
+        thread handoffs in the 1,000-frame contract probe.  Product
+        construction always binds the PostgreSQL repository.
+        """
+
+        repository = getattr(self.work_admission, "_repository", None)
+        if isinstance(repository, InMemoryWorkAdmissionRepository):
+            return method(*args, **kwargs)
+        return await asyncio.to_thread(method, *args, **kwargs)
+
+    async def _wait_for_interactive_capacity(
+        self,
+        context: ConnectionContext,
+        revision: int,
+        *,
+        allow_closing: bool = False,
+    ) -> int:
+        event = self._capacity_event()
+        if (
+            (not context.closing or allow_closing)
+            and self._interactive_capacity_revision == revision
+        ):
+            try:
+                await asyncio.wait_for(
+                    event.wait(),
+                    timeout=_CONNECTION_CLAIM_POLL_SECONDS,
+                )
+            except TimeoutError:
+                pass
+        return self._interactive_capacity_revision
+
+    def _track_connection_task(
+        self,
+        context: ConnectionContext,
+        coroutine: Any,
+        *,
+        name: str,
+        operation: bool = False,
+    ) -> asyncio.Task[Any]:
+        task = asyncio.create_task(coroutine, name=name)
+        context.tracked_tasks.add(task)
+        if operation:
+            context.operation_tasks.add(task)
+
+        def _discard(done: asyncio.Task[Any]) -> None:
+            context.tracked_tasks.discard(done)
+            context.operation_tasks.discard(done)
+
+        task.add_done_callback(_discard)
+        return task
+
+    @staticmethod
+    def _rfc3339(value: datetime | None = None) -> str:
+        timestamp = value or datetime.now(UTC)
+        if timestamp.tzinfo is None:
+            timestamp = timestamp.replace(tzinfo=UTC)
+        return timestamp.astimezone(UTC).isoformat().replace("+00:00", "Z")
+
+    async def _send_admission_refusal(
+        self,
+        websocket: Any,
+        *,
+        submission_id: _uuid.UUID,
+        code: str,
+        retryable: bool,
+        retry_after_ms: int | None = None,
+    ) -> None:
+        if (
+            not isinstance(submission_id, _uuid.UUID)
+            or submission_id.version != 4
+            or submission_id.variant != _uuid.RFC_4122
+        ):
+            raise ValueError(
+                "admission refusals require a canonical UUID4 submission_id"
+            )
+        observability = getattr(self, "runtime_observability", None)
+        if observability is not None:
+            observability.record_operation(
+                "refused",
+                operation_kind="connection_frame",
+                result_code=code,
+            )
+        await self._safe_send(
+            websocket,
+            json.dumps(
+                {
+                    # Admission refusal has no operation_id and therefore is
+                    # not an operation_status terminal.  Reuse the manifested
+                    # error envelope and correlate the client-local submitting
+                    # projection by owner-supplied submission_id.
+                    "type": "error",
+                    "submission_id": str(submission_id),
+                    "accepted": False,
+                    "code": code,
+                    "message": self._admission_refusal_message(code),
+                    "retryable": retryable,
+                    "retry_after_ms": retry_after_ms,
+                }
+            ),
+        )
+
+    @staticmethod
+    def _admission_refusal_message(code: str) -> str:
+        """Return the non-sensitive message shared by refusal envelopes."""
+
+        return {
+            "capacity_exceeded": (
+                "The request could not be accepted right now."
+            ),
+            "connection_closing": (
+                "The connection is closing. Reconnect and try again."
+            ),
+            "invalid_input": "The request is invalid.",
+            "registration_queue_full": (
+                "Too many requests arrived before sign-in completed."
+            ),
+            "registration_timeout": (
+                "Sign-in did not complete in time. Reconnect and try again."
+            ),
+        }.get(code, "The request could not be accepted.")
+
+    async def _send_uncorrelated_error(
+        self,
+        websocket: Any,
+        *,
+        code: str,
+    ) -> None:
+        """Report malformed input without fabricating submission correlation."""
+
+        observability = getattr(self, "runtime_observability", None)
+        if observability is not None:
+            observability.record_operation(
+                "refused",
+                operation_kind="connection_frame",
+                result_code=code,
+            )
+        await self._safe_send(
+            websocket,
+            json.dumps(
+                {
+                    "type": "error",
+                    "code": code,
+                    "message": self._admission_refusal_message(code),
+                }
+            ),
+        )
+
+    async def _send_frame_refusal(
+        self,
+        websocket: Any,
+        parsed: dict[str, Any] | None,
+        *,
+        code: str,
+        retryable: bool,
+        retry_after_ms: int | None = None,
+    ) -> bool:
+        """Refuse one frame, returning whether exact correlation was possible."""
+
+        submission_id = self._client_submission_id(parsed)
+        if submission_id is None:
+            await self._send_uncorrelated_error(websocket, code=code)
+            return False
+        await self._send_admission_refusal(
+            websocket,
+            submission_id=submission_id,
+            code=code,
+            retryable=retryable,
+            retry_after_ms=retry_after_ms,
+        )
+        return True
+
+    async def _send_operation_accepted(
+        self,
+        context: ConnectionContext,
+        frame: _ConnectionIngressFrame,
+        admission: Any,
+    ) -> None:
+        observability = getattr(self, "runtime_observability", None)
+        if observability is not None:
+            observability.record_operation(
+                "accepted",
+                operation_kind=frame.operation_kind,
+            )
+        from orchestrator.chrome_events import emit_operation_status
+
+        await emit_operation_status(
+            self,
+            context.websocket,
+            operation_id=str(admission.operation_id),
+            action=frame.action,
+            surface=frame.surface or "operation",
+            chat_id=frame.chat_id,
+            connection_generation=str(context.connection_generation),
+            request_generation=str(frame.request_generation),
+            sequence=admission.state_revision,
+            state="accepted",
+            phase="accepted",
+            label="Accepted",
+            terminal=False,
+            retryable=False,
+            error=None,
+            retry_after_ms=None,
+            updated_at=getattr(admission, "updated_at", None),
+        )
+
+    async def _send_operation_phase(
+        self,
+        context: ConnectionContext,
+        work: _ConnectionOperation,
+        operation: Any,
+        *,
+        state: str,
+        phase: str,
+        label: str,
+    ) -> None:
+        subscribers = tuple(work.subscribers.values())
+        if not subscribers:
+            subscribers = ((context, work.frame),)
+        for subscriber, frame in subscribers:
+            await self._send_operation_phase_to_context(
+                subscriber,
+                frame,
+                operation,
+                state=state,
+                phase=phase,
+                label=label,
+            )
+
+    async def _send_operation_phase_to_context(
+        self,
+        context: ConnectionContext,
+        frame: _ConnectionIngressFrame,
+        operation: Any,
+        *,
+        state: str,
+        phase: str,
+        label: str,
+    ) -> None:
+        from orchestrator.chrome_events import emit_operation_status
+
+        await emit_operation_status(
+            self,
+            context.websocket,
+            operation_id=str(operation.operation_id),
+            action=frame.action,
+            surface=frame.surface or "operation",
+            chat_id=frame.chat_id,
+            connection_generation=str(context.connection_generation),
+            request_generation=str(frame.request_generation),
+            sequence=operation.state_revision,
+            state=state,
+            phase=phase,
+            label=label,
+            terminal=False,
+            retryable=False,
+            error=None,
+            retry_after_ms=None,
+            updated_at=getattr(operation, "updated_at", None),
+        )
+
+    async def _send_operation_projection(
+        self,
+        context: ConnectionContext,
+        frame: _ConnectionIngressFrame,
+        work: _ConnectionOperation,
+        operation: Any,
+    ) -> None:
+        state = getattr(operation.state, "value", str(operation.state))
+        if state in {"completed", "failed", "cancelled", "retryable"}:
+            await self._send_operation_terminal_to_context(
+                context, frame, work, operation
+            )
+            return
+        phase = getattr(operation, "phase_code", None)
+        if phase is None:
+            await self._send_operation_accepted(context, frame, operation)
+            return
+        projected_state = {
+            "validating_credentials": "validating",
+            "saving_credentials": "persisting",
+        }.get(phase, "running")
+        label = {
+            "validating_credentials": "Checking your provider credentials…",
+            "saving_credentials": "Saving your provider settings…",
+        }.get(phase, "Working…")
+        await self._send_operation_phase_to_context(
+            context,
+            frame,
+            operation,
+            state=projected_state,
+            phase=phase,
+            label=label,
+        )
+
+    @staticmethod
+    def _public_terminal_code(code: str | None) -> str:
+        if code in {"disconnect_drain_timeout", "disconnected"}:
+            return "disconnected"
+        if code in {
+            "queue_wait_expired",
+            "operation_failed",
+            "cancelled_by_user",
+            "deadline_exceeded",
+            "validation_failed",
+            "provider_unavailable",
+            "network_unavailable",
+            "stale_generation",
+        }:
+            return str(code)
+        return "operation_failed"
+
+    async def _send_operation_terminal(
+        self,
+        context: ConnectionContext,
+        work: _ConnectionOperation,
+        operation: Any,
+    ) -> None:
+        subscribers = tuple(work.subscribers.values())
+        if not subscribers:
+            subscribers = ((context, work.frame),)
+        for subscriber, frame in subscribers:
+            await self._send_operation_terminal_to_context(
+                subscriber, frame, work, operation
+            )
+
+    async def _send_operation_terminal_to_context(
+        self,
+        context: ConnectionContext,
+        frame: _ConnectionIngressFrame,
+        work: _ConnectionOperation,
+        operation: Any,
+    ) -> None:
+        operation_id = operation.operation_id
+        if operation_id in context.terminal_emitted:
+            observability = getattr(self, "runtime_observability", None)
+            if observability is not None:
+                observability.record_operation(
+                    "duplicate_terminal_suppressed",
+                    operation_kind=work.frame.operation_kind,
+                )
+            return
+        state_value = getattr(operation.state, "value", str(operation.state))
+        if state_value not in {"completed", "failed", "cancelled", "retryable"}:
+            return
+        context.terminal_emitted.add(operation_id)
+        observability = getattr(self, "runtime_observability", None)
+        if observability is not None:
+            terminal_code = getattr(operation, "terminal_code", None)
+            if terminal_code == "queue_wait_expired":
+                observability.record_operation(
+                    "queue_expired",
+                    operation_kind=work.frame.operation_kind,
+                    result_code="queue_wait_expired",
+                )
+            observability.record_operation(
+                state_value,
+                operation_kind=work.frame.operation_kind,
+                result_code=terminal_code or state_value,
+                phase=getattr(operation, "phase_code", None),
+            )
+            observability.record_operation(
+                "terminal",
+                operation_kind=work.frame.operation_kind,
+                result_code=state_value,
+                phase=getattr(operation, "phase_code", None),
+            )
+        error = None
+        if state_value != "completed":
+            code = self._public_terminal_code(
+                getattr(operation, "terminal_code", None)
+            )
+            error = {
+                "code": code,
+                "message": (
+                    "The operation was cancelled."
+                    if state_value == "cancelled"
+                    else {
+                        "validation_failed": (
+                            "Check the provider, model, and credentials, then try again."
+                        ),
+                        "provider_unavailable": (
+                            "The provider is temporarily unavailable. Try again."
+                        ),
+                        "network_unavailable": (
+                            "The provider could not be reached. Check the network and try again."
+                        ),
+                        "deadline_exceeded": (
+                            "The save could not be completed in time. Try again."
+                        ),
+                    }.get(code, "The operation could not be completed.")
+                ),
+            }
+        from orchestrator.chrome_events import emit_operation_status
+
+        await emit_operation_status(
+            self,
+            context.websocket,
+            operation_id=str(operation_id),
+            action=frame.action,
+            surface=frame.surface or "operation",
+            chat_id=frame.chat_id,
+            connection_generation=str(context.connection_generation),
+            request_generation=str(frame.request_generation),
+            sequence=operation.state_revision,
+            state=state_value,
+            phase=getattr(operation, "phase_code", None) or state_value,
+            label={
+                "completed": "Completed",
+                "failed": "Failed",
+                "cancelled": "Cancelled",
+                "retryable": "Try again",
+            }[state_value],
+            terminal=True,
+            retryable=state_value == "retryable",
+            error=error,
+            retry_after_ms=getattr(operation, "retry_after_ms", None),
+            updated_at=getattr(operation, "updated_at", None),
+        )
+
+    async def _close_ui_socket(
+        self,
+        websocket: Any,
+        *,
+        code: int,
+        reason: str,
+    ) -> None:
+        try:
+            await websocket.close(code=code, reason=reason)
+        except Exception:
+            logger.debug("UI socket close failed", exc_info=True)
+
+    async def _registration_failed(
+        self,
+        context: ConnectionContext,
+        *,
+        code: str,
+        triggering_raw: str | None = None,
+    ) -> None:
+        queued_frames = list(context.preregistration)
+        if triggering_raw is not None:
+            queued_frames.append(triggering_raw)
+        correlated = 0
+        for queued_raw in queued_frames:
+            if await self._send_frame_refusal(
+                context.websocket,
+                self._parsed_ui_frame(queued_raw),
+                code=code,
+                retryable=True,
+            ):
+                correlated += 1
+        context.preregistration.clear()
+        logger.warning(
+            "UI registration refused code=%s queued_frames=%d correlated=%d",
+            code,
+            len(queued_frames),
+            correlated,
+        )
+        await self._close_ui_socket(
+            context.websocket,
+            code=1008,
+            reason=code,
+        )
+
+    def _client_submission_id(
+        self, parsed: dict[str, Any] | None
+    ) -> _uuid.UUID | None:
+        """Recover only a valid client UUID4 for a correlated refusal.
+
+        Validation of the rest of the event may fail, but a valid submission
+        identity is still safe and necessary to terminalize the client's
+        local-only ``submitting`` projection.  Invalid or absent identities
+        remain uncorrelated.
+        """
+
+        frame = parsed or {}
+        payload = frame.get("payload")
+        if not isinstance(payload, dict):
+            payload = {}
+        config = frame.get("config")
+        if not isinstance(config, dict):
+            config = {}
+        supplied, matching = self._matching_frame_value(
+            "submission_id", payload, frame, config
+        )
+        if not matching:
+            return None
+        return self._canonical_uuid4(supplied)
+
+    @staticmethod
+    def _matching_frame_value(
+        field_name: str, *sources: dict[str, Any]
+    ) -> tuple[Any, bool]:
+        """Return one exact repeated wire value, rejecting source conflicts."""
+
+        supplied = [
+            source[field_name]
+            for source in sources
+            if isinstance(source, dict) and field_name in source
+        ]
+        if not supplied:
+            return None, True
+        first = supplied[0]
+        return first, all(value == first for value in supplied[1:])
+
+    def _connection_frame(
+        self,
+        context: ConnectionContext,
+        raw: str,
+        parsed: dict[str, Any] | None,
+    ) -> _ConnectionIngressFrame | None:
+        frame = parsed or {}
+        payload = frame.get("payload")
+        if not isinstance(payload, dict):
+            payload = {}
+        is_ui_event = frame.get("type") == "ui_event"
+        action_value = frame.get("action") or frame.get("type")
+        action_is_valid = isinstance(action_value, str) and re.fullmatch(
+            r"[a-z][a-z0-9_]{0,63}", action_value
+        )
+        if is_ui_event and not action_is_valid:
+            return None
+        action = action_value if action_is_valid else "connection_frame"
+        config_identity = frame.get("config")
+        if not isinstance(config_identity, dict):
+            config_identity = {}
+        supplied_submission, submission_matches = self._matching_frame_value(
+            "submission_id", payload, frame, config_identity
+        )
+        if not submission_matches:
+            return None
+        submission_id = self._canonical_uuid4(supplied_submission)
+        if is_ui_event and supplied_submission in (None, ""):
+            return None
+        if supplied_submission not in (None, "") and submission_id is None:
+            return None
+        submission_id = submission_id or _uuid.uuid4()
+        supplied_request, request_matches = self._matching_frame_value(
+            "request_generation", payload, frame, config_identity
+        )
+        if not request_matches:
+            return None
+        request_generation = self._canonical_uuid4(supplied_request)
+        if is_ui_event and supplied_request in (None, ""):
+            return None
+        if supplied_request not in (None, "") and request_generation is None:
+            return None
+        request_generation = request_generation or _uuid.uuid4()
+        supplied_connection, connection_matches = self._matching_frame_value(
+            "connection_generation", payload, frame, config_identity
+        )
+        if not connection_matches:
+            return None
+        if supplied_connection not in (None, ""):
+            connection_generation = self._canonical_uuid4(supplied_connection)
+            if (
+                connection_generation is None
+                or (
+                    context.connection_generation is not None
+                    and connection_generation != context.connection_generation
+                )
+            ):
+                return None
+
+        surface_value, surface_matches = self._matching_frame_value(
+            "surface", payload, frame
+        )
+        if not surface_matches:
+            return None
+        if surface_value is not None and (
+            not isinstance(surface_value, str)
+            or re.fullmatch(r"[a-z][a-z0-9_]{0,127}", surface_value) is None
+        ):
+            return None
+        surface = surface_value
+        if action in _LLM_CREDENTIAL_SAVE_ACTIONS and surface is None:
+            surface = "llm_settings"
+        payload_chat, chat_matches = self._matching_frame_value(
+            "chat_id", payload, frame
+        )
+        if not chat_matches:
+            return None
+        if payload_chat is not None and self._canonical_uuid4(payload_chat) is None:
+            return None
+        session_chat = frame.get("session_id")
+        # Historical no-chat transport sentinels (for example ``win-client``)
+        # are not conversation identities.  Ignore them rather than admitting
+        # an invalid scope that would make the canonical accepted frame
+        # impossible to serialize.
+        chat_value = payload_chat or (
+            session_chat
+            if self._canonical_uuid4(session_chat) is not None
+            else None
+        )
+        if (
+            payload_chat is not None
+            and self._canonical_uuid4(session_chat) is not None
+            and payload_chat != session_chat
+        ):
+            return None
+        if not chat_value and action in _CONVERSATION_MUTATION_ACTIONS:
+            # Older component-action clients omitted chat_id because the
+            # active canvas made it appear redundant.  Resolve it before
+            # admission so the durable operation and its publication fence
+            # still bind the exact conversation rather than inferring scope
+            # from a later frame.
+            chat_value = self._ws_active_chat.get(id(context.websocket))
+        if chat_value is not None and self._canonical_uuid4(chat_value) is None:
+            return None
+        chat_id = str(chat_value) if chat_value is not None else None
+        # Keep idempotency material non-secret.  Generic UI payloads can carry
+        # chat text, PHI, credentials, or model input; none of those values may
+        # be persisted even as a dictionary-attackable digest.  Submission and
+        # request generations already identify the attempt, while these bounded
+        # structural fields detect accidental identity reuse on the live scope.
+        safe_payload_identity = {
+            key: value
+            for key in _CONNECTION_IDENTITY_FIELDS
+            if (value := payload.get(key)) is None
+            or isinstance(value, (bool, int))
+            or (isinstance(value, str) and len(value) <= 512)
+        }
+        is_credential_save = action in _LLM_CREDENTIAL_SAVE_ACTIONS
+        if is_credential_save:
+            # The owner-scoped submission is the durable retry identity across
+            # connections.  Never hash credential/config values; a fixed
+            # versioned operation identity both avoids secret-derived storage
+            # and remains stable when a reconnect has a new wire generation.
+            normalized = b"llm_credential_save:v1"
+        else:
+            normalized = json.dumps(
+                {
+                    "type": frame.get("type"),
+                    "action": action,
+                    "session_id": chat_id,
+                    "surface": surface,
+                    "submission_id": str(submission_id),
+                    "request_generation": str(request_generation),
+                    "payload_identity": safe_payload_identity,
+                },
+                sort_keys=True,
+                separators=(",", ":"),
+                ensure_ascii=False,
+                default=lambda _value: "unsupported",
+            ).encode("utf-8")
+        accepted_monotonic = time.monotonic()
+        return _ConnectionIngressFrame(
+            raw=raw,
+            parsed=frame,
+            action=action,
+            surface=surface,
+            chat_id=chat_id,
+            submission_id=submission_id,
+            request_generation=request_generation,
+            normalized_digest=hashlib.sha256(normalized).hexdigest(),
+            read_only=action in _READ_ONLY_UI_ACTIONS,
+            operation_kind=(
+                "llm_credential_save"
+                if is_credential_save
+                else "connection_frame"
+            ),
+            deadline_at_monotonic=(
+                accepted_monotonic + LLM_CREDENTIAL_ATTEMPT_TIMEOUT_SECONDS
+                if is_credential_save
+                else None
+            ),
+            deadline_at_utc=(
+                datetime.now(UTC)
+                + timedelta(seconds=LLM_CREDENTIAL_ATTEMPT_TIMEOUT_SECONDS)
+                if is_credential_save
+                else None
+            ),
+        )
+
+    async def _enqueue_connection_frame(
+        self,
+        context: ConnectionContext,
+        raw: str,
+        parsed: dict[str, Any] | None,
+    ) -> None:
+        if context.closing:
+            await self._send_frame_refusal(
+                context.websocket,
+                parsed,
+                code="connection_closing",
+                retryable=True,
+            )
+            return
+        frame = self._connection_frame(context, raw, parsed)
+        if frame is None:
+            await self._send_frame_refusal(
+                context.websocket,
+                parsed,
+                code="invalid_input",
+                retryable=False,
+            )
+            return
+        prior_digest = context.submission_digests.get(frame.submission_id)
+        if prior_digest is not None:
+            observability = getattr(self, "runtime_observability", None)
+            if observability is not None:
+                observability.record_operation(
+                    "duplicate_submission_suppressed",
+                    operation_kind="connection_frame",
+                    result_code=(
+                        "idempotency_conflict"
+                        if prior_digest != frame.normalized_digest
+                        else None
+                    ),
+                )
+            if prior_digest != frame.normalized_digest:
+                await self._send_admission_refusal(
+                    context.websocket,
+                    submission_id=frame.submission_id,
+                    code="idempotency_conflict",
+                    retryable=False,
+                )
+            return
+        if len(context.ingress) >= CONNECTION_INGRESS_LIMIT:
+            await self._send_admission_refusal(
+                context.websocket,
+                submission_id=frame.submission_id,
+                code="capacity_exceeded",
+                retryable=True,
+                retry_after_ms=1000,
+            )
+            return
+        context.submission_digests[
+            frame.submission_id
+        ] = frame.normalized_digest
+        context.ingress.append(frame)
+        if context.admission_task is None or context.admission_task.done():
+            task = self._track_connection_task(
+                context,
+                self._connection_admission_pump(context),
+                name=(
+                    "connection-admission-"
+                    f"{context.connection_scope_id}"
+                ),
+            )
+            context.admission_task = task
+
+    def _submit_connection_batch(
+        self,
+        context: ConnectionContext,
+        batch: list[_ConnectionIngressFrame],
+    ) -> list[tuple[_ConnectionIngressFrame, OperationOwner, Any, Any | None]]:
+        coordinator = self.work_admission
+        results = []
+        for frame in batch:
+            if frame.operation_kind == "llm_credential_save":
+                claims = (
+                    getattr(self, "ui_sessions", {}).get(context.websocket)
+                    or {}
+                )
+                owner_user_id = claims.get("sub") or "legacy"
+                owner = OperationOwner(
+                    owner_scope=OwnerScope.USER,
+                    owner_user_id=owner_user_id,
+                    # Origin/subscriber metadata only; USER partitioning and
+                    # REST authorization remain keyed by owner_user_id.
+                    connection_scope_id=context.connection_scope_id,
+                )
+            else:
+                owner = OperationOwner(
+                    owner_scope=OwnerScope.CONNECTION,
+                    owner_user_id=None,
+                    connection_scope_id=context.connection_scope_id,
+                )
+            parent_value = (frame.parsed.get("payload") or {}).get(
+                "parent_operation_id"
+            ) if isinstance(frame.parsed.get("payload"), dict) else None
+            request = OperationRequest(
+                operation_kind=frame.operation_kind,
+                admission_class=AdmissionClass.INTERACTIVE,
+                owner=owner,
+                submission_id=frame.submission_id,
+                idempotency_namespace=(
+                    "llm_credential_save"
+                    if frame.operation_kind == "llm_credential_save"
+                    else None
+                ),
+                idempotency_key=(
+                    str(frame.submission_id)
+                    if frame.operation_kind == "llm_credential_save"
+                    else None
+                ),
+                normalized_input_digest=(
+                    frame.normalized_digest
+                    if frame.operation_kind == "llm_credential_save"
+                    else None
+                ),
+                chat_id=frame.chat_id,
+                parent_operation_id=self._optional_uuid(parent_value),
+                connection_generation=context.connection_generation,
+                request_generation=frame.request_generation,
+            )
+            try:
+                result = coordinator.submit(request)
+            except Exception as exc:  # returned to the event loop, never exposed
+                result = exc
+            projection = None
+            if not isinstance(result, Exception) and result.accepted:
+                try:
+                    projection = coordinator.query_operation(
+                        owner=owner,
+                        operation_id=result.operation_id,
+                    )
+                except Exception:
+                    logger.exception(
+                        "Accepted connection operation projection failed "
+                        "operation_id=%s",
+                        result.operation_id,
+                    )
+            results.append((frame, owner, result, projection))
+        # ``asyncio.to_thread`` cannot kill a database call.  If disconnect
+        # cancels the awaiting pump at the five-second bound, this worker still
+        # owns cleanup: every accepted-but-not-yet-applied record is cancelled
+        # before the thread returns, so no connection-owned operation detaches.
+        if context.closing:
+            for _frame, result_owner, result, _projection in results:
+                if (
+                    isinstance(result, Exception)
+                    or not result.accepted
+                    or result_owner.owner_scope is not OwnerScope.CONNECTION
+                ):
+                    continue
+                try:
+                    coordinator.cancel(
+                        owner=result_owner,
+                        operation_id=result.operation_id,
+                        terminal_code="disconnected",
+                    )
+                except Exception:
+                    logger.exception(
+                        "Late admission cleanup failed operation_id=%s",
+                        result.operation_id,
+                    )
+        observability = getattr(self, "runtime_observability", None)
+        if observability is not None:
+            try:
+                observability.observe_admission(
+                    coordinator.inspect_admission_class(
+                        AdmissionClass.INTERACTIVE
+                    ),
+                    operation_kind="connection_frame",
+                )
+            except Exception:
+                logger.debug(
+                    "Interactive admission metric refresh failed",
+                    exc_info=True,
+                )
+        return results
+
+    async def _connection_admission_pump(
+        self,
+        context: ConnectionContext,
+    ) -> None:
+        # One yield coalesces an already-buffered socket burst into one off-loop
+        # database handoff.  This keeps the receiver responsive and prevents
+        # released slots from changing the admission result halfway through a
+        # single ingress burst.
+        await asyncio.sleep(0)
+        while context.ingress:
+            batch = list(context.ingress)
+            context.ingress.clear()
+            results = await self._call_work_admission(
+                self._submit_connection_batch,
+                context,
+                batch,
+            )
+            scheduled: list[tuple[_ConnectionOperation, Any]] = []
+            for frame, owner, result, projection in results:
+                if isinstance(result, Exception):
+                    context.submission_digests.pop(frame.submission_id, None)
+                    logger.error(
+                        "Connection admission failed",
+                        exc_info=(
+                            type(result),
+                            result,
+                            result.__traceback__,
+                        ),
+                    )
+                    await self._send_admission_refusal(
+                        context.websocket,
+                        submission_id=frame.submission_id,
+                        code="operation_failed",
+                        retryable=True,
+                    )
+                    continue
+                if not result.accepted:
+                    await self._send_admission_refusal(
+                        context.websocket,
+                        submission_id=frame.submission_id,
+                        code=result.code,
+                        retryable=result.retryable,
+                        retry_after_ms=result.retry_after_ms,
+                    )
+                    continue
+                registry = getattr(self, "_reconnectable_operations", None)
+                if registry is None:
+                    registry = {}
+                    self._reconnectable_operations = registry
+                existing = (
+                    registry.get(result.operation_id)
+                    if owner.owner_scope is OwnerScope.USER
+                    else None
+                )
+                if existing is not None:
+                    existing.subscribers[id(context)] = (context, frame)
+                    context.operations[result.operation_id] = existing
+                    await self._send_operation_projection(
+                        context,
+                        frame,
+                        existing,
+                        projection or result,
+                    )
+                    # The first process-local worker owns execution.  A retry
+                    # is only another viewer/reconciliation path.
+                    continue
+                work = _ConnectionOperation(
+                    frame=frame,
+                    owner=owner,
+                    operation_id=result.operation_id,
+                    auth_principal=(
+                        (
+                            getattr(self, "ui_sessions", {}).get(
+                                context.websocket
+                            )
+                            or {}
+                        ).get("preferred_username")
+                        or owner.owner_user_id
+                        or "unknown"
+                    ),
+                )
+                work.subscribers[id(context)] = (context, frame)
+                context.operations[result.operation_id] = work
+                if owner.owner_scope is OwnerScope.USER:
+                    # Reserve before the first await so concurrent reconnects
+                    # cannot schedule a second worker for this operation.
+                    registry[result.operation_id] = work
+                if (
+                    projection is not None
+                    and projection.state
+                    in {
+                        OperationState.COMPLETED,
+                        OperationState.FAILED,
+                        OperationState.CANCELLED,
+                        OperationState.RETRYABLE,
+                    }
+                ):
+                    await self._send_operation_projection(
+                        context, frame, work, projection
+                    )
+                    if registry.get(result.operation_id) is work:
+                        registry.pop(result.operation_id, None)
+                    continue
+                try:
+                    await self._send_operation_accepted(context, frame, result)
+                except Exception:
+                    # No accepted operation may be stranded merely because its
+                    # canonical UI projection could not be serialized.  Ingress
+                    # is validated before admission, but this fail-safe owns any
+                    # future validation drift: terminalize durably, discard the
+                    # process-local work entry, and correlate the client's local
+                    # submission without fabricating a wire operation terminal.
+                    logger.exception(
+                        "Accepted connection operation projection failed "
+                        "operation_id=%s",
+                        result.operation_id,
+                    )
+                    try:
+                        await self._call_work_admission(
+                            self.work_admission.cancel,
+                            owner=owner,
+                            operation_id=result.operation_id,
+                            terminal_code="operation_failed",
+                        )
+                    except Exception:
+                        logger.exception(
+                            "Accepted connection operation cleanup failed "
+                            "operation_id=%s",
+                            result.operation_id,
+                        )
+                    context.operations.pop(result.operation_id, None)
+                    if registry.get(result.operation_id) is work:
+                        registry.pop(result.operation_id, None)
+                    await self._send_admission_refusal(
+                        context.websocket,
+                        submission_id=frame.submission_id,
+                        code="operation_failed",
+                        retryable=True,
+                    )
+                    await self._notify_interactive_capacity()
+                    continue
+                if (
+                    context.closing
+                    and owner.owner_scope is OwnerScope.CONNECTION
+                ):
+                    terminal = await self._call_work_admission(
+                        self.work_admission.cancel,
+                        owner=owner,
+                        operation_id=result.operation_id,
+                        terminal_code="disconnected",
+                    )
+                    await self._send_operation_terminal(
+                        context, work, terminal
+                    )
+                    await self._notify_interactive_capacity()
+                    continue
+                scheduled.append((work, projection))
+            # Preserve ingress order while building a reader/writer barrier for
+            # live connection state. Consecutive reads may run together, but a
+            # mutation waits for every earlier read and mutation; later reads
+            # in turn wait for that mutation. Transport controls never enter
+            # this lane and retain their cancellation/drain bypass.
+            loop = asyncio.get_running_loop()
+            for work, _projection in scheduled:
+                frame = work.frame
+                work.lane_complete = loop.create_future()
+                if frame.read_only:
+                    work.predecessors = tuple(
+                        predecessor
+                        for predecessor in (context.mutation_tail,)
+                        if predecessor is not None
+                    )
+                    context.pending_reads.add(work.lane_complete)
+                else:
+                    predecessors = [
+                        predecessor
+                        for predecessor in (context.mutation_tail,)
+                        if predecessor is not None
+                    ]
+                    predecessors.extend(context.pending_reads)
+                    # A mutation closes the current reader generation. Future
+                    # reads will depend on this mutation tail instead.
+                    context.pending_reads.clear()
+                    work.predecessors = tuple(dict.fromkeys(predecessors))
+                    context.mutation_tail = work.lane_complete
+                task = self._track_connection_task(
+                    context,
+                    self._run_connection_operation(context, work),
+                    name=f"connection-operation-{work.operation_id}",
+                    operation=True,
+                )
+                work.task = task
+                if work.owner.owner_scope is OwnerScope.USER:
+                    reconnectable_tasks = getattr(
+                        self, "_reconnectable_operation_tasks", None
+                    )
+                    if reconnectable_tasks is None:
+                        reconnectable_tasks = set()
+                        self._reconnectable_operation_tasks = reconnectable_tasks
+                    reconnectable_tasks.add(task)
+
+                    def _release_reconnectable(
+                        done: asyncio.Task[Any],
+                        *,
+                        accepted_work: _ConnectionOperation = work,
+                    ) -> None:
+                        reconnectable_tasks.discard(done)
+                        active = getattr(
+                            self, "_reconnectable_operations", {}
+                        )
+                        if active.get(accepted_work.operation_id) is accepted_work:
+                            active.pop(accepted_work.operation_id, None)
+
+                    task.add_done_callback(_release_reconnectable)
+
+                def _release_unscheduled_lane(
+                    _done: asyncio.Task[Any],
+                    *,
+                    accepted_work: _ConnectionOperation = work,
+                ) -> None:
+                    # A task cancelled before its coroutine's first scheduler
+                    # turn never enters ``finally``. Release its lane future
+                    # here as well so no surviving successor can deadlock.
+                    completion = accepted_work.lane_complete
+                    if completion is not None:
+                        context.pending_reads.discard(completion)
+                        if not completion.done():
+                            completion.set_result(None)
+
+                task.add_done_callback(_release_unscheduled_lane)
+            await asyncio.sleep(0)
+
+    async def _claim_connection_operation(
+        self,
+        context: ConnectionContext,
+        work: _ConnectionOperation,
+    ) -> tuple[Any | None, Any | None]:
+        revision = getattr(self, "_interactive_capacity_revision", 0)
+        while True:
+            if (
+                context.closing
+                and work.owner.owner_scope is OwnerScope.CONNECTION
+            ):
+                terminal = await self._call_work_admission(
+                    self.work_admission.cancel,
+                    owner=work.owner,
+                    operation_id=work.operation_id,
+                    terminal_code="disconnected",
+                )
+                return None, terminal
+            async with context.claim_lock:
+                claim = await self._call_work_admission(
+                    self.work_admission.claim_operation,
+                    AdmissionClass.INTERACTIVE,
+                    work.operation_id,
+                )
+            if claim is not None:
+                return claim, None
+            projection = await self._call_work_admission(
+                self.work_admission.query_operation,
+                owner=work.owner,
+                operation_id=work.operation_id,
+            )
+            if projection.state in {
+                OperationState.COMPLETED,
+                OperationState.FAILED,
+                OperationState.CANCELLED,
+                OperationState.RETRYABLE,
+            }:
+                return None, projection
+            revision = await self._wait_for_interactive_capacity(
+                context,
+                revision,
+                allow_closing=(work.owner.owner_scope is OwnerScope.USER),
+            )
+
+    async def _renew_connection_lease(
+        self,
+        context: ConnectionContext,
+        work: _ConnectionOperation,
+        stop: asyncio.Event,
+        worker: asyncio.Task[Any],
+    ) -> None:
+        interval = max(0.001, CONNECTION_LEASE_RENEW_SECONDS)
+        while not stop.is_set():
+            try:
+                await asyncio.wait_for(stop.wait(), timeout=interval)
+                return
+            except TimeoutError:
+                pass
+            try:
+                await self._call_work_admission(
+                    self.work_admission.renew_execution_lease,
+                    work.fence,
+                )
+            except StaleExecutionFenceError:
+                try:
+                    projection = await self._call_work_admission(
+                        self.work_admission.query_operation,
+                        owner=work.owner,
+                        operation_id=work.operation_id,
+                    )
+                except Exception:
+                    projection = None
+                if projection is None or projection.state not in {
+                    OperationState.COMPLETED,
+                    OperationState.FAILED,
+                    OperationState.CANCELLED,
+                    OperationState.RETRYABLE,
+                }:
+                    logger.warning(
+                        "Interactive execution lease lost operation_id=%s",
+                        work.operation_id,
+                    )
+                    work.lease_lost = True
+                    worker.cancel()
+                return
+            except Exception:
+                logger.exception(
+                    "Interactive execution lease renewal failed operation_id=%s",
+                    work.operation_id,
+                )
+                work.lease_lost = True
+                worker.cancel()
+                return
+
+    async def _terminalize_connection_operation(
+        self,
+        context: ConnectionContext,
+        work: _ConnectionOperation,
+        *,
+        state: OperationState,
+        terminal_code: str | None,
+        safe_summary: str,
+        retry_after_ms: int | None = None,
+    ) -> Any | None:
+        if work.fence is None:
+            try:
+                if state is OperationState.RETRYABLE:
+                    terminal = await self._call_work_admission(
+                        self.work_admission.terminalize_unselected,
+                        work.operation_id,
+                        terminal_code=terminal_code or "operation_failed",
+                        safe_summary=safe_summary,
+                        retry_after_ms=retry_after_ms,
+                    )
+                    if terminal is None:
+                        terminal = await self._call_work_admission(
+                            self.work_admission.query_operation,
+                            owner=work.owner,
+                            operation_id=work.operation_id,
+                        )
+                else:
+                    terminal = await self._call_work_admission(
+                        self.work_admission.cancel,
+                        owner=work.owner,
+                        operation_id=work.operation_id,
+                        terminal_code=terminal_code or "disconnected",
+                    )
+            except Exception:
+                logger.debug(
+                    "Unclaimed connection operation cancellation failed",
+                    exc_info=True,
+                )
+                return None
+        else:
+            try:
+                terminal = await self._call_work_admission(
+                    self.work_admission.terminalize,
+                    work.fence,
+                    state=state,
+                    terminal_code=terminal_code,
+                    safe_summary=safe_summary,
+                    retry_after_ms=retry_after_ms,
+                )
+            except StaleExecutionFenceError:
+                try:
+                    terminal = await self._call_work_admission(
+                        self.work_admission.query_operation,
+                        owner=work.owner,
+                        operation_id=work.operation_id,
+                    )
+                except Exception:
+                    return None
+        await self._send_operation_terminal(context, work, terminal)
+        await self._notify_interactive_capacity()
+        return terminal
+
+    async def _complete_connection_operation(
+        self,
+        context: ConnectionContext,
+        work: _ConnectionOperation,
+    ) -> Any | None:
+        if work.frame.operation_kind != "llm_credential_save":
+            return await self._terminalize_connection_operation(
+                context,
+                work,
+                state=OperationState.COMPLETED,
+                terminal_code=None,
+                safe_summary="Completed",
+            )
+        terminal = work.committed_operation
+        if terminal is None:
+            terminal = await self._call_work_admission(
+                self.work_admission.query_operation,
+                owner=work.owner,
+                operation_id=work.operation_id,
+            )
+        if terminal.state is not OperationState.COMPLETED:
+            await self._send_operation_projection(
+                context, work.frame, work, terminal
+            )
+            return terminal
+        # Persistence already released the admission slot in the same
+        # transaction as COMPLETED. Wake local queued work before best-effort
+        # UI projection, which may have no surviving socket.
+        await self._notify_interactive_capacity()
+        deadline = work.frame.deadline_at_monotonic
+        if deadline is None or time.monotonic() >= deadline:
+            return terminal
+        await self._send_operation_terminal(context, work, terminal)
+        if time.monotonic() >= deadline:
+            return terminal
+        try:
+            from orchestrator import llm_gate
+
+            unlocked = await llm_gate.unlock_after_save(
+                self,
+                work.owner.owner_user_id or "legacy",
+                coordinator=self.work_admission,
+                completed_owner=work.owner,
+                completed_operation_id=work.operation_id,
+                deadline_at_monotonic=deadline,
+            )
+        except TimeoutError:
+            return terminal
+        except Exception:
+            logger.warning(
+                "Completed credential save gate projection failed",
+                exc_info=True,
+            )
+            return terminal
+        # An already-configured owner unlocks no first-run gate, so nothing
+        # above closed the surface they saved from. Web's modal carries a ✕ and
+        # Android has system Back, but an Apple surface is a full screen with
+        # neither — leaving it up strands the user on a form whose work is
+        # already committed. Mirrors the chrome handler's non-operation path.
+        if not unlocked and work.frame.action == "chrome_llm_save":
+            try:
+                from orchestrator.chrome_events import is_native_sdui, push_close
+
+                if is_native_sdui(self, context.websocket) and (
+                    time.monotonic() < deadline
+                ):
+                    await push_close(self, context.websocket)
+            except Exception:
+                logger.debug(
+                    "credential save surface close failed (non-fatal)",
+                    exc_info=True,
+                )
+        remaining = deadline - time.monotonic()
+        if remaining <= 0:
+            return terminal
+        try:
+            async with asyncio.timeout(remaining):
+                await self._safe_send(
+                    context.websocket,
+                    json.dumps({"type": "llm_config_ack", "ok": True}),
+                )
+        except TimeoutError:
+            pass
+        return terminal
+
+    async def _handle_llm_credential_operation(
+        self,
+        context: ConnectionContext,
+        work: _ConnectionOperation,
+    ) -> bool:
+        """Run admitted Save without depending on a still-live UI session.
+
+        The authenticated owner/principal were captured before admission.  A
+        disconnect may remove ``ui_sessions[websocket]`` immediately after
+        drain, so routing reconnectable work back through the connection auth
+        gate would incorrectly turn an accepted Save into a no-op.  This keeps
+        the same shared validation/probe/store handler while extracting only
+        the already-admitted LLM surface payload.
+        """
+
+        from llm_config.ws_handlers import handle_llm_config_set
+
+        if work.frame.action == "chrome_llm_save":
+            from webrender.chrome.surfaces.llm import (
+                _fields,
+                _provider_key,
+                _resolve_api_key,
+            )
+
+            payload = work.frame.parsed.get("payload")
+            fields = _fields(payload)
+            provider = _provider_key(fields)
+            api_key, _used_saved = await _resolve_api_key(
+                self,
+                context.websocket,
+                work.owner.owner_user_id or "legacy",
+                fields,
+            )
+            config = {
+                "provider": provider,
+                "api_key": api_key,
+                "base_url": fields.get("base_url", ""),
+                "model": fields.get("model", ""),
+            }
+        else:
+            config = work.frame.parsed.get("config")
+            if not isinstance(config, dict):
+                config = {}
+        return await handle_llm_config_set(
+            safe_send=self._safe_send,
+            websocket=context.websocket,
+            config=config,
+            actor_user_id=work.owner.owner_user_id or "legacy",
+            auth_principal=work.auth_principal or "unknown",
+            store=self._llm_store,
+            recorder=self.audit_recorder,
+        )
+
+    @asynccontextmanager
+    async def _workspace_mutation_lock(self, chat_id: str):
+        """Serialize one chat's logical canvas updates, re-entrantly per task."""
+
+        held = _WORKSPACE_MUTATION_LOCKS.get()
+        if chat_id in held:
+            yield
+            return
+        lock = self._workspace_locks.setdefault(chat_id, asyncio.Lock())
+        async with lock:
+            token = _WORKSPACE_MUTATION_LOCKS.set(held | {chat_id})
+            try:
+                yield
+            finally:
+                _WORKSPACE_MUTATION_LOCKS.reset(token)
+
+    async def _conversation_mutation_chat_id(
+        self,
+        context: ConnectionContext,
+        work: _ConnectionOperation,
+    ) -> str | None:
+        """Resolve and validate the exact active chat for a canvas mutation."""
+
+        chat_id = work.frame.chat_id
+        payload = work.frame.parsed.get("payload")
+        if not isinstance(payload, dict):
+            payload = {}
+        action = work.frame.action
+        if not chat_id and action in {
+            "delete_saved_component",
+            "combine_components",
+            "condense_components",
+        }:
+            candidate_ids: list[Any] = []
+            if action == "delete_saved_component":
+                candidate_ids = [payload.get("component_id")]
+            elif action == "combine_components":
+                candidate_ids = [payload.get("source_id"), payload.get("target_id")]
+            else:
+                values = payload.get("component_ids")
+                candidate_ids = values if isinstance(values, list) else []
+            for component_id in candidate_ids:
+                if not isinstance(component_id, str) or not component_id:
+                    continue
+                row = await asyncio.to_thread(
+                    self.history.get_component_by_id,
+                    component_id,
+                    user_id=work.owner.owner_user_id or "legacy",
+                )
+                if row is not None:
+                    chat_id = row.get("chat_id")
+                    break
+        if not chat_id:
+            chat_id = self._ws_active_chat.get(id(context.websocket))
+        try:
+            parsed = _uuid.UUID(str(chat_id))
+        except (AttributeError, TypeError, ValueError):
+            return None
+        if parsed.version != 4 or parsed.variant != _uuid.RFC_4122:
+            return None
+        normalized = str(parsed)
+        active = self._ws_active_chat.get(id(context.websocket))
+        if active and str(active) != normalized:
+            raise RuntimeError("conversation mutation does not target the active chat")
+        operation_context = _CONNECTION_OPERATION_CONTEXT.get() or {}
+        operation = operation_context.get("operation")
+        if str(getattr(operation, "chat_id", "") or "") != normalized:
+            raise RuntimeError("conversation mutation operation is not chat-scoped")
+        return normalized
+
+    async def _run_connection_ui_operation(
+        self,
+        context: ConnectionContext,
+        work: _ConnectionOperation,
+    ) -> None:
+        """Run an admitted UI frame, atomically publishing canvas mutations."""
+
+        if work.frame.action not in _CONVERSATION_MUTATION_ACTIONS:
+            await self.handle_ui_message(context.websocket, work.frame.raw)
+            return
+        chat_id = await self._conversation_mutation_chat_id(context, work)
+        if chat_id is None:
+            # The existing action handler emits its normal bounded validation
+            # error.  No persistence method may mutate a revisioned chat
+            # without the stage established below.
+            await self.handle_ui_message(context.websocket, work.frame.raw)
+            return
+        user_id = work.owner.owner_user_id or "legacy"
+        stage = None
+        token = None
+        request_generation = None
+        from orchestrator.conversation_publication import (
+            reset_conversation_publication,
+        )
+
+        async with self._workspace_mutation_lock(chat_id):
+            try:
+                stage, token, request_generation = (
+                    await self._begin_conversation_publication(
+                        context.websocket,
+                        chat_id=chat_id,
+                        user_id=user_id,
+                        operation_context=_CONNECTION_OPERATION_CONTEXT.get(),
+                    )
+                )
+                if stage is None or request_generation is None:
+                    raise RuntimeError(
+                        "conversation mutation lacks publication authority"
+                    )
+                await self.handle_ui_message(context.websocket, work.frame.raw)
+                if stage.dirty:
+                    await self._publish_conversation_snapshot(
+                        context.websocket,
+                        stage=stage,
+                        request_generation=request_generation,
+                    )
+                else:
+                    await asyncio.to_thread(
+                        self.conversation_commits.abort_commit,
+                        commit_id=stage.commit_id,
+                        owner_user_id=stage.user_id,
+                    )
+                    stage.seal(committed=False)
+            finally:
+                if stage is not None and not stage.sealed:
+                    try:
+                        await asyncio.to_thread(
+                            self.conversation_commits.abort_commit,
+                            commit_id=stage.commit_id,
+                            owner_user_id=stage.user_id,
+                        )
+                        stage.seal(committed=False)
+                    except Exception:
+                        logger.warning(
+                            "conversation mutation stage abort failed",
+                            exc_info=True,
+                        )
+                if token is not None:
+                    reset_conversation_publication(token)
+
+    async def run_detached_conversation_mutation(
+        self,
+        *,
+        chat_id: str,
+        user_id: str,
+        mutation: Any,
+    ) -> Any:
+        """Atomically run a REST/server canvas mutation and notify live clients."""
+
+        if not callable(mutation):
+            raise TypeError("mutation must be callable")
+        stage = None
+        token = None
+        request_generation = str(_uuid.uuid4())
+        from orchestrator.conversation_publication import (
+            reset_conversation_publication,
+        )
+
+        async with self._workspace_mutation_lock(chat_id):
+            try:
+                stage, token = await self._begin_detached_conversation_publication(
+                    chat_id=chat_id,
+                    user_id=user_id,
+                    request_generation=request_generation,
+                )
+                result = await mutation()
+                if not stage.dirty:
+                    raise RuntimeError(
+                        "conversation mutation completed without a state change"
+                    )
+                await self._publish_conversation_snapshot(
+                    None,
+                    stage=stage,
+                    request_generation=request_generation,
+                    server_initiated=True,
+                )
+                return result
+            finally:
+                if stage is not None and not stage.sealed:
+                    try:
+                        await asyncio.to_thread(
+                            self.conversation_commits.abort_commit,
+                            commit_id=stage.commit_id,
+                            owner_user_id=stage.user_id,
+                        )
+                        stage.seal(committed=False)
+                    except Exception:
+                        logger.warning(
+                            "detached conversation mutation abort failed",
+                            exc_info=True,
+                        )
+                if token is not None:
+                    reset_conversation_publication(token)
+
+    async def _emit_long_running_operation_phase(
+        self,
+        context: ConnectionContext,
+        work: _ConnectionOperation,
+    ) -> None:
+        """Durably publish a generic phase for any accepted two-second task."""
+
+        if work.frame.operation_kind == "llm_credential_save":
+            return
+        await asyncio.sleep(OPERATION_PROGRESS_PHASE_SECONDS)
+        terminal_states = {
+            OperationState.COMPLETED,
+            OperationState.FAILED,
+            OperationState.CANCELLED,
+            OperationState.RETRYABLE,
+        }
+        while work.fence is None:
+            projection = await self._call_work_admission(
+                self.work_admission.query_operation,
+                owner=work.owner,
+                operation_id=work.operation_id,
+            )
+            if projection.state in terminal_states:
+                return
+            await asyncio.sleep(0.05)
+        try:
+            operation = await self._call_work_admission(
+                self.work_admission.update_phase,
+                work.fence,
+                "running",
+            )
+        except StaleExecutionFenceError:
+            return
+        await self._send_operation_phase(
+            context,
+            work,
+            operation,
+            state="running",
+            phase="running",
+            label="Working…",
+        )
+
+    async def _run_connection_operation(
+        self,
+        context: ConnectionContext,
+        work: _ConnectionOperation,
+    ) -> None:
+        from llm_config.ws_handlers import (
+            LLMConfigOperationContext,
+            LLMConfigOperationFailure,
+            active_llm_config_operation,
+        )
+
+        stop_renewal = asyncio.Event()
+        renewal_task: asyncio.Task[Any] | None = None
+        progress_task = asyncio.create_task(
+            self._emit_long_running_operation_phase(context, work),
+            name=f"connection-progress-{work.operation_id}",
+        )
+
+        async def _execute() -> None:
+            nonlocal renewal_task
+            # Wait before claiming an execution slot. Claiming first could
+            # deadlock a small pool when a later writer occupies the only slot
+            # while waiting for an earlier reader that has not yet claimed.
+            if work.predecessors:
+                await asyncio.gather(*work.predecessors)
+            if (
+                context.closing
+                and work.owner.owner_scope is OwnerScope.CONNECTION
+            ):
+                raise asyncio.CancelledError
+            claim, terminal = await self._claim_connection_operation(
+                context, work
+            )
+            if terminal is not None:
+                await self._send_operation_terminal(context, work, terminal)
+                await self._notify_interactive_capacity()
+                return
+            if claim is None:
+                return
+            work.fence = claim.fence
+            worker = asyncio.current_task()
+            assert worker is not None
+            renewal_task = asyncio.create_task(
+                self._renew_connection_lease(
+                    context,
+                    work,
+                    stop_renewal,
+                    worker,
+                ),
+                name=f"connection-lease-{work.operation_id}",
+            )
+            if (
+                context.closing
+                and work.owner.owner_scope is OwnerScope.CONNECTION
+            ):
+                raise asyncio.CancelledError
+            token = _CONNECTION_OPERATION_CONTEXT.set(
+                {
+                    "operation": claim.operation,
+                    "owner": work.owner,
+                    "execution_fence": claim.fence,
+                    "connection_generation": context.connection_generation,
+                    "request_generation": work.frame.request_generation,
+                }
+            )
+            try:
+                if work.frame.operation_kind == "llm_credential_save":
+                    deadline_monotonic = work.frame.deadline_at_monotonic
+                    deadline_utc = work.frame.deadline_at_utc
+                    if deadline_monotonic is None or deadline_utc is None:
+                        raise RuntimeError(
+                            "credential save is missing its attempt deadline"
+                        )
+
+                    async def _emit_phase(
+                        state: str, phase: str, label: str
+                    ) -> None:
+                        projection = await self._call_work_admission(
+                            self.work_admission.query_operation,
+                            owner=work.owner,
+                            operation_id=work.operation_id,
+                        )
+                        await self._send_operation_phase(
+                            context,
+                            work,
+                            projection,
+                            state=state,
+                            phase=phase,
+                            label=label,
+                        )
+
+                    async def _unlock() -> bool:
+                        from orchestrator import llm_gate
+
+                        return await llm_gate.unlock_after_save(
+                            self,
+                            work.owner.owner_user_id or "legacy",
+                            coordinator=self.work_admission,
+                            fence=claim.fence,
+                            deadline_at_monotonic=deadline_monotonic,
+                        )
+
+                    operation_context = LLMConfigOperationContext(
+                        coordinator=self.work_admission,
+                        fence=claim.fence,
+                        deadline_at_monotonic=deadline_monotonic,
+                        deadline_at_utc=deadline_utc,
+                        emit_phase=_emit_phase,
+                        unlock_after_save=_unlock,
+                    )
+                    with active_llm_config_operation(operation_context):
+                        await self._handle_llm_credential_operation(
+                            context, work
+                        )
+                    if operation_context.failure is not None:
+                        raise operation_context.failure
+                    if operation_context.completed_operation is None:
+                        raise RuntimeError(
+                            "credential save returned without a durable terminal"
+                        )
+                    work.committed_operation = (
+                        operation_context.completed_operation
+                    )
+                else:
+                    await self._run_connection_ui_operation(context, work)
+            finally:
+                _CONNECTION_OPERATION_CONTEXT.reset(token)
+            await self._complete_connection_operation(context, work)
+
+        try:
+            if work.frame.operation_kind == "llm_credential_save":
+                deadline = work.frame.deadline_at_monotonic
+                if deadline is None:
+                    raise RuntimeError(
+                        "credential save is missing its attempt deadline"
+                    )
+                async with asyncio.timeout_at(deadline):
+                    await _execute()
+            else:
+                await _execute()
+        except LLMConfigOperationFailure as exc:
+            await self._terminalize_connection_operation(
+                context,
+                work,
+                state=exc.state,
+                terminal_code=exc.code,
+                safe_summary=exc.safe_summary,
+                retry_after_ms=exc.retry_after_ms,
+            )
+        except TimeoutError:
+            await self._terminalize_connection_operation(
+                context,
+                work,
+                state=OperationState.RETRYABLE,
+                terminal_code="deadline_exceeded",
+                safe_summary="Credential save timed out",
+            )
+        except asyncio.CancelledError:
+            await self._terminalize_connection_operation(
+                context,
+                work,
+                state=(
+                    OperationState.RETRYABLE
+                    if work.lease_lost
+                    else OperationState.CANCELLED
+                ),
+                terminal_code=(
+                    "stale_generation"
+                    if work.lease_lost
+                    else (
+                        "disconnected"
+                        if context.closing
+                        else "cancelled_by_user"
+                    )
+                ),
+                safe_summary=(
+                    "Execution ownership changed"
+                    if work.lease_lost
+                    else "Cancelled"
+                ),
+            )
+        except StaleExecutionFenceError:
+            # A watchdog/lease successor may already own the first terminal.
+            # Reconcile that durable winner; never replace it with late success.
+            try:
+                projection = await self._call_work_admission(
+                    self.work_admission.query_operation,
+                    owner=work.owner,
+                    operation_id=work.operation_id,
+                )
+            except Exception:
+                projection = None
+            if projection is not None:
+                await self._send_operation_projection(
+                    context, work.frame, work, projection
+                )
+        except Exception:
+            logger.exception(
+                "Connection operation failed operation_id=%s",
+                work.operation_id,
+            )
+            await self._terminalize_connection_operation(
+                context,
+                work,
+                state=OperationState.FAILED,
+                terminal_code="operation_failed",
+                safe_summary="Operation failed",
+            )
+        finally:
+            progress_task.cancel()
+            await asyncio.gather(progress_task, return_exceptions=True)
+            stop_renewal.set()
+            if renewal_task is not None:
+                renewal_task.cancel()
+                await asyncio.gather(renewal_task, return_exceptions=True)
+            if work.lane_complete is not None:
+                context.pending_reads.discard(work.lane_complete)
+                if not work.lane_complete.done():
+                    work.lane_complete.set_result(None)
+
+    async def _run_ui_control(
+        self,
+        context: ConnectionContext,
+        raw: str,
+    ) -> None:
+        try:
+            await self.handle_ui_message(context.websocket, raw)
+        except Exception:
+            logger.exception("UI control frame failed")
+
+    async def _run_ui_registration(
+        self,
+        context: ConnectionContext,
+        raw: str,
+    ) -> None:
+        try:
+            await self.handle_ui_message(context.websocket, raw)
+        except Exception:
+            logger.exception("UI registration frame failed")
+
+    async def _route_ui_frame(
+        self,
+        context: ConnectionContext,
+        raw: str,
+    ) -> bool:
+        parsed = self._parsed_ui_frame(raw)
+        control = self._ui_control_kind(parsed)
+        if control == "register_ui":
+            if context.registered:
+                self._track_connection_task(
+                    context,
+                    self._run_ui_registration(context, raw),
+                    name=(
+                        "connection-reregistration-"
+                        f"{context.connection_scope_id}"
+                    ),
+                )
+                return True
+            remaining = context.registration_deadline - time.monotonic()
+            if remaining <= 0:
+                await self._registration_failed(
+                    context,
+                    code="registration_timeout",
+                )
+                return False
+            registration_task = self._track_connection_task(
+                context,
+                self._run_ui_registration(context, raw),
+                name=f"connection-registration-{context.connection_scope_id}",
+            )
+            registered_event = self._registered_events.get(
+                id(context.websocket)
+            )
+            if registered_event is None:
+                registered_event = asyncio.Event()
+                self._registered_events[id(context.websocket)] = (
+                    registered_event
+                )
+            event_waiter = asyncio.create_task(registered_event.wait())
+            done, _pending = await asyncio.wait(
+                {registration_task, event_waiter},
+                timeout=remaining,
+                return_when=asyncio.FIRST_COMPLETED,
+            )
+            if not done:
+                registration_task.cancel()
+                event_waiter.cancel()
+                await asyncio.gather(
+                    registration_task,
+                    event_waiter,
+                    return_exceptions=True,
+                )
+                await self._registration_failed(
+                    context,
+                    code="registration_timeout",
+                )
+                return False
+            event_waiter.cancel()
+            await asyncio.gather(event_waiter, return_exceptions=True)
+            if (
+                registered_event.is_set()
+                and context.websocket in self.ui_sessions
+            ):
+                context.registered = True
+                supplied_generation = self._optional_uuid(
+                    (parsed or {}).get("connection_generation")
+                )
+                context.connection_generation = (
+                    supplied_generation or _uuid.uuid4()
+                )
+                queued = list(context.preregistration)
+                context.preregistration.clear()
+                for queued_raw in queued:
+                    await self._enqueue_connection_frame(
+                        context,
+                        queued_raw,
+                        self._parsed_ui_frame(queued_raw),
+                    )
+            elif registration_task.done():
+                # Invalid auth deliberately sets the legacy event so old
+                # fire-and-forget waiters can recover.  The finite connection
+                # scope keeps it closed until a valid retry succeeds.
+                registered_event.clear()
+            return True
+        if control == "close":
+            await self._close_ui_socket(
+                context.websocket,
+                code=1000,
+                reason="client_close",
+            )
+            return False
+        if control == "ping":
+            await self._safe_send(
+                context.websocket,
+                json.dumps({"type": "pong"}),
+            )
+            return True
+        if control == "pong":
+            return True
+        if control == "cancel_task":
+            self._track_connection_task(
+                context,
+                self._run_ui_control(context, raw),
+                name=(
+                    f"connection-control-{control}-"
+                    f"{context.connection_scope_id}"
+                ),
+            )
+            return True
+        if not context.registered:
+            if len(context.preregistration) >= REGISTRATION_QUEUE_LIMIT:
+                await self._registration_failed(
+                    context,
+                    code="registration_queue_full",
+                    triggering_raw=raw,
+                )
+                return False
+            context.preregistration.append(raw)
+            return True
+        await self._enqueue_connection_frame(context, raw, parsed)
+        return True
+
+    async def _serve_ui_frames(
+        self,
+        websocket: Any,
+        receive: Any,
+    ) -> None:
+        context = self._new_connection_context(websocket)
+        try:
+            while not context.closing:
+                if context.registered:
+                    raw = await receive()
+                else:
+                    remaining = (
+                        context.registration_deadline - time.monotonic()
+                    )
+                    if remaining <= 0:
+                        await self._registration_failed(
+                            context,
+                            code="registration_timeout",
+                        )
+                        break
+                    try:
+                        raw = await asyncio.wait_for(
+                            receive(), timeout=remaining
+                        )
+                    except TimeoutError:
+                        await self._registration_failed(
+                            context,
+                            code="registration_timeout",
+                        )
+                        break
+                if not await self._route_ui_frame(context, raw):
+                    break
+        finally:
+            await self._drain_connection_context(context)
+
+    async def _drain_connection_context(
+        self,
+        context: ConnectionContext,
+    ) -> None:
+        if context.closing:
+            # The first caller owns drain; a repeated caller only waits for the
+            # context to disappear from the active map.
+            return
+        drain_started = time.monotonic()
+        context.closing = True
+        context.preregistration.clear()
+        context.ingress.clear()
+        await self._notify_interactive_capacity()
+
+        connection_work = tuple(
+            work
+            for work in context.operations.values()
+            if work.owner.owner_scope is OwnerScope.CONNECTION
+        )
+        reconnectable_work = tuple(
+            work
+            for work in context.operations.values()
+            if work.owner.owner_scope is not OwnerScope.CONNECTION
+        )
+        for work in reconnectable_work:
+            # USER-owned Save continues; only this disconnected status viewer
+            # is removed. Durable operation/submission GETs remain available.
+            work.subscribers.pop(id(context), None)
+        reconnectable_tasks = {
+            work.task
+            for work in reconnectable_work
+            if work.task is not None and not work.task.done()
+        }
+
+        async def _request_cancel(
+            work: _ConnectionOperation,
+        ) -> tuple[_ConnectionOperation, Any | None]:
+            try:
+                terminal = await self._call_work_admission(
+                    self.work_admission.cancel,
+                    owner=work.owner,
+                    operation_id=work.operation_id,
+                    terminal_code="disconnected",
+                )
+            except Exception:
+                logger.debug(
+                    "Connection operation cancel request failed",
+                    exc_info=True,
+                )
+                terminal = None
+            return work, terminal
+
+        cancellation_results = await asyncio.gather(
+            *(
+                _request_cancel(work)
+                for work in connection_work
+            )
+        )
+        for work, terminal in cancellation_results:
+            if terminal is not None:
+                await self._send_operation_terminal(
+                    context, work, terminal
+                )
+        connection_operation_tasks = {
+            work.task
+            for work in connection_work
+            if work.task is not None
+        }
+        for task in connection_operation_tasks:
+            if not task.done():
+                task.cancel()
+
+        pending_scope = {
+            task
+            for task in context.tracked_tasks
+            if not task.done() and task not in reconnectable_tasks
+        }
+        remaining = max(
+            0.0,
+            CONNECTION_DRAIN_TIMEOUT_SECONDS
+            - (time.monotonic() - drain_started),
+        )
+        if pending_scope:
+            _done, pending = await asyncio.wait(
+                pending_scope,
+                timeout=remaining,
+            )
+        else:
+            pending = set()
+
+        if pending:
+            pending_operations = {
+                work.task: work
+                for work in connection_work
+                if work.task in pending
+            }
+            async def _force_terminal(
+                work: _ConnectionOperation,
+            ) -> tuple[_ConnectionOperation, Any | None]:
+                if work.fence is not None:
+                    try:
+                        terminal = await self._call_work_admission(
+                            self.work_admission.terminalize,
+                            work.fence,
+                            state=OperationState.CANCELLED,
+                            terminal_code="disconnect_drain_timeout",
+                            safe_summary="Cancelled",
+                            retry_after_ms=None,
+                        )
+                    except StaleExecutionFenceError:
+                        terminal = None
+                    except Exception:
+                        logger.debug(
+                            "Forced disconnect terminalization failed",
+                            exc_info=True,
+                        )
+                        terminal = None
+                else:
+                    terminal = None
+                return work, terminal
+
+            forced_results = await asyncio.gather(
+                *(
+                    _force_terminal(work)
+                    for work in pending_operations.values()
+                )
+            )
+            for work, terminal in forced_results:
+                if terminal is not None:
+                    await self._send_operation_terminal(
+                        context, work, terminal
+                    )
+            for task in pending_operations:
+                task.cancel()
+            for task in pending - set(pending_operations):
+                task.cancel()
+            # Give the forced cancellation a bounded scheduler turn to unwind;
+            # durable fences are already terminal, so any survivor cannot
+            # publish a late effect.
+            for _ in range(3):
+                if all(task.done() for task in pending):
+                    break
+                await asyncio.sleep(0)
+            pending = {task for task in pending if not task.done()}
+        if pending:
+            logger.critical(
+                "Connection drain left %d cancellation-resistant task(s) "
+                "scope_id=%s",
+                len(pending),
+                context.connection_scope_id,
+            )
+
+        context.tracked_tasks.clear()
+        context.operation_tasks.clear()
+        context.operations.clear()
+        context.submission_digests.clear()
+        contexts = getattr(self, "_connection_contexts", {})
+        if contexts.get(id(context.websocket)) is context:
+            contexts.pop(id(context.websocket), None)
+        observability = getattr(self, "runtime_observability", None)
+        if observability is not None:
+            try:
+                observability.observe_disconnect_drain(
+                    duration_seconds=max(
+                        0.0, time.monotonic() - drain_started
+                    ),
+                    remainder=len(pending),
+                )
+            except Exception:
+                logger.debug(
+                    "Connection drain metric update failed",
+                    exc_info=True,
+                )
+
+    async def _safe_handle_ui_message(self, websocket, message: str):
+        """Compatibility wrapper using structural registration detection."""
+
+        try:
+            frame = self._parsed_ui_frame(message)
+            if self._ui_control_kind(frame) != "register_ui":
+                event = self._registered_events.get(id(websocket))
+                if event is not None and not event.is_set():
+                    await event.wait()
             await self.handle_ui_message(websocket, message)
-        except Exception as e:
-            logger.error(f"UI message task error: {e}", exc_info=True)
+        except Exception as exc:
+            logger.error("UI message task error: %s", exc, exc_info=True)
 
     async def handle_ui_message(self, websocket, message: str):
         """Handle message from a UI client."""
         try:
-            msg = Message.from_json(message)
+            raw_frame = self._parsed_ui_frame(message)
+            if (
+                raw_frame is not None
+                and (
+                    raw_frame.get("type") in _PERSONAL_AGENT_HOST_FRAME_TYPES
+                    or (
+                        raw_frame.get("type") == "mcp_response"
+                        and isinstance(raw_frame.get("fence"), dict)
+                    )
+                )
+            ):
+                await self._handle_personal_agent_host_frame(websocket, raw_frame)
+                return
+            invalid_host_field: str | None = None
+            try:
+                msg = Message.from_json(message)
+            except ProtocolValidationError:
+                # Authenticate/register the UI normally, but refuse only its
+                # malformed optional host capability with the exact safe v2
+                # envelope. This preserves the existing non-disclosing auth
+                # path while ensuring malformed host data never gains a session.
+                if not (
+                    isinstance(raw_frame, dict)
+                    and raw_frame.get("type") == "register_ui"
+                    and isinstance(raw_frame.get("agent_host"), dict)
+                ):
+                    raise
+                invalid_host_field = self._invalid_host_registration_field(
+                    raw_frame["agent_host"]
+                )
+                sanitized = dict(raw_frame)
+                sanitized["agent_host"] = False
+                sanitized.pop("host_session_id", None)
+                msg = Message.from_json(json.dumps(sanitized))
 
             if isinstance(msg, RegisterUI):
                 token = msg.token
                 user_data = None
-                
+
                 # Check for token validation (skip if not configured or in debug/dev mode if desired, but we want security)
                 if token:
                     with perf_span("register_ui.validate"):
                         user_data = await self.validate_token(token)
-                
+
                 if user_data:
                     logger.info(f"UI registered: {user_data.get('preferred_username', 'unknown')}")
                     user_data["_raw_token"] = token  # Store raw token for RFC 8693 delegation
                     self.ui_sessions[websocket] = user_data
-                    # 058: does this socket belong to a DESKTOP HOST (can it run a
-                    # delivered agent bundle as a child process)? Only such sockets
-                    # ever receive generated code — a browser tab must never be
-                    # pushed a code bundle. Declared explicitly (additive
-                    # `agent_host`, or an `agent_host` capability); absent ⇒ False.
+                    # A structured v2 advertisement is validated against the
+                    # packaged runtime contract and receives a server-owned host
+                    # session before it becomes eligible. The legacy boolean is
+                    # retained only for feature-058 compatibility tests/clients;
+                    # it never participates in v2 selection or delivery.
                     _hosts = getattr(self, "_agent_host_sockets", None)
                     if _hosts is not None:
-                        if (bool(getattr(msg, "agent_host", False))
-                                or "agent_host" in (getattr(msg, "capabilities", None) or [])):
+                        if invalid_host_field is not None:
+                            await self._refuse_personal_agent_host(
+                                websocket,
+                                code="invalid_host_registration",
+                                details={"field": invalid_host_field},
+                            )
+                        elif isinstance(msg.agent_host, AgentHostRegistration):
+                            await self._register_personal_agent_host(
+                                websocket,
+                                owner_user_id=user_data.get("sub", "legacy"),
+                                registration=msg.agent_host,
+                            )
+                        elif (
+                            msg.agent_host is True
+                            or "agent_host"
+                            in (getattr(msg, "capabilities", None) or [])
+                        ):
                             _hosts[id(websocket)] = str(
                                 getattr(msg, "host_session_id", "") or "")
                         else:
                             _hosts.pop(id(websocket), None)
                     _register_started = time.monotonic()
                     user_id = user_data.get("sub", "legacy")
+                    _resume_requested = getattr(msg, "resume", None) is not None
+                    _resume_confirmed_not_found = False
 
                     # Feature 052 (FR-012): profile save + login audit events
                     # leave the first-paint critical path. One task keeps the
@@ -1833,15 +6257,76 @@ class Orchestrator:
                         except Exception as e:
                             logger.warning(f"Failed to load user preferences: {e}")
 
-                        # Mark registration complete so queued messages can proceed
-                        evt = self._registered_events.get(id(websocket))
-                        if evt:
-                            evt.set()
-
                         try:
                             _tools_avail = await _tools_task
                         except Exception:
                             _tools_avail = True
+
+                    # Feature 060: resolve a fenced account-scoped locator
+                    # before registration opens its queued work or welcome can
+                    # paint. A transient failure preserves the locator and
+                    # suppresses welcome; an owner-scoped miss uses the same
+                    # non-disclosing not-found result as an explicit load.
+                    if _resume_requested:
+                        resume = msg.resume or {}
+                        resume_chat_id = resume["active_chat_id"]
+                        resume_request_generation = resume["request_generation"]
+                        try:
+                            await self._emit_hydration_snapshot(
+                                websocket,
+                                chat_id=resume_chat_id,
+                                user_id=user_id,
+                                connection_generation=msg.connection_generation,
+                                request_generation=resume_request_generation,
+                            )
+                            self._ws_welcome.pop(id(websocket), None)
+                            await self._resume_chat_streams(
+                                websocket, user_id, resume_chat_id
+                            )
+                            if flags.is_enabled("bg_continuity"):
+                                await self._replay_chat_task(
+                                    websocket, resume_chat_id
+                                )
+                        except ConversationNotFound:
+                            _resume_confirmed_not_found = True
+                            await self._safe_send(
+                                websocket,
+                                json.dumps(
+                                    {
+                                        "type": "error",
+                                        "code": "chat_not_found",
+                                        "message": "Chat not found",
+                                        "chat_id": resume_chat_id,
+                                        "connection_generation": msg.connection_generation,
+                                        "request_generation": resume_request_generation,
+                                    }
+                                ),
+                            )
+                        except Exception:
+                            logger.warning(
+                                "register_ui conversation hydration failed",
+                                exc_info=True,
+                            )
+                            await self._safe_send(
+                                websocket,
+                                json.dumps(
+                                    {
+                                        "type": "error",
+                                        "code": "snapshot_retryable",
+                                        "message": "Conversation restore is temporarily unavailable",
+                                        "chat_id": resume_chat_id,
+                                        "connection_generation": msg.connection_generation,
+                                        "request_generation": resume_request_generation,
+                                        "retryable": True,
+                                    }
+                                ),
+                            )
+
+                    # Mark registration complete only after the requested
+                    # locator has been owner-validated and resolved.
+                    evt = self._registered_events.get(id(websocket))
+                    if evt:
+                        evt.set()
 
                     # Feature 054: mandatory first-run provider-setup gate.
                     # An unconfigured user's very first post-login surface is
@@ -1882,7 +6367,11 @@ class Orchestrator:
                     # in-flight background task. Ownership-validated; an
                     # invalid/foreign id is ignored silently (register still
                     # succeeds).
-                    if msg.session_id and flags.is_enabled("bg_continuity"):
+                    if (
+                        not _resume_requested
+                        and msg.session_id
+                        and flags.is_enabled("bg_continuity")
+                    ):
                         try:
                             owned = await self.history.db.afetch_one(
                                 "SELECT id FROM chats WHERE id = ? AND user_id = ?",
@@ -1901,7 +6390,14 @@ class Orchestrator:
                     # components over the normal ui_render path (Constitution
                     # II: ROTE adapts them per device; nothing client-specific).
                     try:
-                        if not _llm_gated and not self._ws_active_chat.get(id(websocket)):
+                        if (
+                            not _llm_gated
+                            and not self._ws_active_chat.get(id(websocket))
+                            and (
+                                not _resume_requested
+                                or _resume_confirmed_not_found
+                            )
+                        ):
                             from orchestrator.welcome import welcome_components
                             # Feature 030: tell the welcome canvas whether any
                             # tools are dispatchable so it can lead with the
@@ -2191,17 +6687,24 @@ class Orchestrator:
                     if task_id:
                         bg_task = await self.async_task_manager.get(task_id)
                         if bg_task:
-                            bg_task.watchers.append(websocket)
+                            task_status = bg_task._canonical_status()
                             # If already completed, notify immediately
-                            if bg_task.status.value in ("completed", "failed", "cancelled"):
+                            if task_status.value in (
+                                "completed",
+                                "failed",
+                                "cancelled",
+                                "retryable",
+                            ):
                                 await self._safe_send(websocket, json.dumps({
                                     "type": "task_completed",
                                     "payload": {
                                         "task_id": bg_task.task_id,
                                         "chat_id": bg_task.chat_id,
-                                        "status": bg_task.status.value,
+                                        "status": task_status.value,
                                     },
                                 }))
+                            else:
+                                bg_task.watchers.append(websocket)
                         else:
                             await self._safe_send(websocket, json.dumps({
                                 "type": "error",
@@ -2339,6 +6842,71 @@ class Orchestrator:
                                 "active": False,
                             }))
 
+                        # Feature 060: the atomic snapshot is the authoritative
+                        # load completion. The bounded chat_loaded/ui_render
+                        # pair below remains compatibility-only and is scoped
+                        # as a disposable overlay for 060 clients.
+                        load_authority = self._conversation_authority(
+                            _CONNECTION_OPERATION_CONTEXT.get(), websocket
+                        )
+                        if load_authority is not None:
+                            load_operation, _load_owner, _load_fence = load_authority
+                            try:
+                                await self._emit_hydration_snapshot(
+                                    websocket,
+                                    chat_id=chat_id,
+                                    user_id=user_id,
+                                    connection_generation=(
+                                        load_operation.connection_generation
+                                    ),
+                                    request_generation=(
+                                        load_operation.request_generation
+                                    ),
+                                )
+                            except ConversationNotFound:
+                                await self._safe_send(
+                                    websocket,
+                                    json.dumps(
+                                        {
+                                            "type": "error",
+                                            "code": "chat_not_found",
+                                            "message": "Chat not found",
+                                            "chat_id": chat_id,
+                                            "connection_generation": str(
+                                                load_operation.connection_generation
+                                            ),
+                                            "request_generation": str(
+                                                load_operation.request_generation
+                                            ),
+                                        }
+                                    ),
+                                )
+                                return
+                            except Exception:
+                                logger.warning(
+                                    "load_chat atomic hydration failed",
+                                    exc_info=True,
+                                )
+                                await self._safe_send(
+                                    websocket,
+                                    json.dumps(
+                                        {
+                                            "type": "error",
+                                            "code": "snapshot_retryable",
+                                            "message": "Conversation restore is temporarily unavailable",
+                                            "chat_id": chat_id,
+                                            "connection_generation": str(
+                                                load_operation.connection_generation
+                                            ),
+                                            "request_generation": str(
+                                                load_operation.request_generation
+                                            ),
+                                            "retryable": True,
+                                        }
+                                    ),
+                                )
+                                return
+
                         # Feature 028 (FR-028) + 045: component-bearing transcript
                         # messages get a server-rendered html form, but the chat
                         # rail is TEXT ONLY — only text primitives render; rich
@@ -2472,21 +7040,24 @@ class Orchestrator:
                         return
                     
                     try:
-                        # Feature 028 (D18): explicit saves are a deprecated
-                        # alias — everything rich is auto-persisted. Route
-                        # through the workspace so the row gets a stable
-                        # identity instead of a bare legacy row.
-                        if isinstance(component_data, dict):
-                            ops = self.workspace.upsert(chat_id, user_id, [component_data])
-                            component_id = ops[0]["component_id"] if ops else self.history.save_component(
-                                chat_id, component_data, component_type, title, user_id=user_id
-                            )
-                            if ops:
-                                await self.send_ui_upsert(websocket, chat_id, user_id, ops)
-                        else:
-                            component_id = self.history.save_component(
-                                chat_id, component_data, component_type, title, user_id=user_id
-                            )
+                        # Explicit save is a deprecated alias for a normal
+                        # workspace upsert.  A revisioned canvas accepts only
+                        # semantic component objects; legacy bare rows cannot
+                        # bypass the conversation publication boundary.
+                        if not isinstance(component_data, dict):
+                            raise ValueError("component_data must be a component object")
+                        ops = await self.workspace.aupsert(
+                            chat_id, user_id, [component_data]
+                        )
+                        if not ops:
+                            raise RuntimeError("component save produced no workspace mutation")
+                        component_id = ops[0]["component_id"]
+                        await self.workspace.asnapshot(
+                            chat_id, user_id, cause="save"
+                        )
+                        await self.send_ui_upsert(
+                            websocket, chat_id, user_id, ops
+                        )
 
                         # Send success response
                         await self._safe_send(websocket, json.dumps({
@@ -2527,17 +7098,38 @@ class Orchestrator:
                         ])
                         return
 
-                    # Feature 028 (D18): resolve the row before deleting so the
-                    # workspace identity can be removed from every client and
-                    # the removal snapshotted/audited.
-                    row = self.history.get_component_by_id(component_id, user_id=user_id)
+                    # Resolve the legacy physical row to its stable workspace
+                    # identity, then remove only from the complete staged
+                    # canvas.  The outer operation publishes that removal.
+                    row = await asyncio.to_thread(
+                        self.history.get_component_by_id,
+                        component_id,
+                        user_id=user_id,
+                    )
                     ws_component_id = None
                     chat_id_for_row = row.get("chat_id") if row else None
-                    if row and isinstance(row.get("component_data"), dict):
-                        ws_component_id = row["component_data"].get("component_id")
-
-                    success = self.history.delete_component(component_id, user_id=user_id)
+                    if not chat_id_for_row:
+                        chat_id_for_row = self._ws_active_chat.get(id(websocket))
+                    if row and chat_id_for_row:
+                        ws_component_id = (
+                            await self._workspace_identity_for_saved_row(
+                                chat_id=chat_id_for_row,
+                                user_id=user_id,
+                                row=row,
+                                supplied_id=component_id,
+                            )
+                        )
+                    success = bool(
+                        ws_component_id
+                        and chat_id_for_row
+                        and await self.workspace.aremove(
+                            chat_id_for_row, user_id, ws_component_id
+                        )
+                    )
                     if success:
+                        await self.workspace.asnapshot(
+                            chat_id_for_row, user_id, cause="remove"
+                        )
                         await self._safe_send(websocket, json.dumps({
                             "type": "component_deleted",
                             "component_id": component_id
@@ -2547,14 +7139,13 @@ class Orchestrator:
                                 {"op": "remove", "component_id": ws_component_id}
                             ])
                             try:
-                                self.workspace.snapshot(chat_id_for_row, user_id, cause="remove")
                                 from audit.hooks import record_workspace_event
                                 asyncio.create_task(record_workspace_event(
                                     user_id=user_id, action="component_removed",
                                     chat_id=chat_id_for_row, component_id=ws_component_id,
                                 ))
                             except Exception:
-                                logger.debug("workspace remove bookkeeping failed", exc_info=True)
+                                logger.debug("workspace remove audit failed", exc_info=True)
 
                         # Broadcast updated chat history (each user gets their own)
                         await self._broadcast_user_history()
@@ -2605,42 +7196,24 @@ class Orchestrator:
                             }))
                         else:
                             chat_id = source["chat_id"]
-                            # Collect source metadata from original components
-                            source_tools = set()
-                            source_agents = set()
-                            for comp in [source, target]:
-                                cd = comp.get("component_data", {})
-                                if cd.get("_source_tool"):
-                                    source_tools.add(cd["_source_tool"])
-                                if cd.get("_source_agent"):
-                                    source_agents.add(cd["_source_agent"])
-
-                            new_components = self.history.replace_components(
-                                [source_id, target_id],
-                                result["components"],
-                                chat_id,
-                                user_id=user_id
+                            removed_ids, new_components, ops = (
+                                await self._replace_workspace_components(
+                                    chat_id=chat_id,
+                                    user_id=user_id,
+                                    source_rows=[source, target],
+                                    replacements=result["components"],
+                                    cause="combine",
+                                )
                             )
-
-                            # Tag combined components with source metadata so live streaming continues
-                            if source_tools:
-                                for nc in new_components:
-                                    cd = nc.get("component_data")
-                                    if isinstance(cd, dict):
-                                        cd["_source_tool"] = next(iter(source_tools))
-                                        if source_agents:
-                                            cd["_source_agent"] = next(iter(source_agents))
+                            await self.send_ui_upsert(
+                                websocket, chat_id, user_id, ops
+                            )
 
                             await self._safe_send(websocket, json.dumps({
                                 "type": "components_combined",
-                                "removed_ids": [source_id, target_id],
+                                "removed_ids": removed_ids,
                                 "new_components": new_components
                             }))
-                            # Feature 028 (D18): make the legacy replacement
-                            # visible — stamp identities, snapshot, re-render.
-                            await self._reconcile_legacy_replacement(
-                                websocket, chat_id, user_id, cause="combine"
-                            )
                     except Exception as e:
                         logger.error(f"Combine failed: {e}", exc_info=True)
                         await self._safe_send(websocket, json.dumps({
@@ -2872,42 +7445,24 @@ class Orchestrator:
                             }))
                         else:
                             chat_id = components[0]["chat_id"]
-                            # Collect source metadata from original components to carry forward
-                            source_tools = set()
-                            source_agents = set()
-                            for comp in components:
-                                cd = comp.get("component_data", {})
-                                if cd.get("_source_tool"):
-                                    source_tools.add(cd["_source_tool"])
-                                if cd.get("_source_agent"):
-                                    source_agents.add(cd["_source_agent"])
-
-                            new_components = self.history.replace_components(
-                                component_ids,
-                                result["components"],
-                                chat_id,
-                                user_id=user_id
+                            removed_ids, new_components, ops = (
+                                await self._replace_workspace_components(
+                                    chat_id=chat_id,
+                                    user_id=user_id,
+                                    source_rows=components,
+                                    replacements=result["components"],
+                                    cause="condense",
+                                )
                             )
-
-                            # Tag condensed components with source metadata so live streaming continues
-                            if source_tools:
-                                for nc in new_components:
-                                    cd = nc.get("component_data")
-                                    if isinstance(cd, dict):
-                                        cd["_source_tool"] = next(iter(source_tools))
-                                        if source_agents:
-                                            cd["_source_agent"] = next(iter(source_agents))
+                            await self.send_ui_upsert(
+                                websocket, chat_id, user_id, ops
+                            )
 
                             await self._safe_send(websocket, json.dumps({
                                 "type": "components_condensed",
-                                "removed_ids": component_ids,
+                                "removed_ids": removed_ids,
                                 "new_components": new_components
                             }))
-                            # Feature 028 (D18): make the legacy replacement
-                            # visible — stamp identities, snapshot, re-render.
-                            await self._reconcile_legacy_replacement(
-                                websocket, chat_id, user_id, cause="condense"
-                            )
                     except Exception as e:
                         logger.error(f"Condense failed: {e}", exc_info=True)
                         await self._safe_send(websocket, json.dumps({
@@ -3063,8 +7618,17 @@ class Orchestrator:
                     )
                     if not handled:
                         logger.warning("Unhandled ui_event action: %r", msg.action)
+                        if _CONNECTION_OPERATION_CONTEXT.get() is not None:
+                            raise RuntimeError("ui_event action is not supported")
 
         except Exception as e:
+            # Feature 060 credential Save owns its terminal at the durable
+            # operation wrapper.  Preserve that typed, safe outcome across
+            # the legacy chrome dispatcher instead of swallowing it as a
+            # generic UI error (which would later fabricate completion).
+            from llm_config.ws_handlers import LLMConfigOperationFailure
+            if isinstance(e, LLMConfigOperationFailure):
+                raise
             import traceback
             logger.error(f"Error handling UI message: {e}\n{traceback.format_exc()}")
             # Feature 044 (FR-002/SC-006): a generic ui_event failure must not be
@@ -3078,10 +7642,143 @@ class Orchestrator:
                 }))
             except Exception:
                 logger.debug("error-frame emission failed", exc_info=True)
+            if _CONNECTION_OPERATION_CONTEXT.get() is not None:
+                raise
 
     # =========================================================================
     # COMPONENT COMBINING (LLM-powered)
     # =========================================================================
+
+    async def _workspace_identity_for_saved_row(
+        self,
+        *,
+        chat_id: str,
+        user_id: str,
+        row: Dict[str, Any],
+        supplied_id: str | None = None,
+    ) -> str | None:
+        """Map a legacy saved-row reference onto the staged stable identity."""
+
+        data = row.get("component_data")
+        if isinstance(data, dict):
+            identity = data.get("component_id") or row.get("component_id")
+            if isinstance(identity, str) and identity:
+                return identity
+        if supplied_id:
+            semantic = await self.workspace.aget_by_component_id(
+                chat_id, user_id, supplied_id
+            )
+            if semantic is not None:
+                return supplied_id
+        if not isinstance(data, dict):
+            return None
+        source_semantic = dict(data)
+        source_semantic.pop("component_id", None)
+        candidates: list[str] = []
+        for candidate in await self.workspace.alive_rows(chat_id, user_id):
+            candidate_data = candidate.get("component_data")
+            if not isinstance(candidate_data, dict):
+                continue
+            candidate_semantic = dict(candidate_data)
+            candidate_semantic.pop("component_id", None)
+            if (
+                candidate.get("created_at") == row.get("created_at")
+                and candidate_semantic == source_semantic
+                and isinstance(candidate.get("component_id"), str)
+            ):
+                candidates.append(candidate["component_id"])
+        return candidates[0] if len(candidates) == 1 else None
+
+    async def _replace_workspace_components(
+        self,
+        *,
+        chat_id: str,
+        user_id: str,
+        source_rows: List[Dict[str, Any]],
+        replacements: List[Dict[str, Any]],
+        cause: str = "replace",
+    ) -> tuple[list[str], list[Dict[str, Any]], list[Dict[str, Any]]]:
+        """Replace saved component identities inside the active publication."""
+
+        source_ids: list[str] = []
+        source_tools: set[str] = set()
+        source_agents: set[str] = set()
+        for row in source_rows:
+            if str(row.get("chat_id") or "") != chat_id:
+                raise ValueError("component replacement crosses conversations")
+            data = row.get("component_data")
+            if not isinstance(data, dict):
+                raise ValueError("component replacement source is not semantic")
+            component_id = await Orchestrator._workspace_identity_for_saved_row(
+                self,
+                chat_id=chat_id,
+                user_id=user_id,
+                row=row,
+            )
+            if not isinstance(component_id, str) or not component_id:
+                raise ValueError("component replacement source has no stable identity")
+            if component_id not in source_ids:
+                source_ids.append(component_id)
+            if isinstance(data.get("_source_tool"), str) and data["_source_tool"]:
+                source_tools.add(data["_source_tool"])
+            if isinstance(data.get("_source_agent"), str) and data["_source_agent"]:
+                source_agents.add(data["_source_agent"])
+
+        for component_id in source_ids:
+            if not await self.workspace.aremove(chat_id, user_id, component_id):
+                raise RuntimeError("component replacement lost its source identity")
+
+        semantic: list[Dict[str, Any]] = []
+        normalized_specs: list[Dict[str, Any]] = []
+        source_tool = sorted(source_tools)[0] if source_tools else None
+        source_agent = sorted(source_agents)[0] if source_agents else None
+        for spec in replacements:
+            if not isinstance(spec, dict) or not isinstance(
+                spec.get("component_data"), dict
+            ):
+                raise ValueError("replacement component is malformed")
+            data = dict(spec["component_data"])
+            if source_tool:
+                data["_source_tool"] = source_tool
+            if source_agent:
+                data["_source_agent"] = source_agent
+            semantic.append(data)
+            normalized_specs.append(spec)
+        if not semantic:
+            raise ValueError("component replacement must produce a component")
+        ops = await self.workspace.aupsert(chat_id, user_id, semantic)
+        if len(ops) != len(semantic):
+            raise RuntimeError("component replacement was incomplete")
+        await self.workspace.asnapshot(chat_id, user_id, cause=cause)
+
+        rows: list[Dict[str, Any]] = []
+        for op, spec in zip(ops, normalized_specs):
+            row = await self.workspace.aget_by_component_id(
+                chat_id, user_id, op["component_id"]
+            )
+            if row is None:
+                raise RuntimeError("replacement component is not staged")
+            data = row["component_data"]
+            component_type = str(
+                spec.get("component_type")
+                or (data.get("type") if isinstance(data, dict) else "")
+                or "combined"
+            )
+            rows.append(
+                {
+                    "id": row["id"],
+                    "chat_id": chat_id,
+                    "component_data": data,
+                    "component_type": component_type,
+                    "title": str(
+                        spec.get("title")
+                        or row.get("title")
+                        or component_type.replace("_", " ").title()
+                    ),
+                    "created_at": row.get("created_at") or int(time.time() * 1000),
+                }
+            )
+        return source_ids, rows, ops
 
     async def _combine_components_llm(self, components: list, mode: str = "combine") -> dict:
         """Use LLM to combine/condense UI components.
@@ -3358,19 +8055,19 @@ Respond with ONLY valid JSON (no markdown code fences) in this format:
 
     def _map_file_paths(self, chat_id: str, args: Dict, user_id: str = 'legacy') -> Dict:
         """Replace original filenames in tool arguments with backend paths.
-        
+
         Uses file mappings stored in history for the given chat.
         """
         if not chat_id:
             return args
-        
+
         mappings = self.history.get_file_mappings(chat_id, user_id=user_id)
         if not mappings:
             return args
-        
+
         # Build mapping dict: original_name -> backend_path
         mapping_dict = {m["original_name"]: m["backend_path"] for m in mappings}
-        
+
         # Recursively traverse args dict and replace strings that match original names
         def replace_in_dict(obj):
             if isinstance(obj, dict):
@@ -3386,7 +8083,7 @@ Respond with ONLY valid JSON (no markdown code fences) in this format:
                 return obj
             else:
                 return obj
-        
+
         new_args = replace_in_dict(args)
         if new_args != args:
             logger.info(f"Mapped file paths in tool arguments for chat {chat_id}")
@@ -3395,6 +8092,562 @@ Respond with ONLY valid JSON (no markdown code fences) in this format:
     # =========================================================================
     # LLM-POWERED TOOL ROUTING
     # =========================================================================
+
+    @staticmethod
+    def _conversation_authority(operation_context, websocket):
+        """Return one complete fenced turn authority or ``None`` for legacy work."""
+
+        authority = operation_context
+        if authority is None:
+            authority = getattr(websocket, "task", None)
+        if isinstance(authority, dict):
+            operation = authority.get("operation")
+            owner = authority.get("owner")
+            fence = authority.get("execution_fence")
+        else:
+            operation = getattr(authority, "_operation", None)
+            owner = getattr(authority, "_owner", None)
+            fence = getattr(authority, "_execution_fence", None)
+        if not (
+            isinstance(operation, (OperationRecord, SafeOperationProjection))
+            and isinstance(owner, OperationOwner)
+            and isinstance(fence, ExecutionFence)
+            and operation.request_generation is not None
+            and operation.connection_generation is not None
+        ):
+            return None
+        return operation, owner, fence
+
+    def _bind_conversation_scope(
+        self,
+        websocket,
+        *,
+        chat_id: str,
+        connection_generation: Any,
+        request_generation: Any,
+        purpose: str,
+        base_render_revision: int,
+    ) -> Dict[str, Any]:
+        """Bind the exact active conversation generation for one socket."""
+
+        if purpose not in {"hydration", "commit"}:
+            raise ValueError("conversation scope purpose is invalid")
+        connection = _uuid.UUID(str(connection_generation))
+        request = _uuid.UUID(str(request_generation))
+        chat = _uuid.UUID(str(chat_id))
+        if any(value.version != 4 for value in (connection, request, chat)):
+            raise ValueError("conversation scope identities must be UUID4")
+        if (
+            isinstance(base_render_revision, bool)
+            or not isinstance(base_render_revision, int)
+            or base_render_revision < 0
+        ):
+            raise ValueError("base_render_revision must be non-negative")
+        binding = {
+            "chat_id": str(chat),
+            "connection_generation": str(connection),
+            "request_generation": str(request),
+            "purpose": purpose,
+            "base_render_revision": base_render_revision,
+            "frame_sequence": 0,
+        }
+        self._conversation_scopes[id(websocket)] = binding
+        return binding
+
+    async def _begin_conversation_publication(
+        self,
+        websocket,
+        *,
+        chat_id: str,
+        user_id: str,
+        operation_context: Any,
+    ):
+        """Prepare an invisible complete next revision for a fenced live turn."""
+
+        authority = self._conversation_authority(operation_context, websocket)
+        if authority is None:
+            return None, None, None
+        operation, owner, fence = authority
+        if str(operation.chat_id or "") != str(chat_id):
+            raise RuntimeError("conversation operation chat identity changed")
+        request_generation = str(operation.request_generation)
+        connection_generation = str(operation.connection_generation)
+        staged = None
+        try:
+            layouts = await asyncio.to_thread(
+                self.workspace.live_layouts, chat_id, user_id
+            )
+            staged = await asyncio.to_thread(
+                self.conversation_commits.stage_commit,
+                chat_id=chat_id,
+                owner_user_id=user_id,
+                request_generation=request_generation,
+                operation_fence=fence,
+                operation_owner=owner,
+                connection_generation=connection_generation,
+            )
+            await asyncio.to_thread(
+                self.conversation_commits.prepare_canvas_stage,
+                commit_id=staged["commit_id"],
+                owner_user_id=user_id,
+                operation_fence=fence,
+            )
+            from orchestrator.conversation_publication import (
+                ConversationPublicationStage,
+                activate_conversation_publication,
+            )
+
+            stage = ConversationPublicationStage(
+                history=self.history,
+                commit_id=staged["commit_id"],
+                chat_id=chat_id,
+                user_id=user_id,
+                base_render_revision=staged["base_render_revision"],
+                next_render_revision=staged["base_render_revision"] + 1,
+                operation_fence=fence,
+                layouts=layouts,
+            )
+            token = activate_conversation_publication(stage)
+            self._bind_conversation_scope(
+                websocket,
+                chat_id=chat_id,
+                connection_generation=connection_generation,
+                request_generation=request_generation,
+                purpose="commit",
+                base_render_revision=stage.base_render_revision,
+            )
+            self._ws_active_chat[id(websocket)] = chat_id
+            return stage, token, request_generation
+        except BaseException:
+            if staged is not None:
+                try:
+                    await asyncio.to_thread(
+                        self.conversation_commits.abort_commit,
+                        commit_id=staged["commit_id"],
+                        owner_user_id=user_id,
+                    )
+                except Exception:
+                    logger.debug(
+                        "conversation stage cleanup failed",
+                        exc_info=True,
+                    )
+            raise
+
+    async def _begin_detached_conversation_publication(
+        self,
+        *,
+        chat_id: str,
+        user_id: str,
+        request_generation: Any,
+    ):
+        """Prepare a server-originated logical update without a UI operation.
+
+        Detached results have no still-running connection operation to fence,
+        but they retain the same atomic conversation boundary and are
+        serialized under the per-chat workspace lock by their caller.
+        """
+
+        staged = None
+        try:
+            layouts = await asyncio.to_thread(
+                self.workspace.live_layouts, chat_id, user_id
+            )
+            staged = await asyncio.to_thread(
+                self.conversation_commits.stage_commit,
+                chat_id=chat_id,
+                owner_user_id=user_id,
+                request_generation=request_generation,
+            )
+            if staged["state"] != "staged":
+                raise RuntimeError("detached conversation publication is terminal")
+            await asyncio.to_thread(
+                self.conversation_commits.prepare_canvas_stage,
+                commit_id=staged["commit_id"],
+                owner_user_id=user_id,
+            )
+            from orchestrator.conversation_publication import (
+                ConversationPublicationStage,
+                activate_conversation_publication,
+            )
+
+            stage = ConversationPublicationStage(
+                history=self.history,
+                commit_id=staged["commit_id"],
+                chat_id=chat_id,
+                user_id=user_id,
+                base_render_revision=staged["base_render_revision"],
+                next_render_revision=staged["base_render_revision"] + 1,
+                layouts=layouts,
+            )
+            return stage, activate_conversation_publication(stage)
+        except BaseException:
+            if staged is not None and staged.get("state") == "staged":
+                try:
+                    await asyncio.to_thread(
+                        self.conversation_commits.abort_commit,
+                        commit_id=staged["commit_id"],
+                        owner_user_id=user_id,
+                    )
+                except Exception:
+                    logger.debug(
+                        "detached conversation stage cleanup failed",
+                        exc_info=True,
+                    )
+            raise
+
+    async def _begin_scheduled_conversation_publication(
+        self,
+        *,
+        chat_id: str,
+        user_id: str,
+        scheduled_attempt: "ScheduledAttempt",
+    ):
+        """Prepare the invisible canvas half of one scheduled chat effect."""
+
+        if (
+            scheduled_attempt.execution_fence is None
+            or scheduled_attempt.request_generation is None
+        ):
+            raise RuntimeError("scheduled conversation publication is unfenced")
+        owner = OperationOwner(
+            owner_scope=OwnerScope.SCHEDULE,
+            owner_user_id=user_id,
+            connection_scope_id=None,
+        )
+        staged = None
+        try:
+            layouts = await asyncio.to_thread(
+                self.workspace.live_layouts, chat_id, user_id
+            )
+            staged = await asyncio.to_thread(
+                self.conversation_commits.stage_commit,
+                chat_id=chat_id,
+                owner_user_id=user_id,
+                request_generation=scheduled_attempt.request_generation,
+                operation_fence=scheduled_attempt.execution_fence,
+                operation_owner=owner,
+            )
+            await asyncio.to_thread(
+                self.conversation_commits.prepare_canvas_stage,
+                commit_id=staged["commit_id"],
+                owner_user_id=user_id,
+                operation_fence=scheduled_attempt.execution_fence,
+            )
+            from orchestrator.conversation_publication import (
+                ConversationPublicationStage,
+                activate_conversation_publication,
+            )
+
+            stage = ConversationPublicationStage(
+                history=self.history,
+                commit_id=staged["commit_id"],
+                chat_id=chat_id,
+                user_id=user_id,
+                base_render_revision=staged["base_render_revision"],
+                next_render_revision=staged["base_render_revision"] + 1,
+                operation_fence=scheduled_attempt.execution_fence,
+                layouts=layouts,
+            )
+            return stage, activate_conversation_publication(stage)
+        except BaseException:
+            if staged is not None and staged.get("state") == "staged":
+                try:
+                    await asyncio.to_thread(
+                        self.conversation_commits.abort_commit,
+                        commit_id=staged["commit_id"],
+                        owner_user_id=user_id,
+                    )
+                except Exception:
+                    logger.debug(
+                        "scheduled conversation stage cleanup failed",
+                        exc_info=True,
+                    )
+            raise
+
+    async def _append_conversation_message(
+        self,
+        stage,
+        *,
+        chat_id: str,
+        user_id: str,
+        role: str,
+        content: Any,
+    ) -> Any:
+        """Append to the invisible revision, or retain the bounded legacy path."""
+
+        if stage is None:
+            await asyncio.to_thread(
+                self.history.add_message,
+                chat_id,
+                role,
+                content,
+                user_id=user_id,
+            )
+            from orchestrator.scheduled_publication import (
+                current_scheduled_history_stage,
+            )
+
+            if current_scheduled_history_stage() is not None:
+                return None
+            return await asyncio.to_thread(
+                self.history.get_latest_message_id,
+                chat_id,
+                user_id,
+            )
+        message_id = await asyncio.to_thread(
+            self.conversation_commits.append_staged_message,
+            commit_id=stage.commit_id,
+            owner_user_id=user_id,
+            role=role,
+            content=content,
+            operation_fence=stage.operation_fence,
+        )
+        stage.mark_dirty()
+        return message_id
+
+    def _adapt_conversation_snapshot(self, websocket, snapshot: Dict[str, Any]):
+        """ROTE-adapt every component group, then add web presentation once."""
+
+        for message in snapshot["transcript"]:
+            for part in message["parts"]:
+                if part.get("type") == "components":
+                    part["components"] = self.rote.adapt(
+                        websocket, part["components"]
+                    )
+        snapshot["canvas"]["components"] = self.rote.adapt(
+            websocket, snapshot["canvas"]["components"]
+        )
+        profile = self.rote.get_profile(websocket)
+        target = "native" if _is_native_device(profile) else "web"
+        return augment_conversation_snapshot_for_target(
+            snapshot, profile, target=target
+        )
+
+    async def _conversation_snapshot_candidate(
+        self,
+        websocket,
+        *,
+        chat_id: str,
+        user_id: str,
+        connection_generation: Any,
+        request_generation: Any,
+        purpose: str,
+    ) -> Dict[str, Any]:
+        semantic = await asyncio.to_thread(
+            self.conversation_commits.build_snapshot,
+            chat_id=chat_id,
+            owner_user_id=user_id,
+            connection_generation=connection_generation,
+            request_generation=request_generation,
+            snapshot_purpose=purpose,
+        )
+        return self._adapt_conversation_snapshot(websocket, semantic)
+
+    async def _emit_hydration_snapshot(
+        self,
+        websocket,
+        *,
+        chat_id: str,
+        user_id: str,
+        connection_generation: Any,
+        request_generation: Any,
+    ) -> Dict[str, Any]:
+        snapshot = await self._conversation_snapshot_candidate(
+            websocket,
+            chat_id=chat_id,
+            user_id=user_id,
+            connection_generation=connection_generation,
+            request_generation=request_generation,
+            purpose="hydration",
+        )
+        self._bind_conversation_scope(
+            websocket,
+            chat_id=chat_id,
+            connection_generation=connection_generation,
+            request_generation=request_generation,
+            purpose="hydration",
+            base_render_revision=snapshot["render_revision"],
+        )
+        self._ws_active_chat[id(websocket)] = chat_id
+        await self._safe_send(
+            websocket,
+            json.dumps(
+                snapshot,
+                separators=(",", ":"),
+                ensure_ascii=False,
+                allow_nan=False,
+            ),
+        )
+        return snapshot
+
+    async def _publish_conversation_snapshot(
+        self,
+        websocket,
+        *,
+        stage,
+        request_generation: str,
+        server_initiated: bool = False,
+    ) -> Dict[str, Any]:
+        raw_components = await asyncio.to_thread(
+            self.workspace.live_components, stage.chat_id, stage.user_id
+        )
+        layouts = await asyncio.to_thread(
+            self.workspace.live_layouts, stage.chat_id, stage.user_id
+        )
+        committed = await asyncio.to_thread(
+            self.conversation_commits.publish_commit,
+            commit_id=stage.commit_id,
+            owner_user_id=stage.user_id,
+            messages=None,
+            canvas_components=raw_components,
+            canvas_layouts=layouts,
+            operation_fence=stage.operation_fence,
+        )
+        stage.seal(committed=True)
+
+        if stage.snapshot_cause:
+            try:
+                await self.workspace.asnapshot(
+                    stage.chat_id,
+                    stage.user_id,
+                    cause=stage.snapshot_cause,
+                )
+            except Exception:
+                logger.debug(
+                    "post-commit workspace timeline snapshot failed",
+                    exc_info=True,
+                )
+
+        await self._deliver_committed_conversation_snapshot(
+            websocket,
+            stage=stage,
+            request_generation=request_generation,
+            committed=committed,
+            server_initiated=server_initiated,
+        )
+        return committed
+
+    async def _deliver_committed_conversation_snapshot(
+        self,
+        websocket,
+        *,
+        stage,
+        request_generation: str,
+        committed: Dict[str, Any],
+        server_initiated: bool,
+    ) -> None:
+        """Deliver one already-durable revision without mutating its commit."""
+
+        targets = []
+        for candidate in self._sockets_on_chat(stage.user_id, stage.chat_id):
+            binding = self._conversation_scopes.get(id(candidate))
+            if binding is None or binding.get("chat_id") != stage.chat_id:
+                continue
+            if server_initiated or binding.get("request_generation") == request_generation:
+                targets.append((candidate, binding))
+        if (
+            not server_initiated
+            and websocket in self.ui_clients
+            and all(candidate is not websocket for candidate, _binding in targets)
+        ):
+            binding = self._conversation_scopes.get(id(websocket))
+            if binding is not None:
+                targets.append((websocket, binding))
+
+        for candidate, binding in targets:
+            try:
+                if server_initiated:
+                    connection_generation = binding["connection_generation"]
+                    ready = ConversationCommitReady(
+                        chat_id=stage.chat_id,
+                        connection_generation=connection_generation,
+                        request_generation=request_generation,
+                        render_revision=committed["committed_render_revision"],
+                    )
+                    if not await self._safe_send(candidate, ready.to_json()):
+                        continue
+                    binding = self._bind_conversation_scope(
+                        candidate,
+                        chat_id=stage.chat_id,
+                        connection_generation=connection_generation,
+                        request_generation=request_generation,
+                        purpose="commit",
+                        base_render_revision=stage.base_render_revision,
+                    )
+                snapshot = await self._conversation_snapshot_candidate(
+                    candidate,
+                    chat_id=stage.chat_id,
+                    user_id=stage.user_id,
+                    connection_generation=binding["connection_generation"],
+                    request_generation=request_generation,
+                    purpose="commit",
+                )
+                delivered = await self._safe_send(
+                    candidate,
+                    json.dumps(
+                        snapshot,
+                        separators=(",", ":"),
+                        ensure_ascii=False,
+                        allow_nan=False,
+                    ),
+                )
+                if delivered:
+                    binding["base_render_revision"] = committed[
+                        "committed_render_revision"
+                    ]
+                    binding["frame_sequence"] = 0
+            except Exception:
+                # The durable commit remains authoritative; this socket keeps
+                # its prior committed view and recovers through hydration.
+                logger.warning(
+                    "committed conversation snapshot delivery failed",
+                    exc_info=True,
+                )
+
+    def _scope_conversation_transient(self, websocket, data: str) -> str:
+        """Attach the current equality fence to disposable live UI frames."""
+
+        binding = getattr(self, "_conversation_scopes", {}).get(id(websocket))
+        if binding is None:
+            return data
+        try:
+            frame = json.loads(data)
+        except (TypeError, json.JSONDecodeError):
+            return data
+        if not isinstance(frame, dict) or frame.get("type") not in {
+            "ui_render",
+            "ui_update",
+            "ui_upsert",
+            "ui_append",
+            "ui_stream_data",
+        }:
+            return data
+        if frame.get("target") == "history":
+            return data
+        explicit_chat = frame.get("chat_id")
+        if explicit_chat not in (None, "", binding["chat_id"]):
+            return data
+        if getattr(self, "_ws_active_chat", {}).get(id(websocket)) not in (
+            None,
+            binding["chat_id"],
+        ):
+            return data
+        binding["frame_sequence"] += 1
+        frame.update(
+            {
+                "chat_id": binding["chat_id"],
+                "connection_generation": binding["connection_generation"],
+                "request_generation": binding["request_generation"],
+                "base_render_revision": binding["base_render_revision"],
+                "frame_sequence": binding["frame_sequence"],
+            }
+        )
+        return json.dumps(
+            frame,
+            separators=(",", ":"),
+            ensure_ascii=False,
+            allow_nan=False,
+        )
 
     async def _start_heartbeat(self, websocket) -> asyncio.Task:
         """Start sending heartbeat messages every 5s to keep UI informed during long operations."""
@@ -3410,18 +8663,41 @@ Respond with ONLY valid JSON (no markdown code fences) in this format:
                     break
         return asyncio.create_task(_heartbeat_loop())
 
-    async def _serialized_chat(self, websocket, message, chat_id, display_message, *, user_id=None, draft_agent_id=None, selected_tools=None, attachments=None):
+    async def _serialized_chat(
+        self,
+        websocket,
+        message,
+        chat_id,
+        display_message,
+        *,
+        user_id=None,
+        draft_agent_id=None,
+        selected_tools=None,
+        attachments=None,
+        operation_context=None,
+    ):
         """Run handle_chat_message under a per-websocket lock so messages
         are serialized but the WS receive loop is never blocked."""
         ws_id = id(websocket)
         lock = self._chat_locks.setdefault(ws_id, asyncio.Lock())
         async with lock:
             try:
-                await self.handle_chat_message(
-                    websocket, message, chat_id, display_message,
-                    user_id=user_id, draft_agent_id=draft_agent_id,
-                    selected_tools=selected_tools, attachments=attachments,
+                if operation_context is None:
+                    operation_context = _CONNECTION_OPERATION_CONTEXT.get()
+                workspace_locks = getattr(self, "_workspace_locks", None)
+                if workspace_locks is None:
+                    workspace_locks = {}
+                    self._workspace_locks = workspace_locks
+                workspace_lock = workspace_locks.setdefault(
+                    chat_id, asyncio.Lock()
                 )
+                async with workspace_lock:
+                    await self.handle_chat_message(
+                        websocket, message, chat_id, display_message,
+                        user_id=user_id, draft_agent_id=draft_agent_id,
+                        selected_tools=selected_tools, attachments=attachments,
+                        operation_context=operation_context,
+                    )
             except Exception as e:
                 # Full details (including any upstream HTML payload, stack
                 # trace, etc.) go to structured logs only. The user-facing
@@ -3483,13 +8759,40 @@ Respond with ONLY valid JSON (no markdown code fences) in this format:
 
         async def _run_in_background(vws, msg, cid, display, uid, draft, tools, atts):
             """Execute handle_chat_message with the virtual WS."""
-            await self.handle_chat_message(
-                vws, msg, cid, display,
-                user_id=uid, draft_agent_id=draft, selected_tools=tools,
-                attachments=atts,
+            workspace_lock = self._workspace_locks.setdefault(
+                cid, asyncio.Lock()
             )
+            async with workspace_lock:
+                await self.handle_chat_message(
+                    vws, msg, cid, display,
+                    user_id=uid, draft_agent_id=draft, selected_tools=tools,
+                    attachments=atts,
+                )
 
         uid = user_id or self._get_user_id(websocket)
+        connection_generation = None
+        request_generation = None
+        authority = self._conversation_authority(
+            _CONNECTION_OPERATION_CONTEXT.get(), websocket
+        )
+        if authority is not None:
+            operation, _owner, _fence = authority
+            connection_generation = operation.connection_generation
+            request_generation = operation.request_generation
+            chat_row = await self.history.db.afetch_one(
+                "SELECT render_revision FROM chats WHERE id = ? AND user_id = ?",
+                (chat_id, uid),
+            )
+            if chat_row is None:
+                raise ConversationNotFound("conversation not found")
+            self._bind_conversation_scope(
+                websocket,
+                chat_id=chat_id,
+                connection_generation=connection_generation,
+                request_generation=request_generation,
+                purpose="commit",
+                base_render_revision=int(chat_row.get("render_revision") or 0),
+            )
         # Short user-facing label for cross-device task frames (055).
         title = " ".join((display_message or message or "").split())[:60]
         bg_task = await self.async_task_manager.submit(
@@ -3498,6 +8801,8 @@ Respond with ONLY valid JSON (no markdown code fences) in this format:
             coro_factory=_run_in_background,
             kind="async_chat",
             title=title,
+            connection_generation=connection_generation,
+            request_generation=request_generation,
             msg=message,
             cid=chat_id,
             display=display_message,
@@ -3515,7 +8820,7 @@ Respond with ONLY valid JSON (no markdown code fences) in this format:
             "payload": {
                 "task_id": bg_task.task_id,
                 "chat_id": chat_id,
-                "status": "queued",
+                "status": bg_task._canonical_status().value,
             },
         }
         if flags.is_enabled("bg_continuity"):
@@ -3597,6 +8902,11 @@ Respond with ONLY valid JSON (no markdown code fences) in this format:
         allowed_scopes: List[str],
         correlation_id: str,
         authority=None,
+        scheduled_attempt: Optional["ScheduledAttempt"] = None,
+        scheduled_store: Optional["ScheduledJobStore"] = None,
+        effect_kind: Optional[str] = None,
+        effect_key: Optional[str] = None,
+        payload_digest: Optional[str] = None,
     ) -> str:
         """Execute a scheduled job's instruction as a background chat turn (025 T040/T046).
 
@@ -3619,6 +8929,42 @@ Respond with ONLY valid JSON (no markdown code fences) in this format:
         real-agent dispatches fail-closed, exactly as before.
         """
         from orchestrator.async_tasks import BackgroundTask, VirtualWebSocket
+        from orchestrator.scheduled_publication import stage_scheduled_history
+
+        atomic_inputs = (
+            scheduled_attempt,
+            scheduled_store,
+            effect_kind,
+            effect_key,
+            payload_digest,
+        )
+        atomic_publication = all(value is not None for value in atomic_inputs)
+        if atomic_publication != any(value is not None for value in atomic_inputs):
+            raise ValueError(
+                "scheduled publication requires attempt, store, and full effect identity"
+            )
+        if atomic_publication:
+            if str(scheduled_attempt.claim.occurrence_id) != str(correlation_id):
+                raise ValueError("scheduled occurrence correlation identity changed")
+            if str(scheduled_attempt.job["user_id"]) != str(user_id):
+                raise ValueError("scheduled occurrence owner identity changed")
+            if {"tools:write", "tools:execute"}.intersection(
+                set(allowed_scopes or [])
+                | set(scheduled_attempt.job.get("consented_scopes") or [])
+            ):
+                raise PermissionError(
+                    "scheduled mutating tools require reviewed downstream idempotency"
+                )
+            publication_reservation = await asyncio.to_thread(
+                scheduled_store.reserve_atomic_chat_effect,
+                scheduled_attempt,
+                effect_key=effect_key,
+                payload_digest=payload_digest,
+            )
+            if publication_reservation.state == "published":
+                return "Your scheduled task finished."
+            if publication_reservation.ambiguous:
+                raise RuntimeError("scheduled chat effect outcome is ambiguous")
 
         # Feature 054 (FR-020): scheduled turns run on the admin-managed
         # system credential. Fail HONESTLY before executing when it is
@@ -3639,8 +8985,25 @@ Respond with ONLY valid JSON (no markdown code fences) in this format:
             raise self._LLMUnavailable(
                 "no system LLM credential configured — scheduled turn not run")
 
-        target_chat = chat_id or f"scheduled-{user_id}"
-        if not chat_id and flags.is_enabled("bg_continuity"):
+        target_chat = chat_id or (
+            str(scheduled_attempt.job["id"])
+            if scheduled_attempt is not None
+            else f"scheduled-{user_id}"
+        )
+        if atomic_publication:
+            expected_chat = str(
+                scheduled_attempt.job.get("target_chat_id")
+                or scheduled_attempt.job["id"]
+            )
+            if target_chat != expected_chat or effect_key != expected_chat:
+                raise ValueError("scheduled target/effect identity changed")
+            if effect_kind != "chat_history":
+                raise ValueError("scheduled chat requires chat_history effect")
+        if (
+            not atomic_publication
+            and not chat_id
+            and flags.is_enabled("bg_continuity")
+        ):
             # 055: nothing else creates the fallback chat, and
             # history.add_message silently drops writes to a missing chat —
             # the whole run's output would be lost. Fallback only: an explicit
@@ -3659,7 +9022,104 @@ Respond with ONLY valid JSON (no markdown code fences) in this format:
         if authority is not None:
             self._bind_machine_turn(vws, authority)
         try:
-            await self.handle_chat_message(vws, instruction, target_chat, user_id=user_id)
+            if atomic_publication:
+                if not await asyncio.to_thread(
+                    self.history.get_chat, target_chat, user_id=user_id
+                ):
+                    if chat_id:
+                        raise ConversationNotFound("conversation not found")
+                    await asyncio.to_thread(
+                        self.history.create_chat,
+                        target_chat,
+                        user_id=user_id,
+                        agent_id=agent_id,
+                    )
+                locks = getattr(self, "_workspace_locks", None)
+                if locks is None:
+                    locks = {}
+                    self._workspace_locks = locks
+                stage = None
+                token = None
+                async with locks.setdefault(target_chat, asyncio.Lock()):
+                    try:
+                        stage, token = (
+                            await self._begin_scheduled_conversation_publication(
+                                chat_id=target_chat,
+                                user_id=user_id,
+                                scheduled_attempt=scheduled_attempt,
+                            )
+                        )
+                        with stage_scheduled_history(
+                            history=self.history,
+                            chat_id=target_chat,
+                            user_id=user_id,
+                            create_chat_if_missing=False,
+                            agent_id=agent_id,
+                        ) as history_stage:
+                            await self.handle_chat_message(
+                                vws,
+                                instruction,
+                                target_chat,
+                                user_id=user_id,
+                            )
+                        publication = await asyncio.to_thread(
+                            scheduled_store.publish_staged_chat_effect,
+                            scheduled_attempt,
+                            history_stage.batch(
+                                conversation_commit_id=stage.commit_id,
+                                request_generation=str(
+                                    scheduled_attempt.request_generation
+                                ),
+                                base_render_revision=stage.base_render_revision,
+                                committed_render_revision=stage.next_render_revision,
+                                canvas_layouts=stage.layouts,
+                            ),
+                            effect_kind=effect_kind,
+                            effect_key=effect_key,
+                            payload_digest=payload_digest,
+                        )
+                        if publication.state != "published":
+                            raise RuntimeError(
+                                "scheduled chat publication did not commit"
+                            )
+                        stage.seal(committed=True)
+                        await self._deliver_committed_conversation_snapshot(
+                            None,
+                            stage=stage,
+                            request_generation=str(
+                                scheduled_attempt.request_generation
+                            ),
+                            committed={
+                                "committed_render_revision": (
+                                    stage.next_render_revision
+                                )
+                            },
+                            server_initiated=True,
+                        )
+                    finally:
+                        if stage is not None and not stage.sealed:
+                            try:
+                                await asyncio.to_thread(
+                                    self.conversation_commits.abort_commit,
+                                    commit_id=stage.commit_id,
+                                    owner_user_id=stage.user_id,
+                                )
+                                stage.seal(committed=False)
+                            except Exception:
+                                logger.warning(
+                                    "scheduled conversation stage abort failed",
+                                    exc_info=True,
+                                )
+                        if token is not None:
+                            from orchestrator.conversation_publication import (
+                                reset_conversation_publication,
+                            )
+
+                            reset_conversation_publication(token)
+            else:
+                await self.handle_chat_message(
+                    vws, instruction, target_chat, user_id=user_id
+                )
         finally:
             self._unbind_machine_turn(vws)
             try:
@@ -3758,7 +9218,7 @@ Respond with ONLY valid JSON (no markdown code fences) in this format:
             "payload": {
                 "task_id": bg_task.task_id,
                 "chat_id": bg_task.chat_id,
-                "status": bg_task.status.value,
+                "status": bg_task._canonical_status().value,
                 "title": bg_task.title,
                 "replay": True,
             },
@@ -3771,17 +9231,21 @@ Respond with ONLY valid JSON (no markdown code fences) in this format:
         from orchestrator.async_tasks import TaskStatus
         try:
             for t in await self.async_task_manager.list_for_user(user_id):
-                if t.status not in (TaskStatus.QUEUED, TaskStatus.RUNNING):
+                if t._canonical_status() not in (
+                    TaskStatus.QUEUED,
+                    TaskStatus.RUNNING,
+                ):
                     continue
                 await self._safe_send(websocket, json.dumps(self._task_started_frame(t)))
             rows = await self.history.db.afetch_all(
                 "SELECT task_id, chat_id, status, summary, completed_at "
                 "FROM background_task WHERE user_id = ? AND notified = FALSE "
-                "AND status IN ('completed', 'failed', 'cancelled') "
+                "AND status IN ('completed', 'failed', 'cancelled', 'retryable') "
                 "ORDER BY created_at DESC LIMIT 20", (user_id,))
+            delivered = []
             for r in rows:
                 completed_at = r.get("completed_at")
-                await self._safe_send(websocket, json.dumps({
+                sent = await self._safe_send(websocket, json.dumps({
                     "type": "task_completed",
                     "payload": {
                         "task_id": r["task_id"],
@@ -3792,11 +9256,13 @@ Respond with ONLY valid JSON (no markdown code fences) in this format:
                         "replay": True,
                     },
                 }))
-            if rows:
-                ph = ", ".join(["?"] * len(rows))
+                if sent:
+                    delivered.append(r["task_id"])
+            if delivered:
+                ph = ", ".join(["?"] * len(delivered))
                 await self.history.db.aexecute(
                     f"UPDATE background_task SET notified = TRUE WHERE task_id IN ({ph})",
-                    tuple(r["task_id"] for r in rows))
+                    tuple(delivered))
         except Exception:
             logger.debug("background-task replay failed (non-fatal)", exc_info=True)
 
@@ -3989,7 +9455,104 @@ Respond with ONLY valid JSON (no markdown code fences) in this format:
                 pass
         return message
 
-    async def handle_chat_message(self, websocket, message: str, chat_id: str, display_message: str = None, user_id: str = None, draft_agent_id: str = None, selected_tools=None, attachments=None):
+    async def handle_chat_message(
+        self,
+        websocket,
+        message: str,
+        chat_id: str,
+        display_message: str = None,
+        user_id: str = None,
+        draft_agent_id: str = None,
+        selected_tools=None,
+        attachments=None,
+        operation_context=None,
+    ):
+        """Run one chat turn inside its complete staged publication scope."""
+
+        from orchestrator.conversation_publication import (
+            reset_conversation_publication,
+        )
+        from orchestrator.scheduled_publication import (
+            current_scheduled_history_stage,
+        )
+
+        if user_id is None:
+            user_id = self._get_user_id(websocket)
+        stage = None
+        token = None
+        request_generation = None
+        server_initiated = False
+        if current_scheduled_history_stage() is None:
+            stage, token, request_generation = (
+                await self._begin_conversation_publication(
+                    websocket,
+                    chat_id=chat_id,
+                    user_id=user_id,
+                    operation_context=operation_context,
+                )
+            )
+            if stage is None:
+                try:
+                    chat_identity = _uuid.UUID(str(chat_id))
+                except (TypeError, ValueError, AttributeError):
+                    chat_identity = None
+                if chat_identity is not None and chat_identity.version == 4:
+                    request_generation = str(_uuid.uuid4())
+                    stage, token = (
+                        await self._begin_detached_conversation_publication(
+                            chat_id=chat_id,
+                            user_id=user_id,
+                            request_generation=request_generation,
+                        )
+                    )
+                    server_initiated = True
+        try:
+            return await self._handle_chat_message_impl(
+                websocket,
+                message,
+                chat_id,
+                display_message,
+                user_id=user_id,
+                draft_agent_id=draft_agent_id,
+                selected_tools=selected_tools,
+                attachments=attachments,
+                operation_context=operation_context,
+                conversation_stage=stage,
+                conversation_request_generation=request_generation,
+                conversation_server_initiated=server_initiated,
+            )
+        finally:
+            if stage is not None and not stage.sealed:
+                try:
+                    await asyncio.to_thread(
+                        self.conversation_commits.abort_commit,
+                        commit_id=stage.commit_id,
+                        owner_user_id=stage.user_id,
+                    )
+                    stage.seal(committed=False)
+                except Exception:
+                    logger.warning(
+                        "conversation stage abort failed",
+                        exc_info=True,
+                    )
+            if token is not None:
+                reset_conversation_publication(token)
+
+    async def _handle_chat_message_impl(
+        self,
+        websocket,
+        message: str,
+        chat_id: str,
+        display_message: str = None,
+        user_id: str = None,
+        draft_agent_id: str = None,
+        selected_tools=None,
+        attachments=None,
+        operation_context=None,
+        conversation_stage=None,
+        conversation_request_generation: str | None = None,
+        conversation_server_initiated: bool = False,
+    ):
         """Process a chat message: LLM determines which tools to call (Multi-Turn Re-Act Loop).
 
         Feature 013 / FR-018, FR-020, FR-023: ``selected_tools`` is the
@@ -4004,6 +9567,11 @@ Respond with ONLY valid JSON (no markdown code fences) in this format:
         right reader tool with the real attachment_id.
         """
         logger.info(f"Processing chat message: '{message}' for chat_id {chat_id}")
+        from orchestrator.scheduled_publication import (
+            current_scheduled_history_stage,
+        )
+
+        scheduled_history_stage = current_scheduled_history_stage()
         if user_id is None:
             user_id = self._get_user_id(websocket)
         # Feature 013 defensive: a stray empty selection from the WS
@@ -4070,8 +9638,50 @@ Respond with ONLY valid JSON (no markdown code fences) in this format:
             try:
                 from orchestrator import onboarding_submit
                 if onboarding_submit.is_onboarding_submit(message):
+                    onboarding_result: Dict[str, str] = {}
+
+                    def _capture_onboarding_result(text: str, variant: str) -> None:
+                        onboarding_result.update(text=text, variant=variant)
+
                     if await onboarding_submit.handle_submit(
-                            self, websocket, user_id, message, chat_id):
+                            self, websocket, user_id, message, chat_id,
+                            result_sink=_capture_onboarding_result):
+                        msg_to_save = display_message if display_message else message
+                        await self._append_conversation_message(
+                            conversation_stage,
+                            chat_id=chat_id,
+                            user_id=user_id,
+                            role="user",
+                            content=msg_to_save,
+                        )
+                        confirmation = onboarding_result.get(
+                            "text", "Your onboarding settings were updated."
+                        )
+                        await self._append_conversation_message(
+                            conversation_stage,
+                            chat_id=chat_id,
+                            user_id=user_id,
+                            role="assistant",
+                            content=[
+                                Alert(
+                                    message=confirmation,
+                                    variant=onboarding_result.get(
+                                        "variant", "success"
+                                    ),
+                                ).to_dict()
+                            ],
+                        )
+                        if conversation_stage is not None:
+                            await self._publish_conversation_snapshot(
+                                websocket,
+                                stage=conversation_stage,
+                                request_generation=(
+                                    conversation_request_generation
+                                ),
+                                server_initiated=(
+                                    conversation_server_initiated
+                                ),
+                            )
                         return
             except Exception:  # pragma: no cover - never block a chat turn
                 logger.warning("onboarding submit handling failed (non-fatal)", exc_info=True)
@@ -4124,39 +9734,43 @@ Respond with ONLY valid JSON (no markdown code fences) in this format:
         
         # Save User Message to History. If display_message is provided, save that instead.
         msg_to_save = display_message if display_message else message
-        await asyncio.to_thread(
-            self.history.add_message, chat_id, "user", msg_to_save, user_id=user_id)
+        turn_message_id = await self._append_conversation_message(
+            conversation_stage,
+            chat_id=chat_id,
+            user_id=user_id,
+            role="user",
+            content=msg_to_save,
+        )
 
         # Feature 030 — fire-and-forget PHI awareness notice (notify-only,
         # fail-open; persistence/audit posture unchanged).
-        try:
-            asyncio.create_task(self._notify_phi_if_detected(
-                websocket, chat_id, user_id, msg_to_save))
-        except Exception:
-            logger.debug("phi notice scheduling failed (non-fatal)", exc_info=True)
+        if scheduled_history_stage is None:
+            try:
+                asyncio.create_task(self._notify_phi_if_detected(
+                    websocket, chat_id, user_id, msg_to_save))
+            except Exception:
+                logger.debug("phi notice scheduling failed (non-fatal)", exc_info=True)
 
         # Feature 014: create a per-turn ChatStepRecorder. The recorder's
         # WebSocket emits and persistence are PHI-redacted at the boundary
         # via shared.phi_redactor (FR-009b). Stored on the orchestrator so
         # the cancel_task handler can flush in-flight steps (FR-020/021)
         # and execute_tool_and_wait can record per-tool lifecycle events.
-        turn_message_id = None
-        try:
-            from orchestrator.chat_steps import ChatStepRecorder
+        if scheduled_history_stage is None:
+            try:
+                from orchestrator.chat_steps import ChatStepRecorder
 
-            turn_message_id = await asyncio.to_thread(
-                self.history.get_latest_message_id, chat_id, user_id)
-            recorder = ChatStepRecorder(
-                db=self.history.db,
-                websocket=websocket,
-                safe_send=self._safe_send,
-                chat_id=chat_id,
-                user_id=user_id or "legacy",
-                turn_message_id=turn_message_id,
-            )
-            self._chat_recorders[id(websocket)] = recorder
-        except Exception:  # pragma: no cover — defensive; never block a turn
-            logger.warning("Failed to create ChatStepRecorder", exc_info=True)
+                recorder = ChatStepRecorder(
+                    db=self.history.db,
+                    websocket=websocket,
+                    safe_send=self._safe_send,
+                    chat_id=chat_id,
+                    user_id=user_id or "legacy",
+                    turn_message_id=turn_message_id,
+                )
+                self._chat_recorders[id(websocket)] = recorder
+            except Exception:  # pragma: no cover — defensive; never block a turn
+                logger.warning("Failed to create ChatStepRecorder", exc_info=True)
 
         # Feature 014: send the persisted message_id back to the frontend so
         # it can stamp its locally-appended user message and group incoming
@@ -4192,7 +9806,13 @@ Respond with ONLY valid JSON (no markdown code fences) in this format:
 
         # Async title summarization for new chats
         chat_data = await asyncio.to_thread(self.history.get_chat, chat_id, user_id=user_id)
-        if chat_data and len(chat_data.get("messages", [])) == 1:
+        if (
+            scheduled_history_stage is None
+            and chat_data
+            and len(chat_data.get("messages", []))
+            + (1 if conversation_stage is not None else 0)
+            == 1
+        ):
             asyncio.create_task(
                 self.summarize_chat_title(chat_id, msg_to_save, user_id=user_id, websocket=websocket)
             )
@@ -4465,6 +10085,10 @@ Respond with ONLY valid JSON (no markdown code fences) in this format:
                 f"(chat_id={chat_id} user_id={user_id} tools_attempted=0)"
             )
 
+        task = None
+        heartbeat_task = None
+        task_terminal_on_exit = None
+        task_error_on_exit = None
         try:
             # ------------------------------------------------------------------
             # SYSTEM PROMPT
@@ -4612,8 +10236,13 @@ Respond with ONLY valid JSON (no markdown code fences) in this format:
             chat_data = await asyncio.to_thread(
                 self.history.get_chat, chat_id, user_id=user_id)
             if chat_data and "messages" in chat_data:
-                # Get last 10 messages (excluding the one we just added)
-                raw_history = chat_data["messages"][:-1]
+                # A 060 user message is staged/invisible and therefore is not
+                # present in this committed read. Legacy/scheduled history
+                # still includes the just-added message and keeps the bounded
+                # compatibility slice.
+                raw_history = chat_data["messages"]
+                if conversation_stage is None:
+                    raw_history = raw_history[:-1]
                 for h_msg in raw_history[-10:]:
                     role = h_msg.get("role")
                     content = h_msg.get("content")
@@ -4679,29 +10308,73 @@ Respond with ONLY valid JSON (no markdown code fences) in this format:
             # 055 US3: every rich component this turn lands on the canvas —
             # feeds the coalesced post-done designer pass for native origins.
             _turn_canvas_components: List[Dict[str, Any]] = []
+            designed_turn_marker: Optional[str] = None
 
             # Denial loop detection: track tools denied by permission checks
             denial_tracker: Dict[str, int] = {}  # tool_name -> denial count
             DENIAL_THRESHOLD = 2  # remove tool from prompt after this many denials
 
             # Task state machine: create and track this Re-Act execution
-            task = None
-            if flags.is_enabled("task_state_machine"):
-                task = self.task_manager.create_task(chat_id, user_id or "", message=message)
-                task.transition(TaskState.RUNNING)
+            if (
+                flags.is_enabled("task_state_machine")
+                and scheduled_history_stage is None
+            ):
+                authority = operation_context
+                if authority is None:
+                    authority = getattr(websocket, "task", None)
+                if isinstance(authority, dict):
+                    authority_operation = authority.get("operation")
+                    authority_owner = authority.get("owner")
+                    authority_fence = authority.get("execution_fence")
+                else:
+                    authority_operation = getattr(authority, "_operation", None)
+                    authority_owner = getattr(authority, "_owner", None)
+                    authority_fence = getattr(
+                        authority, "_execution_fence", None
+                    )
+                if not (
+                    isinstance(
+                        authority_operation,
+                        (OperationRecord, SafeOperationProjection),
+                    )
+                    and isinstance(authority_owner, OperationOwner)
+                    and (
+                        authority_fence is None
+                        or isinstance(authority_fence, ExecutionFence)
+                    )
+                ):
+                    authority_operation = None
+                    authority_owner = None
+                    authority_fence = None
+                task = await self.task_manager.admit_task(
+                    chat_id,
+                    user_id or "",
+                    message=message,
+                    operation=authority_operation,
+                    owner=authority_owner,
+                    execution_fence=authority_fence,
+                )
 
             while turn_count < MAX_TURNS:
                 # Check for cancellation
                 if self.cancelled_sessions.get(id(websocket)):
-                    if task:
-                        task.transition(TaskState.CANCELLED)
+                    task_terminal_on_exit = TaskState.CANCELLED
                     logger.info(f"Processing cancelled by user for chat_id {chat_id}")
                     await self.send_ui_render(websocket, [
                         Alert(message="Processing was cancelled.", variant="info").to_dict()
                     ], target="chat")
-                    await asyncio.to_thread(self.history.add_message, chat_id, "assistant", [
-                        Alert(message="Processing was cancelled.", variant="info").to_dict()
-                    ], user_id=user_id)
+                    await self._append_conversation_message(
+                        conversation_stage,
+                        chat_id=chat_id,
+                        user_id=user_id,
+                        role="assistant",
+                        content=[
+                            Alert(
+                                message="Processing was cancelled.",
+                                variant="info",
+                            ).to_dict()
+                        ],
+                    )
                     await self._safe_send(websocket, json.dumps({
                         "type": "chat_status",
                         "status": "done",
@@ -4777,6 +10450,8 @@ Respond with ONLY valid JSON (no markdown code fences) in this format:
                     raise
                 finally:
                     _NARRATIVE_STREAM_CHAT.reset(_stream_token)
+                if task:
+                    await self.task_manager.assert_current_execution(task)
                 if _phase_recorder is not None and _phase_step_id:
                     try:
                         await _phase_recorder.complete(_phase_step_id)
@@ -4784,6 +10459,8 @@ Respond with ONLY valid JSON (no markdown code fences) in this format:
                         logger.debug("phase step complete failed (non-fatal)", exc_info=True)
                 self._accumulate_usage(chat_id, usage)
                 if not llm_msg:
+                    task_terminal_on_exit = TaskState.FAILED
+                    task_error_on_exit = "LLM returned no response"
                     logger.error("LLM returned None, stopping loop.")
                     await self._safe_send(websocket, json.dumps({
                         "type": "chat_status",
@@ -4810,9 +10487,13 @@ Respond with ONLY valid JSON (no markdown code fences) in this format:
                     # already re-hydrates to the chat rail on reload
                     # (collapsible is a _TEXT_ONLY_TYPES member).
                     await self.send_ui_render(websocket, reasoning_components, target="chat")
-                    await asyncio.to_thread(
-                        self.history.add_message, chat_id, "assistant",
-                        reasoning_components, user_id=user_id)
+                    await self._append_conversation_message(
+                        conversation_stage,
+                        chat_id=chat_id,
+                        user_id=user_id,
+                        role="assistant",
+                        content=reasoning_components,
+                    )
 
                 # Check if LLM wants to call tools
                 if llm_msg.tool_calls:
@@ -4820,6 +10501,13 @@ Respond with ONLY valid JSON (no markdown code fences) in this format:
                     
                     # Notify UI
                     tool_names = [tc.function.name for tc in llm_msg.tool_calls]
+                    if task:
+                        await self.task_manager.transition_task(
+                            task,
+                            TaskState.AWAITING_TOOL,
+                            current_tool=", ".join(tool_names),
+                            turn_count=turn_count,
+                        )
                     await self._safe_send(websocket, json.dumps({
                         "type": "chat_status",
                         "status": "executing",
@@ -4830,11 +10518,6 @@ Respond with ONLY valid JSON (no markdown code fences) in this format:
                     messages.append(llm_msg)
 
                     # Execute tools
-                    if task:
-                        tool_names_for_task = [tc.function.name for tc in llm_msg.tool_calls]
-                        task.transition(TaskState.AWAITING_TOOL,
-                                       current_tool=", ".join(tool_names_for_task),
-                                       turn_count=turn_count)
                     tool_results = []
                     with perf_span("turn.tools", chat=chat_id):
                         if len(llm_msg.tool_calls) == 1:
@@ -4920,9 +10603,13 @@ Respond with ONLY valid JSON (no markdown code fences) in this format:
                         )
                         _turn_canvas_components.extend(tool_ui_components)
                         if chat_id:
-                            await asyncio.to_thread(
-                                self.history.add_message, chat_id, "assistant",
-                                tool_ui_components, user_id=user_id)
+                            await self._append_conversation_message(
+                                conversation_stage,
+                                chat_id=chat_id,
+                                user_id=user_id,
+                                role="assistant",
+                                content=tool_ui_components,
+                            )
                             if ws_ops:
                                 # FR-030: capture the workspace state this turn produced.
                                 def _snapshot_tool_turn():
@@ -4995,7 +10682,9 @@ Respond with ONLY valid JSON (no markdown code fences) in this format:
                     if task:
                         for tc in llm_msg.tool_calls:
                             task.tool_calls_made.append(tc.function.name)
-                        task.transition(TaskState.RUNNING, current_tool=None)
+                        await self.task_manager.transition_task(
+                            task, TaskState.RUNNING, current_tool=None
+                        )
 
                     # Loop continues to next turn to let LLM analyze results.
                     # (030: name the writing phase — the walkthrough measured
@@ -5008,8 +10697,6 @@ Respond with ONLY valid JSON (no markdown code fences) in this format:
                 
                 else:
                     # No tool calls -> Final Response
-                    if task:
-                        task.transition(TaskState.COMPLETED, turn_count=turn_count)
                     # Strip any tool-call tokens that leaked into the
                     # text response — see _sanitize_text_response. This
                     # defends against open-weight LLMs that emit raw
@@ -5253,10 +10940,15 @@ Respond with ONLY valid JSON (no markdown code fences) in this format:
                             # Persist the doc with the turn so reload shows it.
                             response_components = [narrative_doc] + response_components
 
-                    # Save complete interaction to history
-                    await asyncio.to_thread(
-                        self.history.add_message, chat_id, "assistant",
-                        response_components, user_id=user_id)
+                    # Save complete interaction to history.  Its exact message
+                    # identity is the stale guard used after atomic publication.
+                    final_message_id = await self._append_conversation_message(
+                        conversation_stage,
+                        chat_id=chat_id,
+                        user_id=user_id,
+                        role="assistant",
+                        content=response_components,
+                    )
 
                     # Feature 028 (FR-030): close the turn with a workspace
                     # snapshot when this turn changed the workspace.
@@ -5275,12 +10967,56 @@ Respond with ONLY valid JSON (no markdown code fences) in this format:
 
                     _narrative_span.__exit__(None, None, None)
 
-                    # Signal that processing is complete
+                    # The designed layout must be part of the same atomic 060
+                    # publication as the transcript/canvas.  Prepare and persist
+                    # it before publication, but retain 055's native wire order
+                    # by deferring only the refinement render until after done.
+                    designed_turn_marker = await self._design_turn_post_done(
+                        websocket,
+                        chat_id,
+                        user_id,
+                        message,
+                        _turn_canvas_components,
+                        turn_marker=final_message_id,
+                    )
+                    if conversation_stage is not None:
+                        await self._publish_conversation_snapshot(
+                            websocket,
+                            stage=conversation_stage,
+                            request_generation=conversation_request_generation,
+                            server_initiated=conversation_server_initiated,
+                        )
+                        if task:
+                            await self.task_manager.refresh_task(task.task_id)
+                            task.turn_count = turn_count
+                    elif task:
+                        await self.task_manager.transition_task(
+                            task,
+                            TaskState.COMPLETED,
+                            turn_count=turn_count,
+                        )
+                    # Terminal status follows the sole committed-state frame.
                     await self._send_chat_status(websocket, "done")
-                    # 055 US3: native-origin turns get their coalesced designer
-                    # pass here — after done, before the handler returns.
-                    await self._design_turn_post_done(
-                        websocket, chat_id, user_id, message, _turn_canvas_components)
+                    if designed_turn_marker is not None:
+                        try:
+                            originating = (
+                                websocket
+                                if self._ws_active_chat.get(id(websocket)) == chat_id
+                                else None
+                            )
+                            await self._push_designed_native_canvas(
+                                chat_id,
+                                user_id,
+                                originating,
+                                designed_turn_marker,
+                            )
+                        except Exception:
+                            logger.exception(
+                                "ui_designer.post_done_delivery_failed "
+                                "chat=%s user=%s — committed snapshot remains authoritative",
+                                chat_id,
+                                user_id,
+                            )
                     return
 
             # If loop exits without final response — generate LLM summary
@@ -5295,15 +11031,20 @@ Respond with ONLY valid JSON (no markdown code fences) in this format:
                 summary_components = await self._generate_tool_summary(
                     websocket, messages, chat_id, user_id=user_id
                 )
+                summary_message_id = turn_message_id
                 if summary_components:
                     # Chat rail, NOT canvas — the summary is words about the
                     # tool results; a canvas render would replace (wipe) the
                     # components those tools just delivered.
                     await self.send_ui_render(websocket, summary_components, target="chat")
                     if chat_id:
-                        await asyncio.to_thread(
-                            self.history.add_message, chat_id, "assistant",
-                            summary_components, user_id=user_id)
+                        summary_message_id = await self._append_conversation_message(
+                            conversation_stage,
+                            chat_id=chat_id,
+                            user_id=user_id,
+                            role="assistant",
+                            content=summary_components,
+                        )
                 else:
                     # Fallback if LLM summary fails — descriptive, not boilerplate.
                     await self.send_ui_render(websocket, [
@@ -5312,14 +11053,70 @@ Respond with ONLY valid JSON (no markdown code fences) in this format:
                         ]).to_dict()
                     ], target="chat")
 
-                await self._send_chat_status(websocket, "done")
-                # 055 US3: the max-turns exit is also a completed turn.
-                await self._design_turn_post_done(
-                    websocket, chat_id, user_id, message, _turn_canvas_components)
+                # The max-turns exit uses the same atomic-layout preparation and
+                # post-done native refinement order as the normal completion.
+                designed_turn_marker = await self._design_turn_post_done(
+                    websocket,
+                    chat_id,
+                    user_id,
+                    message,
+                    _turn_canvas_components,
+                    turn_marker=summary_message_id,
+                )
 
+            # Covers both max-turn completion and early loop exits such as all
+            # tools becoming unavailable.  All user-visible/history/workspace
+            # effects above land before the durable terminal transition.
+            if conversation_stage is not None:
+                await self._publish_conversation_snapshot(
+                    websocket,
+                    stage=conversation_stage,
+                    request_generation=conversation_request_generation,
+                    server_initiated=conversation_server_initiated,
+                )
+                if task:
+                    await self.task_manager.refresh_task(task.task_id)
+                    task.turn_count = turn_count
+            elif task:
+                await self.task_manager.transition_task(
+                    task,
+                    TaskState.COMPLETED,
+                    turn_count=turn_count,
+                )
+            await self._send_chat_status(websocket, "done")
+            if designed_turn_marker is not None:
+                try:
+                    originating = (
+                        websocket
+                        if self._ws_active_chat.get(id(websocket)) == chat_id
+                        else None
+                    )
+                    await self._push_designed_native_canvas(
+                        chat_id,
+                        user_id,
+                        originating,
+                        designed_turn_marker,
+                    )
+                except Exception:
+                    logger.exception(
+                        "ui_designer.post_done_delivery_failed "
+                        "chat=%s user=%s — committed snapshot remains authoritative",
+                        chat_id,
+                        user_id,
+                    )
+
+        except StaleExecutionFenceError:
+            logger.warning(
+                "Task execution ownership changed for chat_id=%s; aborting stale worker",
+                chat_id,
+            )
         except websockets.exceptions.ConnectionClosed:
+            task_terminal_on_exit = TaskState.RETRYABLE
             logger.warning(f"WebSocket closed during chat processing for chat_id {chat_id} — client likely reconnected")
         except Exception as e:
+            if task_terminal_on_exit is None:
+                task_terminal_on_exit = TaskState.FAILED
+                task_error_on_exit = str(e)
             logger.error(f"LLM routing error: {e}", exc_info=True)
             error_text = str(e)
 
@@ -5373,8 +11170,27 @@ Respond with ONLY valid JSON (no markdown code fences) in this format:
                     Alert(message=error_text, variant="error", title="Error").to_dict()
                 ])
         finally:
+            if task_terminal_on_exit is not None and task is not None:
+                if task._canonical_state() not in {
+                    TaskState.COMPLETED,
+                    TaskState.FAILED,
+                    TaskState.CANCELLED,
+                    TaskState.RETRYABLE,
+                }:
+                    try:
+                        await self.task_manager.transition_task(
+                            task,
+                            task_terminal_on_exit,
+                            error=task_error_on_exit,
+                        )
+                    except Exception:
+                        logger.debug(
+                            "task could not be terminalized during turn cleanup",
+                            exc_info=True,
+                        )
             _perm_memo.__exit__(None, None, None)
-            heartbeat_task.cancel()
+            if heartbeat_task is not None:
+                heartbeat_task.cancel()
 
     def _accumulate_usage(self, chat_id: Optional[str], usage):
         """Accumulate LLM token usage for a conversation.
@@ -7038,6 +12854,11 @@ Respond with ONLY valid JSON (no markdown code fences) in this format:
                 "agent_id": agent_id,
                 "chat_id": chat_id,
                 "tool_name": tool_name,
+                # A detached terminal result is its own logical update. The
+                # UUID is allocated before dispatch and retained across the
+                # job lifetime so duplicate terminal delivery cannot invent a
+                # second conversation identity.
+                "publication_request_generation": str(_uuid.uuid4()),
             }
 
         # 055 US2: a push-streamable tool also streams — subscribe this
@@ -8216,6 +14037,17 @@ Respond with ONLY valid JSON (no markdown code fences) in this format:
 
     async def _execute_via_websocket(self, agent_id: str, tool_name: str, args: Dict, timeout: float = 30.0, ui_websocket=None) -> Optional[MCPResponse]:
         """Execute a tool call via WebSocket (internal agents)."""
+        projected_socket = self.agents.get(agent_id)
+        if bool(
+            getattr(projected_socket, "is_fenced_user_agent_tunnel", False)
+        ):
+            return await self._execute_via_personal_runtime(
+                projected_socket,
+                tool_name,
+                args,
+                timeout=timeout,
+                ui_websocket=ui_websocket,
+            )
         # Cryptographically-random, collision-free request id. A time-based id
         # (``req_<tool>_<ms>``) collided when two same-tool calls landed in one
         # millisecond — resolving the WRONG pending future — and, being sent to
@@ -8268,6 +14100,158 @@ Respond with ONLY valid JSON (no markdown code fences) in this format:
             self.pending_requests.pop(request_id, None)
             (getattr(self, "_pending_request_agent", None) or {}).pop(request_id, None)
             self.pending_ui_sockets.pop(request_id, None)
+            self._dispatch_context.pop(request_id, None)
+
+    async def _execute_via_personal_runtime(
+        self,
+        socket: Any,
+        tool_name: str,
+        args: Dict[str, Any],
+        *,
+        timeout: float,
+        ui_websocket: Any,
+    ) -> MCPResponse:
+        """Assign, send, and settle one exact personal-agent runtime call."""
+
+        owner_user_id = socket.owner_sub
+        agent_id = socket.agent_id
+        request_generation = _uuid.uuid4()
+        parent_context = _CONNECTION_OPERATION_CONTEXT.get() or {}
+        parent_fence = parent_context.get("execution_fence")
+        parent_operation_id = (
+            parent_fence.operation_id
+            if isinstance(parent_fence, ExecutionFence)
+            else None
+        )
+        claimed = await self._claim_personal_agent_operation(
+            owner_user_id=owner_user_id,
+            operation_kind="agent_runtime_request",
+            idempotency_namespace="personal_agent_runtime_request",
+            idempotency_key=str(request_generation),
+            normalized_identity={
+                "agent_id": agent_id,
+                "tool_name": tool_name,
+                "request_generation": str(request_generation),
+            },
+            admission_class=AdmissionClass.INTERACTIVE,
+            parent_operation_id=parent_operation_id,
+            request_generation=request_generation,
+            wait_seconds=min(2.0, max(0.1, timeout)),
+        )
+        if claimed is None:
+            return MCPResponse(
+                request_id=str(request_generation),
+                error={
+                    "message": "Personal-agent capacity is temporarily unavailable",
+                    "retryable": True,
+                    "code": "capacity_exceeded",
+                },
+            )
+        _owner, operation_claim = claimed
+        try:
+            authority = await asyncio.to_thread(
+                self.personal_agent_runtime.get_current_online_authority,
+                owner_user_id=owner_user_id,
+                agent_id=agent_id,
+            )
+            if authority.fence != socket.runtime_fence:
+                raise RuntimeError("personal-agent route projection is stale")
+            request = await asyncio.to_thread(
+                self.personal_agent_runtime.assign_request,
+                authority.fence,
+                operation_fence=operation_claim.fence,
+                request_generation=str(request_generation),
+            )
+        except Exception:
+            try:
+                await self._call_work_admission(
+                    self.work_admission.terminalize,
+                    operation_claim.fence,
+                    state=OperationState.RETRYABLE,
+                    terminal_code="agent_offline",
+                    safe_summary="Personal agent is offline",
+                    retry_after_ms=0,
+                )
+            except Exception:
+                logger.debug("personal-agent call admission cleanup failed", exc_info=True)
+            return MCPResponse(
+                request_id=str(request_generation),
+                error={
+                    "message": "Personal agent is offline",
+                    "retryable": True,
+                    "offline": True,
+                },
+            )
+
+        request_id = request.fence.request_id
+        loop = asyncio.get_running_loop()
+        waiter: asyncio.Future[Any] = loop.create_future()
+        stop_renewal = asyncio.Event()
+        renewal_task = asyncio.create_task(
+            self._renew_personal_agent_operation_lease(
+                operation_claim.fence,
+                stop_renewal,
+            ),
+            name=f"personal-agent-lease-{request_id}",
+        )
+        self._personal_agent_request_waiters[request_id] = waiter
+        self._register_dispatch_context(
+            request_id, agent_id, args, ui_websocket
+        )
+        targets = getattr(self, "_pending_request_agent", None)
+        if targets is None:
+            targets = self._pending_request_agent = {}
+        targets[request_id] = agent_id
+        inner = {
+            "type": "mcp_request",
+            "request_id": request_id,
+            "request_generation": request.fence.request_generation,
+            "fence": authority.fence.to_dict(),
+            "method": "tools/call",
+            "params": {"name": tool_name, "arguments": args},
+        }
+        try:
+            await socket.send_fenced(inner)
+            async with asyncio.timeout(timeout):
+                return await asyncio.shield(waiter)
+        except TimeoutError:
+            try:
+                await asyncio.to_thread(
+                    self.personal_agent_runtime.settle_request,
+                    request.fence,
+                    state="retryable",
+                    terminal_code="request_timeout",
+                    result_digest=None,
+                )
+            except Exception:
+                logger.debug("personal-agent timeout was already settled", exc_info=True)
+            return MCPResponse(
+                request_id=request_id,
+                error={"message": "Tool call timed out", "retryable": True},
+            )
+        except Exception as exc:
+            try:
+                await asyncio.to_thread(
+                    self.personal_agent_runtime.settle_request,
+                    request.fence,
+                    state="retryable",
+                    terminal_code="host_lost",
+                    result_digest=None,
+                )
+            except Exception:
+                logger.debug("personal-agent send failure was already settled", exc_info=True)
+            return MCPResponse(
+                request_id=request_id,
+                error={"message": str(exc), "retryable": True},
+            )
+        finally:
+            stop_renewal.set()
+            renewal_task.cancel()
+            await asyncio.gather(renewal_task, return_exceptions=True)
+            self._personal_agent_request_waiters.pop(request_id, None)
+            (getattr(self, "_pending_request_agent", None) or {}).pop(
+                request_id, None
+            )
             self._dispatch_context.pop(request_id, None)
 
     async def _execute_in_process(self, agent_id: str, tool_name: str, args: Dict, timeout: float = 30.0, ui_websocket=None) -> Optional[MCPResponse]:
@@ -8802,7 +14786,6 @@ Respond with ONLY valid JSON (no markdown code fences) in this format:
             components = copy.deepcopy(sub.retained_chunk.components)
         else:
             return
-        sub.persist_done = True
         for comp in components:
             if isinstance(comp, dict):
                 # The agent SDK stamps every top-level id with the stream id;
@@ -8814,8 +14797,25 @@ Respond with ONLY valid JSON (no markdown code fences) in this format:
                             tool_params=sub.params)
         chat_id, user_id = sub.chat_id, sub.user_id
         try:
-            ops = await self.workspace.aupsert(
-                chat_id, user_id, components, force_component_id=cid)
+            async def _persist_terminal():
+                staged_ops = await self.workspace.aupsert(
+                    chat_id,
+                    user_id,
+                    components,
+                    force_component_id=cid,
+                )
+                if staged_ops:
+                    await self.workspace.asnapshot(
+                        chat_id, user_id, cause="stream"
+                    )
+                return staged_ops
+
+            ops = await self.run_detached_conversation_mutation(
+                chat_id=chat_id,
+                user_id=user_id,
+                mutation=_persist_terminal,
+            )
+            sub.persist_done = True
         except Exception:
             logger.exception(
                 "stream_artifacts.persist_failed stream=%s component=%s agent=%s "
@@ -8828,12 +14828,6 @@ Respond with ONLY valid JSON (no markdown code fences) in this format:
             await self.send_ui_upsert(None, chat_id, user_id, ops)
         except Exception:
             logger.debug("stream_artifacts.persist_fanout_failed stream=%s "
-                         "component=%s chat=%s", sub.stream_id, cid, chat_id,
-                         exc_info=True)
-        try:
-            await self.workspace.asnapshot(chat_id, user_id, cause="stream")
-        except Exception:
-            logger.debug("stream_artifacts.persist_snapshot_failed stream=%s "
                          "component=%s chat=%s", sub.stream_id, cid, chat_id,
                          exc_info=True)
         try:
@@ -9195,6 +15189,7 @@ Respond with ONLY valid JSON (no markdown code fences) in this format:
     async def _safe_send(self, websocket, data: str) -> bool:
         """Send data over a websocket, returning False if the connection is closed."""
         try:
+            data = self._scope_conversation_transient(websocket, data)
             if hasattr(websocket, "send_text"):
                 # FastAPI WebSocket
                 await websocket.send_text(data)
@@ -9525,52 +15520,77 @@ Respond with ONLY valid JSON (no markdown code fences) in this format:
             logger.debug("workspace audit failed", exc_info=True)
         return ops
 
-    async def _design_turn_post_done(self, websocket, chat_id: str, user_id: str,
-                                     user_request: str, turn_components: List[Dict]) -> None:
-        """055 US3 (FF_DESIGNER_ALL_DEVICES): the ONE coalesced designer pass
-        for native-origin turns, run inline AFTER the terminal ``chat_status
-        done`` and before the turn handler returns — per-socket chat lock +
-        TCP ordering keep done → designed render → next ack race-free on the
-        originating socket, and async-mode turns are still inside
-        ``handle_chat_message`` here, so the push precedes ``task_completed``.
-        Progress frames are suppressed (they would flip natives back to
-        turn-active). ANY failure is log-only: the flat components already
-        delivered per round are the fallback rendering."""
+    async def _design_turn_post_done(
+        self,
+        websocket,
+        chat_id: str,
+        user_id: str,
+        user_request: str,
+        turn_components: List[Dict],
+        *,
+        turn_marker: Any = None,
+    ) -> Optional[str]:
+        """Prepare 055's one coalesced native design for post-done delivery.
+
+        Feature 060 requires the layout to be frozen into the same atomic
+        transcript/canvas publication, so design and persistence happen before
+        that publication.  The caller emits the materialized refinement only
+        after ``chat_status done`` and before returning (therefore still before
+        async ``task_completed``).  Designer progress remains suppressed.
+
+        Returns the exact final message marker when a layout was persisted;
+        ``None`` keeps the already-delivered flat components authoritative.
+        """
+        from orchestrator.scheduled_publication import (
+            current_scheduled_history_stage,
+        )
+
+        from orchestrator.conversation_publication import (
+            current_conversation_publication,
+        )
+
+        if (
+            current_scheduled_history_stage() is not None
+            and current_conversation_publication() is None
+        ):
+            return None
         if not chat_id or not turn_components:
-            return
+            return None
         if not flags.is_enabled("designer_all_devices"):
-            return
+            return None
         prof = self.rote.get_profile(websocket) if websocket is not None else None
         if not _is_native_device(prof):
-            return
+            return None
         from orchestrator import ui_designer
         from orchestrator.workspace import layout_key_for
         timeline = self._ws_timeline_mode.get(id(websocket), False)
         components = _native_canvas_components(turn_components)
         if not ui_designer.should_design(components, timeline_mode=timeline):
-            return
+            return None
         try:
-            turn_marker = str(await asyncio.to_thread(
-                self.history.get_latest_message_id, chat_id, user_id=user_id) or "")
-            layout_key = layout_key_for(chat_id, turn_marker)
+            marker = str(
+                turn_marker
+                or await asyncio.to_thread(
+                    self.history.get_latest_message_id,
+                    chat_id,
+                    user_id=user_id,
+                )
+                or ""
+            )
+            layout_key = layout_key_for(chat_id, marker)
             layout = await self._run_designer(
                 websocket, components, chat_id, user_id, user_request,
                 layout_key, progress=False)
             if not layout:
-                return
+                return None
             await asyncio.to_thread(
                 self.workspace.upsert_layout, chat_id, user_id, layout_key, layout)
-            # Same stale-chat rule as the mid-turn path: the designed render is
-            # only forced to the originating socket while it still views this
-            # chat; other sockets are chat-filtered inside the push.
-            originating = websocket if (
-                self._ws_active_chat.get(id(websocket)) == chat_id) else None
-            await self._push_designed_native_canvas(
-                chat_id, user_id, originating, turn_marker)
+            return marker
         except Exception:
             logger.exception(
                 "ui_designer.post_done_failed chat=%s user=%s — flat components "
                 "already delivered", chat_id, user_id)
+            return None
 
     async def _push_designed_native_canvas(self, chat_id: str, user_id: str,
                                            originating_ws, turn_marker: str) -> None:
@@ -9619,6 +15639,16 @@ Respond with ONLY valid JSON (no markdown code fences) in this format:
             return []
         for comp in components:
             _stamp_provenance(comp)
+        from orchestrator.scheduled_publication import (
+            current_scheduled_history_stage,
+        )
+
+        if current_scheduled_history_stage() is not None:
+            # Scheduled output is captured by VirtualWebSocket and persisted
+            # only through the atomic staged-history publication.  A workspace
+            # upsert here would become visible before the effect ledger commit.
+            await self.send_ui_render(websocket, components)
+            return []
         if not chat_id:
             await self.send_ui_render(websocket, components)
             return []
@@ -9736,9 +15766,9 @@ Respond with ONLY valid JSON (no markdown code fences) in this format:
         if isinstance(params_patch, dict):
             params.update(params_patch)
 
-        lock = self._workspace_locks.setdefault(chat_id, asyncio.Lock())
         try:
-            async with lock:  # deterministic ordering per chat (contract §Concurrency)
+            async with Orchestrator._workspace_mutation_lock(self, chat_id):
+                # Deterministic ordering per chat (contract §Concurrency).
                 # FR-036: a deterministic component re-execution must face the
                 # SAME gate stack as a chat dispatch of the same tool — the
                 # policy engine, taint gate, supervisor/HITL, PRE_TOOL_USE hook,
@@ -9909,9 +15939,8 @@ Respond with ONLY valid JSON (no markdown code fences) in this format:
             return
 
         from orchestrator import artifact_versions
-        lock = self._workspace_locks.setdefault(chat_id, asyncio.Lock())
         try:
-            async with lock:
+            async with Orchestrator._workspace_mutation_lock(self, chat_id):
                 # Re-read inside the lock: the archived "current" must be the
                 # dict actually being overwritten, not a pre-lock snapshot.
                 row = await self.workspace.aget_by_component_id(chat_id, user_id, component_id)
@@ -9981,9 +16010,8 @@ Respond with ONLY valid JSON (no markdown code fences) in this format:
                       variant="warning").to_dict()
             ], target="chat")
             return
-        lock = self._workspace_locks.setdefault(chat_id, asyncio.Lock())
         try:
-            async with lock:
+            async with Orchestrator._workspace_mutation_lock(self, chat_id):
                 row = await self.workspace.aget_by_component_id(chat_id, user_id, component_id)
                 if row is None or not isinstance(row.get("component_data"), dict):
                     await self.send_ui_render(websocket, [
@@ -10284,28 +16312,31 @@ Respond with ONLY valid JSON (no markdown code fences) in this format:
         if md.get("result") is not None:
             payload["result"] = md["result"]
 
-        # Fan out to the job-user's CURRENT sockets on the job's chat, plus the
-        # legacy request-scoped socket if one is still registered.
+        # Resolve the job-user's CURRENT sockets before terminal finalization.
+        # Terminal delivery itself happens only after the atomic conversation
+        # update so a following client read can never race the old revision.
         targets: List[Any] = []
         if ctx:
             targets = self._sockets_on_chat(ctx.get("user_id"), ctx.get("chat_id"))
         legacy = self.pending_ui_sockets.get(req_id)
         if legacy is not None and legacy not in targets:
             targets.append(legacy)
-        for ws in targets:
-            try:
-                await self._safe_send(ws, json.dumps(payload))
-            except Exception:
-                logger.debug("tool_progress forward failed", exc_info=True)
-
-        # Terminal: persist the outcome into the chat (so a returning client
-        # re-generates the completed UI), then release the concurrency-cap slot.
+        # Terminal: publish result component + narration as one conversation
+        # revision before advertising terminal progress. Nonterminal progress
+        # remains a disposable status overlay and never touches durable state.
         if terminal and ctx:
             try:
                 await self._finalize_long_running_job(ctx, msg)
             except Exception:
                 logger.exception("finalizing long-running job failed (cap=%s)", cap_job_id)
-            self._job_context.pop(cap_job_id, None)
+                payload["publication_retryable"] = True
+            else:
+                self._job_context.pop(cap_job_id, None)
+        for ws in targets:
+            try:
+                await self._safe_send(ws, json.dumps(payload))
+            except Exception:
+                logger.debug("tool_progress forward failed", exc_info=True)
         if cap_job_id and phase in ("completed", "failed", "status_unknown"):
             entry = self._pending_cap_entries.pop(cap_job_id, None)
             if entry:
@@ -10355,15 +16386,12 @@ Respond with ONLY valid JSON (no markdown code fences) in this format:
         return None
 
     async def _finalize_long_running_job(self, ctx: Dict[str, Any], msg) -> None:
-        """Persist + deliver a long-running job's terminal outcome to its chat:
+        """Atomically publish a detached job result and its narration.
 
-        1. the result COMPONENT into the persistent per-chat workspace (028), so
-           ``load_chat`` re-hydrates it for a client that refreshed or returned on
-           another device, and ``send_ui_upsert`` delivers it live; and
-        2. a NARRATION in the chat rail — for a completed job the model compares
-           the metrics and names the winner (falling back to a deterministic note
-           when no LLM is available) — persisted as an assistant transcript
-           message and fanned out live to every socket currently on the chat.
+        The component, assistant turn, complete canvas, revision increment,
+        and commit timestamp share one ``conversation_commit`` transaction.
+        Current clients receive a commit-ready prelude plus one complete
+        snapshot; compatibility overlay frames are emitted only afterward.
         """
         uid = ctx.get("user_id")
         cid = ctx.get("chat_id")
@@ -10372,18 +16400,6 @@ Respond with ONLY valid JSON (no markdown code fences) in this format:
         md = msg.metadata or {}
         phase = md.get("phase", "")
         component = self._build_job_result_component(ctx, msg)
-
-        # 1) The result component → persistent workspace (canvas) + live upsert.
-        component_id = None
-        try:
-            ops = await self.workspace.aupsert(cid, uid, [component])
-            component_id = component.get("component_id")
-            await self.send_ui_upsert(None, cid, uid, ops)
-        except Exception:
-            logger.exception("persisting job result component failed (chat=%s)", cid)
-
-        # 2) The narration → chat rail. Model-written comparison for a completed
-        #    job with results; a short deterministic note otherwise.
         chat_core = None
         if phase == "completed" and isinstance(md.get("result"), dict):
             chat_core = await self._narrate_job_result(ctx, md["result"])
@@ -10392,11 +16408,73 @@ Respond with ONLY valid JSON (no markdown code fences) in this format:
             note = title if phase == "completed" else (msg.message or "Job ended.")
             chat_core = [Text(content=f"✓ {note}").to_dict()]
 
+        request_generation = ctx.get("publication_request_generation")
         try:
-            await asyncio.to_thread(
-                self.history.add_message, cid, "assistant", chat_core, user_id=uid)
-        except Exception:
-            logger.debug("job narration persist failed", exc_info=True)
+            parsed_request_generation = _uuid.UUID(str(request_generation))
+            if (
+                parsed_request_generation.version != 4
+                or parsed_request_generation.variant != _uuid.RFC_4122
+            ):
+                raise ValueError("publication request generation must be UUID4")
+            request_generation = str(parsed_request_generation)
+        except (TypeError, ValueError, AttributeError):
+            request_generation = str(_uuid.uuid4())
+            ctx["publication_request_generation"] = request_generation
+
+        locks = getattr(self, "_workspace_locks", None)
+        if locks is None:
+            locks = {}
+            self._workspace_locks = locks
+        lock = locks.setdefault(cid, asyncio.Lock())
+        ops: List[Dict[str, Any]] = []
+        stage = None
+        token = None
+        async with lock:
+            try:
+                stage, token = await self._begin_detached_conversation_publication(
+                    chat_id=cid,
+                    user_id=uid,
+                    request_generation=request_generation,
+                )
+                ops = await self.workspace.aupsert(cid, uid, [component])
+                await self._append_conversation_message(
+                    stage,
+                    chat_id=cid,
+                    user_id=uid,
+                    role="assistant",
+                    content=chat_core,
+                )
+                await self._publish_conversation_snapshot(
+                    None,
+                    stage=stage,
+                    request_generation=request_generation,
+                    server_initiated=True,
+                )
+            finally:
+                if stage is not None and not stage.sealed:
+                    try:
+                        await asyncio.to_thread(
+                            self.conversation_commits.abort_commit,
+                            commit_id=stage.commit_id,
+                            owner_user_id=stage.user_id,
+                        )
+                        stage.seal(committed=False)
+                    except Exception:
+                        logger.warning(
+                            "detached conversation stage abort failed",
+                            exc_info=True,
+                        )
+                if token is not None:
+                    from orchestrator.conversation_publication import (
+                        reset_conversation_publication,
+                    )
+
+                    reset_conversation_publication(token)
+
+        component_id = component.get("component_id")
+        # Bounded compatibility overlays remain non-authoritative for 060
+        # reducers; legacy clients still receive the familiar live update.
+        await self.send_ui_upsert(None, cid, uid, ops)
         for ws in self._sockets_on_chat(uid, cid):
             try:
                 await self.send_ui_render(ws, chat_core, target="chat")
@@ -10641,6 +16719,15 @@ Respond with ONLY valid JSON (no markdown code fences) in this format:
             agent_list.append(entry)
         return agent_list
 
+    def get_personal_agent_capabilities(self) -> Dict[str, Any]:
+        """Return one detached candidate-owned capability payload.
+
+        REST and WebSocket configuration both call this getter so candidate
+        applicability cannot drift between surfaces or be mutated by a caller.
+        """
+
+        return self.personal_agent_capabilities.to_dict()["capabilities"]
+
     async def send_dashboard(self, websocket):
         """Send the initial dashboard view."""
         user_id = self._get_user_id(websocket)
@@ -10679,6 +16766,7 @@ Respond with ONLY valid JSON (no markdown code fences) in this format:
                 "agents": agent_list,
                 "total_tools": total_tools,
                 "streamable_tools": streamable_list,
+                "capabilities": self.get_personal_agent_capabilities(),
             }
         }))
 
@@ -10898,6 +16986,23 @@ Respond with ONLY valid JSON (no markdown code fences) in this format:
         def _build_agent_list():
             """Assemble the per-user agent entries off the event loop."""
             ownership_map = {o["agent_id"]: o for o in self.history.db.get_all_agent_ownership()}
+            latest_runtime_by_agent: dict[str, Any] = {}
+            loader = getattr(
+                getattr(self, "personal_agent_runtime", None),
+                "list_latest_runtime_instances",
+                None,
+            )
+            if callable(loader):
+                try:
+                    latest_runtime_by_agent = {
+                        runtime.fence.agent_id: runtime
+                        for runtime in loader(owner_user_id=user_id)
+                    }
+                except Exception:
+                    logger.warning(
+                        "Personal-agent lifecycle list hydration failed",
+                        exc_info=True,
+                    )
             agents = []
             for agent_id, card in self.agent_cards.items():
                 # Hide draft agents that aren't live yet
@@ -10910,6 +17015,12 @@ Respond with ONLY valid JSON (no markdown code fences) in this format:
                     user_id, agent_id, available_tools
                 )
                 ownership = ownership_map.get(agent_id, {})
+                runtime = latest_runtime_by_agent.get(agent_id)
+                lifecycle_state = (
+                    self._personal_agent_lifecycle_from_runtime(runtime)[0]
+                    if runtime is not None
+                    else "connected"
+                )
                 entry = {
                     "id": card.agent_id,
                     "name": card.name,
@@ -10919,7 +17030,7 @@ Respond with ONLY valid JSON (no markdown code fences) in this format:
                     "tool_scope_map": tool_scope_map,
                     "permissions": permissions,
                     "security_flags": self.security_flags.get(agent_id, {}),
-                    "status": "connected",
+                    "status": lifecycle_state,
                     "owner_email": ownership.get("owner_email"),
                     "is_public": bool(ownership.get("is_public", False)),
                 }
@@ -10939,11 +17050,19 @@ Respond with ONLY valid JSON (no markdown code fences) in this format:
         tools_available_for_user = await asyncio.to_thread(
             self.compute_tools_available_for_user, user_id)
 
-        await self._safe_send(websocket, json.dumps({
+        sent = await self._safe_send(websocket, json.dumps({
             "type": "agent_list",
             "tools_available_for_user": tools_available_for_user,
             "agents": agents,
         }))
+        if sent and isinstance(user_id, str) and user_id:
+            try:
+                await self._replay_personal_agent_lifecycles(websocket, user_id)
+            except Exception:
+                logger.warning(
+                    "Personal-agent lifecycle replay failed closed",
+                    exc_info=True,
+                )
 
     # =========================================================================
     # SERVER
@@ -10964,12 +17083,7 @@ Respond with ONLY valid JSON (no markdown code fences) in this format:
             ))
 
         try:
-            while True:
-                message = await websocket.receive_text()
-                # Fire as task so the receive loop stays responsive —
-                # long-running handlers (chat, condense, combine, paginate)
-                # won't block button clicks or cancel_task messages.
-                asyncio.create_task(self._safe_handle_ui_message(websocket, message))
+            await self._serve_ui_frames(websocket, websocket.receive_text)
         except WebSocketDisconnect:
             logger.info("UI client disconnected")
         except Exception as e:
@@ -11008,6 +17122,13 @@ Respond with ONLY valid JSON (no markdown code fences) in this format:
                     await self.stream_manager.detach(websocket)
                 except Exception as e:
                     logger.warning(f"stream_manager.detach failed: {e}")
+            # Persist host loss and settle exact fenced calls before removing
+            # authentication/socket projections. Legacy tunnel teardown below
+            # remains a separate compatibility path.
+            try:
+                await self._disconnect_personal_agent_host(websocket)
+            except Exception:
+                logger.debug("personal-agent host teardown failed", exc_info=True)
             # 058 (honest-offline): take this socket's tunneled user agents
             # offline BEFORE dropping its session (teardown reads the owner sub
             # from ui_sessions). No-op when no user agent is tunneled here.
@@ -11016,6 +17137,7 @@ Respond with ONLY valid JSON (no markdown code fences) in this format:
             except Exception:
                 logger.debug("user-agent tunnel teardown failed", exc_info=True)
             self._ws_active_chat.pop(id(websocket), None)
+            getattr(self, "_conversation_scopes", {}).pop(id(websocket), None)
             self._ws_timeline_mode.pop(id(websocket), None)
             self._ws_welcome.pop(id(websocket), None)
             if websocket in self.ui_clients:
@@ -11038,9 +17160,12 @@ Respond with ONLY valid JSON (no markdown code fences) in this format:
         self._registered_events[id(websocket)] = asyncio.Event()
         logger.info(f"UI client connected (total: {len(self.ui_clients)})")
         try:
-            async for message in websocket:
-                asyncio.create_task(self._safe_handle_ui_message(websocket, message))
-        except websockets.exceptions.ConnectionClosed:
+            if hasattr(websocket, "recv"):
+                receive = websocket.recv
+            else:
+                receive = websocket.__aiter__().__anext__
+            await self._serve_ui_frames(websocket, receive)
+        except (websockets.exceptions.ConnectionClosed, StopAsyncIteration):
             logger.info("UI client disconnected")
         finally:
             self._cleanup_streams(websocket)
@@ -11050,6 +17175,10 @@ Respond with ONLY valid JSON (no markdown code fences) in this format:
                     await self.stream_manager.detach(websocket)
                 except Exception as e:
                     logger.warning(f"stream_manager.detach failed: {e}")
+            try:
+                await self._disconnect_personal_agent_host(websocket)
+            except Exception:
+                logger.debug("personal-agent host teardown failed", exc_info=True)
             # 058 (honest-offline): take this socket's tunneled user agents
             # offline BEFORE dropping its session (teardown reads the owner sub
             # from ui_sessions). No-op when no user agent is tunneled here.
@@ -11058,6 +17187,7 @@ Respond with ONLY valid JSON (no markdown code fences) in this format:
             except Exception:
                 logger.debug("user-agent tunnel teardown failed", exc_info=True)
             self._ws_active_chat.pop(id(websocket), None)
+            getattr(self, "_conversation_scopes", {}).pop(id(websocket), None)
             self._ws_timeline_mode.pop(id(websocket), None)
             self._ws_welcome.pop(id(websocket), None)
             if websocket in self.ui_clients:
@@ -11126,6 +17256,15 @@ Respond with ONLY valid JSON (no markdown code fences) in this format:
         # pays a cold JWKS fetch. Never blocks boot or /readyz.
         asyncio.create_task(self._jwks_warm_loop())
 
+        if (
+            self._personal_agent_watchdog_task is None
+            or self._personal_agent_watchdog_task.done()
+        ):
+            self._personal_agent_watchdog_task = asyncio.create_task(
+                self._personal_agent_watchdog_loop(),
+                name="personal-agent-runtime-watchdog",
+            )
+
         # Feature 052 (FR-028): pre-load the PHI analyzer singleton in a
         # daemon thread so the first personalization write doesn't stall on
         # the 2-5 s Presidio+spaCy build. Readiness never waits on it.
@@ -11190,9 +17329,17 @@ Respond with ONLY valid JSON (no markdown code fences) in this format:
                 from scheduler.loop import SchedulerLoop
                 from scheduler.runner import JobRunner
                 from scheduler.store import ScheduledJobStore
-                _job_store = ScheduledJobStore(self.history.db)
+                _job_store = ScheduledJobStore(
+                    self.history.db,
+                    coordinator=self.work_admission,
+                )
                 _job_runner = JobRunner(self, _job_store, OfflineGrantStore(self.history.db))
-                self._scheduler_loop = SchedulerLoop(_job_store, _job_runner, self.async_task_manager)
+                self._scheduler_loop = SchedulerLoop(
+                    _job_store,
+                    _job_runner,
+                    self.async_task_manager,
+                    coordinator=self.work_admission,
+                )
                 self._scheduler_loop.start()
                 logger.info("scheduler.execution_loop_started (FF_SCHEDULER_EXECUTION=on)")
             except Exception:
@@ -11409,7 +17556,7 @@ Respond with ONLY valid JSON (no markdown code fences) in this format:
         app.mount("/static", _NoCacheStaticFiles(directory=_os.path.join(_webrender_dir, "static")), name="static")
 
         # Mount REST API routers
-        from orchestrator.api import chat_router, component_router, agent_router, dashboard_router, draft_router, voice_router, task_router, async_task_router, user_router, chrome_router, export_router, share_router
+        from orchestrator.api import chat_router, component_router, agent_router, dashboard_router, draft_router, voice_router, task_router, async_task_router, user_router, chrome_router, export_router, share_router, operation_router
         from orchestrator.auth import auth_router
         from orchestrator.web_auth import web_auth_router  # Feature 026 — server-side OIDC
         from orchestrator.attachments.router import attachments_router
@@ -11442,6 +17589,7 @@ Respond with ONLY valid JSON (no markdown code fences) in this format:
         app.include_router(voice_router)
         app.include_router(task_router)
         app.include_router(async_task_router)
+        app.include_router(operation_router)
         app.include_router(audit_router)
         # Feature 004 — component feedback & tool-improvement loop
         app.include_router(feedback_user_router)
@@ -11497,7 +17645,44 @@ Respond with ONLY valid JSON (no markdown code fences) in this format:
         logger.info(f"Consolidated server (Gateway) listening on http://0.0.0.0:{PORT}")
         logger.info(f"API docs available at http://localhost:{PORT}/docs")
         logger.info(f"A2A endpoint: http://localhost:{PORT}/a2a/")
-        await server.serve()
+        retention_interval = float(
+            os.getenv("OPERATION_RETENTION_SWEEP_SECONDS", "3300")
+        )
+        retention_retry = float(
+            os.getenv("OPERATION_RETENTION_RETRY_SECONDS", "60")
+        )
+        self.async_task_manager.start_retention_sweep(
+            interval_seconds=retention_interval,
+            retry_seconds=retention_retry,
+            on_sweep=self.task_manager.prune_missing,
+        )
+        try:
+            await server.serve()
+        finally:
+            watchdog = getattr(self, "_personal_agent_watchdog_task", None)
+            if watchdog is not None:
+                watchdog.cancel()
+                await asyncio.gather(watchdog, return_exceptions=True)
+                self._personal_agent_watchdog_task = None
+            try:
+                scheduler_loop = getattr(self, "_scheduler_loop", None)
+                if scheduler_loop is not None:
+                    await scheduler_loop.stop()
+            finally:
+                try:
+                    remainder = await self.async_task_manager.drain(
+                        timeout_seconds=5.0
+                    )
+                    if remainder:
+                        logger.critical(
+                            "Background service drain fenced %d "
+                            "cancellation-resistant task(s)",
+                            remainder,
+                        )
+                finally:
+                    # Kept as an idempotent compatibility guard if a partial
+                    # startup failed before drain captured the retention task.
+                    await self.async_task_manager.stop_retention_sweep()
 
     async def _jwks_warm_loop(self):
         """Warm the Keycloak JWKS at boot, then refresh it in the background.

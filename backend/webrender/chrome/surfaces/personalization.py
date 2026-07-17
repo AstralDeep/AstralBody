@@ -34,7 +34,7 @@ from __future__ import annotations
 import asyncio
 import json
 import logging
-import time
+import uuid
 from datetime import datetime, timezone
 
 from pydantic import ValidationError
@@ -43,7 +43,8 @@ from audit.hooks import record_generic
 from dreaming.consolidation import run_sweep
 from personalization.phi_gate import get_phi_gate
 from personalization.schemas import PersonalitySpec, ProfileUpdateRequest
-from scheduler.store import ScheduledJobStore
+from scheduler.store import ScheduleActionError, ScheduledJobStore
+from shared.feature_flags import flags
 from webrender.chrome import esc, notice_block
 from webrender.chrome.surfaces import _sdui
 
@@ -144,7 +145,12 @@ def _svc(orch):
 def _job_store(orch):
     """A ScheduledJobStore over the orchestrator's shared Database, or None."""
     db = getattr(getattr(orch, "history", None), "db", None)
-    return ScheduledJobStore(db) if db is not None else None
+    coordinator = getattr(orch, "work_admission", None)
+    return (
+        ScheduledJobStore(db, coordinator=coordinator)
+        if db is not None and coordinator is not None
+        else None
+    )
 
 
 def _params(tab: str, **extra) -> dict:
@@ -411,8 +417,8 @@ def _render_schedule(orch, user_id: str) -> str:
     # 030 FR-005: when unattended execution is gated off (pending the
     # offline-grant security review), say so plainly — jobs can be created but
     # will not fire until an operator enables FF_SCHEDULER_EXECUTION.
-    from shared.feature_flags import flags
-    if not flags.is_enabled("scheduler_execution"):
+    execution_enabled = flags.is_enabled("scheduler_execution")
+    if not execution_enabled:
         hint = (
             f'<div class="{_CARD_CLS} text-sm">⚠️ Unattended execution is currently '
             "<strong>unavailable</strong>: scheduled jobs will not run until an "
@@ -442,7 +448,15 @@ def _render_schedule(orch, user_id: str) -> str:
         if status == "active":
             actions.append(_btn("Pause", "chrome_job_pause", {"job_id": job_id},
                                 cls=_BTN_GHOST))
-            actions.append(_btn("Run now", "chrome_job_run_now", {"job_id": job_id}))
+            if execution_enabled:
+                actions.append(_btn(
+                    "Run now",
+                    "chrome_job_run_now",
+                    {
+                        "job_id": job_id,
+                        "submission_id": str(uuid.uuid4()),
+                    },
+                ))
         elif status == "paused":
             actions.append(_btn("Resume", "chrome_job_resume", {"job_id": job_id}))
         actions.append(_btn("Delete", "chrome_job_delete", {"job_id": job_id},
@@ -671,9 +685,9 @@ def _components_schedule(orch, user_id):
     store = _job_store(orch)
     if store is None:
         return [_sdui.alert("The scheduler is not available.", "warning")]
-    from shared.feature_flags import flags
     out = []
-    if not flags.is_enabled("scheduler_execution"):
+    execution_enabled = flags.is_enabled("scheduler_execution")
+    if not execution_enabled:
         out.append(_sdui.alert("Unattended execution is currently unavailable: scheduled jobs "
                                "will not run until an administrator enables it (pending a "
                                "security review). You can still create and manage jobs.", "warning"))
@@ -690,7 +704,16 @@ def _components_schedule(orch, user_id):
         actions = []
         if status == "active":
             actions.append(_sdui.button("Pause", "chrome_job_pause", {"job_id": job_id}, "secondary"))
-            actions.append(_sdui.button("Run now", "chrome_job_run_now", {"job_id": job_id}, "primary"))
+            if execution_enabled:
+                actions.append(_sdui.button(
+                    "Run now",
+                    "chrome_job_run_now",
+                    {
+                        "job_id": job_id,
+                        "submission_id": str(uuid.uuid4()),
+                    },
+                    "primary",
+                ))
         elif status == "paused":
             actions.append(_sdui.button("Resume", "chrome_job_resume", {"job_id": job_id}, "primary"))
         actions.append(_sdui.button("Delete", "chrome_job_delete", {"job_id": job_id}, "danger"))
@@ -915,7 +938,21 @@ async def _job_set_status(orch, websocket, user_id, payload, *, status, action_t
     if not job_id:
         return (SURFACE_KEY, _params("schedule"),
                 notice_block("error", "Missing job id."))
-    if not await asyncio.to_thread(store.set_status, user_id, job_id, status):
+    if status in {"paused", "disabled"}:
+        changed = await asyncio.to_thread(
+            store.set_status_and_cancel_unstarted,
+            user_id=user_id,
+            job_id=job_id,
+            status=status,
+            terminal_code=(
+                "cancelled_job_paused"
+                if status == "paused"
+                else "cancelled_job_deleted"
+            ),
+        )
+    else:
+        changed = await asyncio.to_thread(store.set_status, user_id, job_id, status)
+    if not changed:
         return (SURFACE_KEY, _params("schedule"),
                 notice_block("error", "Job not found."))
     await record_generic(
@@ -954,7 +991,10 @@ async def _handle_job_delete(orch, websocket, user_id, roles, payload):
 
 
 async def _handle_job_run_now(orch, websocket, user_id, roles, payload):
-    """Queue an active job for the next scheduler tick (next_run_at = now)."""
+    """Materialize one idempotent manual occurrence for the scheduler loop."""
+    if not flags.is_enabled("scheduler_execution"):
+        return (SURFACE_KEY, _params("schedule"), notice_block(
+            "error", "Scheduled execution is currently unavailable."))
     store = _job_store(orch)
     if store is None:
         return (SURFACE_KEY, _params("schedule"),
@@ -963,6 +1003,15 @@ async def _handle_job_run_now(orch, websocket, user_id, roles, payload):
     if not job_id:
         return (SURFACE_KEY, _params("schedule"),
                 notice_block("error", "Missing job id."))
+    submission_value = payload.get("submission_id")
+    try:
+        submission_id = uuid.UUID(str(submission_value))
+    except (TypeError, ValueError, AttributeError):
+        return (SURFACE_KEY, _params("schedule"), notice_block(
+            "error", "Missing or invalid run-now submission id."))
+    if submission_id.version != 4:
+        return (SURFACE_KEY, _params("schedule"), notice_block(
+            "error", "Missing or invalid run-now submission id."))
     job = await asyncio.to_thread(store.get_job, user_id, job_id)
     if not job:
         return (SURFACE_KEY, _params("schedule"),
@@ -970,22 +1019,54 @@ async def _handle_job_run_now(orch, websocket, user_id, roles, payload):
     if (job.get("status") or "") != "active":
         return (SURFACE_KEY, _params("schedule"), notice_block(
             "error", "Job is not active — resume it before running it."))
-    now_ms = int(time.time() * 1000)
-    # The scheduler loop dispatches jobs whose next_run_at has passed; pulling
-    # it to now queues the run without bypassing the runner's auth checks.
-    await asyncio.to_thread(
-        store.db.execute,
-        "UPDATE scheduled_job SET next_run_at = ?, updated_at = ? "
-        "WHERE id = ? AND user_id = ?",
-        (now_ms, now_ms, job_id, user_id),
-    )
-    await record_generic(
-        claims=_claims(orch, websocket, user_id), event_class="schedule",
-        action_type="schedule.run_now", description="Queued scheduled job to run now",
-        outputs_meta={"job_id": job_id},
+    loop = getattr(orch, "_scheduler_loop", None)
+    runner = getattr(loop, "runner", None)
+    eligibility = getattr(runner, "assess_job", None)
+    if not callable(eligibility):
+        return (SURFACE_KEY, _params("schedule"), notice_block(
+            "error", "Scheduled execution is currently unavailable."))
+    try:
+        result = await asyncio.to_thread(
+            store.materialize_run_now,
+            user_id=user_id,
+            job_id=job_id,
+            submission_id=submission_id,
+            eligibility=eligibility,
+        )
+    except ScheduleActionError as exc:
+        messages = {
+            "job_not_found": "Job not found.",
+            "job_not_active": "Job is not active — resume it before running it.",
+            "idempotency_conflict": (
+                "That run-now submission was already used for another job."
+            ),
+            "handler_not_idempotent": (
+                "This job cannot run unattended because its handler is not idempotent."
+            ),
+            "handler_downstream_idempotency_unreviewed": (
+                "This job uses an effect that is not approved for unattended runs."
+            ),
+        }
+        return (SURFACE_KEY, _params("schedule"), notice_block(
+            "error", messages.get(exc.code, "The job could not be queued.")))
+    if result.created:
+        await record_generic(
+            claims=_claims(orch, websocket, user_id), event_class="schedule",
+            action_type="schedule.run_now",
+            description="Queued scheduled job to run now",
+            outputs_meta={
+                "job_id": job_id,
+                "occurrence_id": str(result.occurrence_id),
+                "submission_id": str(submission_id),
+            },
+        )
+    message = (
+        "Job queued — it will run at the next scheduler tick."
+        if result.created
+        else "Job is already queued for this run-now request."
     )
     return (SURFACE_KEY, _params("schedule"), notice_block(
-        "success", "Job queued — it will run at the next scheduler tick."))
+        "success", message))
 
 
 async def _handle_dreaming_toggle(orch, websocket, user_id, roles, payload):

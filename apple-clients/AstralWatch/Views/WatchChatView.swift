@@ -1,8 +1,8 @@
+import AstralCore
 // Feature 051 US4 — the conversation on the wrist: crown-scrollable adapted
 // components, dictation-first input with confirm-before-send, and speech
 // controls (stop/replay; navigation away stops playback).
 import SwiftUI
-import AstralCore
 
 struct WatchChatView: View {
     @Environment(WatchModel.self) var model
@@ -11,22 +11,28 @@ struct WatchChatView: View {
         ScrollViewReader { proxy in
             ScrollView {
                 LazyVStack(alignment: .leading, spacing: 8) {
-                    ForEach(model.entries) { entry in
+                    ForEach(model.visibleEntries) { entry in
                         entryView(entry).id(entry.id)
                     }
                     // The live canvas: identity-keyed in the MODEL (upserts
                     // morph components in place); watch views are stateless,
                     // so positional ForEach identity is safe here.
-                    ForEach(Array(model.canvas.enumerated()), id: \.offset) { _, comp in
+                    ForEach(Array(model.visibleCanvas.enumerated()), id: \.offset) { _, comp in
                         WatchComponentView(component: comp)
                     }
                     .id("canvas")
                     if let status = model.statusText {
+                        let accessibility = WatchAccessibility060.operationStatus(status)
                         HStack(spacing: 4) {
                             ProgressView().controlSize(.mini)
                             Text(InlineMarkdown.attributed(status))
                                 .font(.footnote).foregroundStyle(.secondary)
                         }
+                        .accessibilityElement(children: .ignore)
+                        .accessibilityIdentifier(accessibility.identifier)
+                        .accessibilityLabel(accessibility.name)
+                        .accessibilityValue(accessibility.state)
+                        .accessibilityAddTraits(.updatesFrequently)
                     }
                     if let banner = model.errorBanner {
                         Label(banner, systemImage: "exclamationmark.triangle")
@@ -36,12 +42,12 @@ struct WatchChatView: View {
                     inputArea
                 }
             }
-            .onChange(of: model.entries.count) { _, _ in
-                if let last = model.entries.last {
+            .onChange(of: model.visibleEntries.count) { _, _ in
+                if let last = model.visibleEntries.last {
                     withAnimation { proxy.scrollTo(last.id, anchor: .bottom) }
                 }
             }
-            .onChange(of: model.canvas.count) { _, count in
+            .onChange(of: model.visibleCanvas.count) { _, count in
                 if count > 0 { withAnimation { proxy.scrollTo("canvas", anchor: .bottom) } }
             }
         }
@@ -57,19 +63,27 @@ struct WatchChatView: View {
                     Image(systemName: "arrow.counterclockwise")
                         .foregroundStyle(.white)
                 }
-                .accessibilityLabel("Replay spoken response")
+                .accessibilityIdentifier(WatchAccessibility060.replay.identifier)
+                .accessibilityLabel(WatchAccessibility060.replay.name)
+                .accessibilityValue(WatchAccessibility060.replay.state)
                 Spacer()
+                let stopAccessibility = WatchAccessibility060.stop(
+                    isSpeaking: model.speaker.isSpeaking)
                 Button {
                     model.speaker.stop()
                 } label: {
-                    Image(systemName: model.speaker.isSpeaking
-                          ? "speaker.slash.fill" : "speaker.wave.2")
-                        .foregroundStyle(.white)
+                    Image(
+                        systemName: model.speaker.isSpeaking
+                            ? "speaker.slash.fill" : "speaker.wave.2"
+                    )
+                    .foregroundStyle(.white)
                 }
-                .accessibilityLabel("Stop speaking")
+                .accessibilityIdentifier(stopAccessibility.identifier)
+                .accessibilityLabel(stopAccessibility.name)
+                .accessibilityValue(stopAccessibility.state)
             }
         }
-        .onDisappear { model.speaker.stop() }   // navigation stops playback
+        .onDisappear { model.speaker.stop() }  // navigation stops playback
     }
 
     @ViewBuilder
@@ -82,8 +96,9 @@ struct WatchChatView: View {
                         .font(.footnote)
                         .padding(6)
                         .frame(maxWidth: .infinity, alignment: .trailing)
-                        .background(WatchBrand.primary.opacity(0.25),
-                                    in: RoundedRectangle(cornerRadius: 8))
+                        .background(
+                            WatchBrand.primary.opacity(0.25),
+                            in: RoundedRectangle(cornerRadius: 8))
                 }
                 // Read-only name chips (FR-033): no upload affordance exists
                 // on the watch — these only mirror what the turn carried.
@@ -123,6 +138,9 @@ struct WatchChatView: View {
             } onSubmit: { text in
                 model.pendingDictation = text
             }
+            .accessibilityIdentifier(WatchAccessibility060.dictate.identifier)
+            .accessibilityLabel(WatchAccessibility060.dictate.name)
+            .accessibilityValue(WatchAccessibility060.dictate.state)
         } else {
             VStack(alignment: .leading, spacing: 4) {
                 Text("“\(model.pendingDictation)”")
@@ -131,9 +149,15 @@ struct WatchChatView: View {
                 HStack {
                     Button("Send") { model.sendPending() }
                         .buttonStyle(.borderedProminent)
+                        .accessibilityIdentifier(WatchAccessibility060.send.identifier)
+                        .accessibilityLabel(WatchAccessibility060.send.name)
+                        .accessibilityValue(WatchAccessibility060.send.state)
                     Button("Discard", role: .destructive) {
                         model.pendingDictation = ""
                     }
+                    .accessibilityIdentifier(WatchAccessibility060.discard.identifier)
+                    .accessibilityLabel(WatchAccessibility060.discard.name)
+                    .accessibilityValue(WatchAccessibility060.discard.state)
                 }
                 .font(.footnote)
             }

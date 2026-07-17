@@ -1,11 +1,18 @@
-"""
-Start the full system: Orchestrator + General Agent.
-"""
-import subprocess
+"""Start the full system under bounded child-process supervision."""
+
 import time
 import sys
 import os
 import urllib.request
+import uuid
+
+from orchestrator.agent_constitution import UserAgentPolicyOutcome
+from shared.database import Database
+from shared.process_supervision import (
+    ProcessOwner,
+    ProcessSupervisor,
+    TerminationReason,
+)
 
 try:
     from dotenv import load_dotenv
@@ -43,7 +50,28 @@ def _wait_for_orchestrator(port: int, process, timeout_s: float = 60.0,
     return False
 
 
-def main():
+def _report_user_agent_policy_outcome(database: Database) -> None:
+    """Print only the bounded aggregate result of the guarded policy check."""
+
+    outcome = getattr(database, "user_agent_policy_outcome", None)
+    if not isinstance(outcome, UserAgentPolicyOutcome):
+        raise RuntimeError("guarded database initialization omitted policy outcome")
+    fields = outcome.public_fields()
+    print(
+        "  User-agent policy check: "
+        f"revision={fields['policy_revision']} "
+        f"marker_changed={str(fields['marker_changed']).lower()} "
+        "agents_marked_for_revalidation="
+        f"{fields['agents_marked_for_revalidation']}"
+    )
+
+
+def main(process_supervisor=None):
+    process_supervisor = (
+        process_supervisor
+        if process_supervisor is not None
+        else ProcessSupervisor()
+    )
     # Force UTF-8 encoding for stdout/stderr to avoid Windows cp1252 errors
     if sys.stdout.encoding.lower() != 'utf-8':
         try:
@@ -56,8 +84,6 @@ def main():
     orchestrator_script = os.path.join(base_dir, "orchestrator", "orchestrator.py")
     os.path.join(base_dir, "agents", "general_agent.py")
     python_exe = sys.executable
-
-    processes = []
 
     try:
         print("=" * 60)
@@ -79,20 +105,26 @@ def main():
                     if agent_scripts:
                         valid_agents.append(item)
         
-        # Assign DEFAULT_AGENT_OWNER to any agents (live or draft) without an owner
-        default_owner = os.environ.get("DEFAULT_AGENT_OWNER")
-        if default_owner:
-            all_agents = []
-            if os.path.exists(agents_dir):
-                for item in os.listdir(agents_dir):
-                    item_path = os.path.join(agents_dir, item)
-                    if os.path.isdir(item_path) and not item.startswith("__"):
-                        agent_scripts = [f for f in os.listdir(item_path) if f.endswith("_agent.py")]
-                        if agent_scripts:
-                            all_agents.append(item)
-            if all_agents:
-                from shared.database import Database
-                db = Database()
+        # One unconditional guarded initializer owns schema/policy startup.
+        # Reuse that instance for optional first-boot ownership initialization
+        # so start.py never grows a parallel migration or policy path.
+        db = Database()
+        try:
+            _report_user_agent_policy_outcome(db)
+            default_owner = os.environ.get("DEFAULT_AGENT_OWNER")
+            if default_owner:
+                all_agents = []
+                if os.path.exists(agents_dir):
+                    for item in os.listdir(agents_dir):
+                        item_path = os.path.join(agents_dir, item)
+                        if os.path.isdir(item_path) and not item.startswith("__"):
+                            agent_scripts = [
+                                f
+                                for f in os.listdir(item_path)
+                                if f.endswith("_agent.py")
+                            ]
+                            if agent_scripts:
+                                all_agents.append(item)
                 for agent_name in all_agents:
                     ownership = db.get_agent_ownership(agent_name)
                     if not ownership:
@@ -102,7 +134,8 @@ def main():
                         is_draft = os.path.exists(os.path.join(agents_dir, agent_name, ".draft"))
                         db.set_agent_ownership(agent_name, default_owner, is_public=not is_draft)
                         print(f"  Assigned owner '{default_owner}' to agent: {agent_name}")
-                db.close()
+        finally:
+            db.close()
 
         # Set MAX_AGENTS based on what we found, defaulting to 1 if none found to avoid errors
         max_agents = max(1, len(valid_agents))
@@ -111,8 +144,12 @@ def main():
 
         orch_port = int(os.environ.get("ORCHESTRATOR_PORT", 8001))
         print(f"Starting Orchestrator on port {orch_port} (expecting {max_agents} agents)...")
-        p_orch = subprocess.Popen([python_exe, orchestrator_script], env=env)
-        processes.append(p_orch)
+        p_orch = process_supervisor.spawn(
+            process_id=uuid.uuid4(),
+            owner=ProcessOwner(owner_kind="backend_entrypoint", owner_id="orchestrator"),
+            argv=(python_exe, orchestrator_script),
+            env=env,
+        )
         _wait_for_orchestrator(orch_port, p_orch)
 
         # Feature 040 (US1): when in-process agents are enabled (default), the
@@ -141,11 +178,20 @@ def main():
                 if agent_scripts:
                     custom_agent_script = os.path.join(item_path, agent_scripts[0])
                     print(f"Starting {item} agent on port {next_port}...")
-                    p_custom_agent = subprocess.Popen(
-                        [python_exe, custom_agent_script, "--port", str(next_port)],
-                        cwd=item_path
+                    process_supervisor.spawn(
+                        process_id=uuid.uuid4(),
+                        owner=ProcessOwner(
+                            owner_kind="server_agent",
+                            owner_id=item,
+                        ),
+                        argv=(
+                            python_exe,
+                            custom_agent_script,
+                            "--port",
+                            str(next_port),
+                        ),
+                        cwd=item_path,
                     )
-                    processes.append(p_custom_agent)
                     next_port += 1
 
         print()
@@ -175,29 +221,14 @@ def main():
     except KeyboardInterrupt:
         print("\n Stopping...")
     finally:
-        for p in processes:
-            if p.poll() is None:
-                if os.name == 'nt':
-                    try:
-                        subprocess.run(
-                            ['taskkill', '/F', '/T', '/PID', str(p.pid)],
-                            stdout=subprocess.DEVNULL,
-                            stderr=subprocess.DEVNULL,
-                            check=False
-                        )
-                    except Exception:
-                        p.terminate()
-                else:
-                    p.terminate()
-                    try:
-                        p.wait(timeout=2)
-                    except subprocess.TimeoutExpired:
-                        p.kill()
-                # Wait a bit for process to terminate
-                for _ in range(10):
-                    if p.poll() is not None:
-                        break
-                    time.sleep(0.2)
+        snapshots = process_supervisor.terminate_all(reason=TerminationReason.QUIT)
+        for snapshot in snapshots:
+            if snapshot.cleanup_error:
+                print(
+                    " Process cleanup incomplete for "
+                    f"{snapshot.owner.owner_kind}/{snapshot.owner.owner_id}: "
+                    f"{snapshot.cleanup_error}"
+                )
         print(" System stopped.")
 
 

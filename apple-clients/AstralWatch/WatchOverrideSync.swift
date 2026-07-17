@@ -1,3 +1,4 @@
+import AstralCore
 // Feature 053 — receives the backend endpoint override pushed by the iPhone
 // companion (FR-011).
 //
@@ -14,7 +15,6 @@
 // which backend we talk to — it can never strand the watch.
 import Foundation
 import WatchConnectivity
-import AstralCore
 
 final class WatchOverrideSync: NSObject, WCSessionDelegate {
     static let shared = WatchOverrideSync()
@@ -49,9 +49,11 @@ final class WatchOverrideSync: NSObject, WCSessionDelegate {
 
     // MARK: - WCSessionDelegate
 
-    func session(_ session: WCSession,
-                 activationDidCompleteWith activationState: WCSessionActivationState,
-                 error: Error?) {
+    func session(
+        _ session: WCSession,
+        activationDidCompleteWith activationState: WCSessionActivationState,
+        error: Error?
+    ) {
         guard error == nil, activationState == .activated else { return }
         // No companion installed => nothing will ever arrive. That is a supported
         // state, not an error: we simply keep the build-time endpoint.

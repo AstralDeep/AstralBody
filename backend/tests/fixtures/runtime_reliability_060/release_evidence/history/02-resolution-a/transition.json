@@ -1,0 +1,15 @@
+{
+  "ledger_repository": "AstralDeep/AstralDeep",
+  "ledger_ref": "refs/heads/release-evidence-debt",
+  "parent_sha": "1111111111111111111111111111111111111111",
+  "commit_sha": "2222222222222222222222222222222222222222",
+  "added_paths": [
+    "resolutions/33333333-3333-4333-8333-333333333333.json"
+  ],
+  "added_sha256": {
+    "resolutions/33333333-3333-4333-8333-333333333333.json": "2417ef56a8e10cc471353aa87af0700a6a547d7181b97f6392458fe525c5643a"
+  },
+  "retained_paths": {
+    "debts/11111111-1111-4111-8111-111111111111.json": "81d84b87594269272f53e132a511eb06d736052c7b4c79dea75c13ca73a9b257"
+  }
+}

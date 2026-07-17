@@ -1,7 +1,7 @@
+import AstralCore
 // Feature 051 US3 — the signed-out watch: backend-generated QR + short code
 // + expiry countdown; no credential entry exists on the watch (FR-020).
 import SwiftUI
-import AstralCore
 
 struct DeviceLoginView: View {
     @Environment(WatchModel.self) var model

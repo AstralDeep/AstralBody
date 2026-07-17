@@ -1,0 +1,16 @@
+{
+  "document_type": "evidence_exception_request",
+  "schema_version": 1,
+  "exception_id": "90000000-0000-4000-8000-000000000005",
+  "candidate_sha": "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
+  "release_id": "060-illegal-trust",
+  "platform": "windows",
+  "missing_checks": [
+    "release_trust"
+  ],
+  "reason": "Protected provenance could not be verified and trust failures are never outage exceptions.",
+  "requester_login": "fixture-author",
+  "requested_at": "2026-07-15T18:00:00Z",
+  "maximum_valid_days": 7,
+  "blocks_next_release": true
+}

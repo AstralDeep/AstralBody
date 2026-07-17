@@ -1,3 +1,4 @@
+import AstralCore
 // Feature 055 (US4/US5) — chrome for one TOP-LEVEL canvas component:
 // the provenance badge (T036, wire-contract §6: render the server-stamped
 // `provenance` field, distinct per value, absent = nothing — web footer
@@ -6,7 +7,6 @@
 // entry for tables (T045, opened in the system browser). Nested children
 // keep rendering bare ComponentViews; chrome never recurses.
 import SwiftUI
-import AstralCore
 
 struct RefineTarget: Identifiable, Equatable {
     let componentId: String
@@ -46,7 +46,8 @@ struct ComponentChrome: View {
     /// components are ephemeral by contract (never persisted) — no affordance.
     private var refinableId: String? {
         guard let cid = component.componentId, !cid.isEmpty,
-              !cid.hasPrefix("wel_") else { return nil }
+            !cid.hasPrefix("wel_")
+        else { return nil }
         return cid
     }
 
@@ -58,8 +59,7 @@ struct ComponentChrome: View {
     }
 
     private var hasMenu: Bool {
-        interactive && !model.mutationsLocked &&
-            ((refinableId != nil && onRefine != nil) || csvExportURL != nil)
+        interactive && !model.mutationsLocked && ((refinableId != nil && onRefine != nil) || csvExportURL != nil)
     }
 
     @ViewBuilder
@@ -144,7 +144,7 @@ struct RefineSheet: View {
         }
         .padding(20)
         #if os(macOS)
-        .frame(minWidth: 380)
+            .frame(minWidth: 380)
         #endif
         .presentationDetents([.medium])
         .background(p.bg)

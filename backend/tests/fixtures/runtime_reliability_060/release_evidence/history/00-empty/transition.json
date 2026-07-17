@@ -1,0 +1,8 @@
+{
+  "ledger_repository": "AstralDeep/AstralDeep",
+  "ledger_ref": "refs/heads/release-evidence-debt",
+  "commit_sha": "0000000000000000000000000000000000000000",
+  "parent_sha": null,
+  "added_paths": [],
+  "retained_paths": {}
+}

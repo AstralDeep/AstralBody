@@ -1,0 +1,92 @@
+{
+  "document_type": "trusted_exception_approval",
+  "schema_version": 1,
+  "manifest_id": "66666666-6666-4666-8666-666666666666",
+  "approval_id": "22222222-2222-4222-8222-222222222222",
+  "exception_id": "11111111-1111-4111-8111-111111111111",
+  "repository": "AstralDeep/AstralDeep",
+  "candidate_sha": "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
+  "release_id": "060-rc-a",
+  "protected_environment": "release-evidence-exception",
+  "deployment_id": 8001,
+  "approval_state": "approved",
+  "reviewer_login": "release-owner",
+  "reviewer_database_id": 6001,
+  "requester_login": "fixture-author",
+  "github_api_reference": "ghapi://AstralDeep/AstralDeep/deployments/8001",
+  "approved_at": "2026-07-15T19:00:00Z",
+  "expires_at": "2026-07-22T19:00:00Z",
+  "exception_artifact": {
+    "kind": "github_actions_artifact_member",
+    "repository": "AstralDeep/AstralDeep",
+    "run_id": "6001",
+    "run_attempt": 1,
+    "artifact_id": "7001",
+    "artifact_name": "release-evidence-exception-a",
+    "member": "requests/windows-runner-unavailable-a.json",
+    "immutable_reference": "gh://AstralDeep/AstralDeep/runs/6001/attempts/1/artifacts/7001/members/requests/windows-runner-unavailable-a.json",
+    "sha256": "fe00ea0bf67e647a13a709be6b933461a97feda42036e25c922124e9dcdcc3dc"
+  },
+  "approval_payload_sha256": "e96b0d1bc3ed0a72fce5392da794c84ba6dc5ef54d6718d7ba93441f0ee90c16",
+  "ledger_repository": "AstralDeep/AstralDeep",
+  "ledger_ref": "refs/heads/release-evidence-debt",
+  "ledger_parent_sha": "0000000000000000000000000000000000000000",
+  "ledger_commit_sha": "1111111111111111111111111111111111111111",
+  "ledger_entry_path": "debts/11111111-1111-4111-8111-111111111111.json",
+  "ledger_entry_sha256": "81d84b87594269272f53e132a511eb06d736052c7b4c79dea75c13ca73a9b257",
+  "ledger_entry_immutable_reference": "ghgit://AstralDeep/AstralDeep/commits/1111111111111111111111111111111111111111/paths/debts/11111111-1111-4111-8111-111111111111.json",
+  "ledger_entry": {
+    "document_type": "release_evidence_debt",
+    "schema_version": 1,
+    "approval_id": "22222222-2222-4222-8222-222222222222",
+    "exception_id": "11111111-1111-4111-8111-111111111111",
+    "repository": "AstralDeep/AstralDeep",
+    "candidate_sha": "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
+    "release_id": "060-rc-a",
+    "platform": "windows",
+    "missing_checks": [
+      "windows_deployment_validation"
+    ],
+    "reason": "The independently observed hosted Windows runner image was temporarily unavailable before product execution.",
+    "requester_login": "fixture-author",
+    "reviewer_login": "release-owner",
+    "reviewer_database_id": 6001,
+    "approved_at": "2026-07-15T19:00:00Z",
+    "expires_at": "2026-07-22T19:00:00Z",
+    "exception_request_artifact": {
+      "kind": "github_actions_artifact_member",
+      "repository": "AstralDeep/AstralDeep",
+      "run_id": "6001",
+      "run_attempt": 1,
+      "artifact_id": "7001",
+      "artifact_name": "release-evidence-exception-a",
+      "member": "requests/windows-runner-unavailable-a.json",
+      "immutable_reference": "gh://AstralDeep/AstralDeep/runs/6001/attempts/1/artifacts/7001/members/requests/windows-runner-unavailable-a.json",
+      "sha256": "fe00ea0bf67e647a13a709be6b933461a97feda42036e25c922124e9dcdcc3dc"
+    },
+    "maximum_valid_days": 7,
+    "blocks_next_release": true,
+    "registered_at": "2026-07-15T19:01:00Z"
+  },
+  "workflow": {
+    "name": "release-exception-registrar",
+    "run_id": "6001",
+    "run_attempt": 1,
+    "job_id": "register-debt"
+  },
+  "workflow_ref": "AstralDeep/AstralDeep/.github/workflows/release-exception-registrar.yml@ffffffffffffffffffffffffffffffffffffffff",
+  "runner": {
+    "os": "linux",
+    "architecture": "x86_64",
+    "runner_image": "ubuntu-24.04",
+    "runner_name": "GitHub Actions 1",
+    "runner_environment": "github_hosted"
+  },
+  "trusted_builder": {
+    "repository": "AstralDeep/AstralDeep",
+    "workflow_path": ".github/workflows/release-exception-registrar.yml",
+    "signer_digest": "ffffffffffffffffffffffffffffffffffffffff",
+    "certificate_identity": "https://github.com/AstralDeep/AstralDeep/.github/workflows/release-exception-registrar.yml@refs/heads/main"
+  },
+  "generated_at": "2026-07-15T19:01:01Z"
+}

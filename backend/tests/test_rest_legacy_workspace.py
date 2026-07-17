@@ -258,12 +258,11 @@ def test_rest_delete_component_404_when_absent(chat_env, audit_events):
 
 
 # ---------------------------------------------------------------------------
-# (3) combine / condense — reconciliation after the legacy replace
+# (3) combine / condense — one atomic conversation publication
 # ---------------------------------------------------------------------------
 
 def test_rest_combine_reconciles_with_cause_combine(chat_env):
-    """FR-026: after replace_components, the combine endpoint awaits
-    _reconcile_legacy_replacement(None, chat_id, user_id, cause='combine')."""
+    """FR-026: combine promotes legacy rows through one revisioned commit."""
     history, user_id, chat_id = chat_env
     fake = _make_fake(history, user_id)
     src_id = history.save_component(
@@ -280,7 +279,8 @@ def test_rest_combine_reconciles_with_cause_combine(chat_env):
     assert len(fake._llm_calls) == 1
     llm_components, mode = fake._llm_calls[0]
     assert mode == "combine"
-    assert {c["id"] for c in llm_components} == {src_id, tgt_id}
+    assert len({c["id"] for c in llm_components}) == 2
+    assert {c["component_data"]["title"] for c in llm_components} == {"A", "B"}
 
     # Legacy replace happened: old rows gone, one fresh row persisted.
     assert history.get_component_by_id(src_id, user_id=user_id) is None
@@ -290,13 +290,17 @@ def test_rest_combine_reconciles_with_cause_combine(chat_env):
     assert history.get_component_by_id(
         resp.new_components[0].id, user_id=user_id) is not None
 
-    # Reconciliation awaited exactly once, user-wide, cause='combine'.
-    assert fake._reconciles == [(None, chat_id, user_id, "combine")]
+    # No legacy reconciliation path runs; the derivative timeline records the
+    # cause only after the authoritative conversation commit is visible.
+    assert fake._reconciles == []
+    assert any(
+        item["cause"] == "combine"
+        for item in fake.workspace.list_snapshots(chat_id, user_id)
+    )
 
 
 def test_rest_condense_reconciles_with_cause_condense(chat_env):
-    """FR-026: the condense endpoint performs the same reconciliation with
-    cause='condense'."""
+    """FR-026: condense uses the same revisioned publication boundary."""
     history, user_id, chat_id = chat_env
     fake = _make_fake(history, user_id)
     ids = [
@@ -314,13 +318,20 @@ def test_rest_condense_reconciles_with_cause_condense(chat_env):
     assert len(fake._llm_calls) == 1
     llm_components, mode = fake._llm_calls[0]
     assert mode == "condense"
-    assert {c["id"] for c in llm_components} == set(ids)
+    assert len({c["id"] for c in llm_components}) == len(ids)
+    assert {c["component_data"]["title"] for c in llm_components} == {
+        "C0", "C1", "C2"
+    }
 
     for old_id in ids:
         assert history.get_component_by_id(old_id, user_id=user_id) is None
     assert resp.removed_ids == ids
 
-    assert fake._reconciles == [(None, chat_id, user_id, "condense")]
+    assert fake._reconciles == []
+    assert any(
+        item["cause"] == "condense"
+        for item in fake.workspace.list_snapshots(chat_id, user_id)
+    )
 
 
 # ---------------------------------------------------------------------------

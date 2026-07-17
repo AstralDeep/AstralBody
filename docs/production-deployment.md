@@ -77,12 +77,14 @@ deployment-wide default for user traffic:
 User-authored agents that run on the **user's own desktop** as an isolated child
 process and tunnel inward over the client's authenticated UI socket. **Off by
 default** and safe to leave off. To enable, set `FF_BYO_AGENTS=true` in the host
-`.env` and **restart** — the flag is read once at import (boot-time switch, no
-admin UI). No schema migration, no new runtime dependency, no new port. User code
-is never executed on the orchestrator (pure-AST static validation); it runs only
-on the user's desktop and is untrusted at the boundary. Full enablement + security
-posture + desktop-host packaging (Windows child process; macOS
-direct-download-hosts vs App-Store author-only): **[byo-client-agents.md](byo-client-agents.md)**.
+`.env` and run `make apply-config` — the flag is read once at import, so a plain
+container restart does not reload a changed Compose environment. The apply target
+recreates the service and prints only the normalized effective flag value. There
+is no admin UI for this boot switch. No new runtime dependency or port is added.
+User code is never executed on the orchestrator (pure-AST static validation); it
+runs only on an eligible user's desktop and is untrusted at the boundary. Full
+enablement, verification, security posture, lifecycle/recovery, compatibility,
+rollback, and desktop-host packaging guidance: **[byo-client-agents.md](byo-client-agents.md)**.
 
 ## TLS / reverse proxy
 

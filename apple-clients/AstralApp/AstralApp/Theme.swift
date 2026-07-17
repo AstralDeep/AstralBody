@@ -1,9 +1,9 @@
+import AstralCore
 // Feature 051 — the AstralDeep design system, shared 1:1 with the web,
 // Android, and Windows clients (same palette, radii, spacing). Dark-first.
 // The server can restyle live via `user_preferences` / `theme_apply`
 // (channel colors or a named preset) exactly like the other clients.
 import SwiftUI
-import AstralCore
 
 /// Canonical palette. Hex values match backend/webrender/static/astral.css
 /// and the Windows/Android defaults (the "midnight" preset).
@@ -27,8 +27,9 @@ struct AstralPalette: Equatable {
     /// Gradient used for hero bands and primary buttons (primary → secondary,
     /// 135° diagonal — matches the web `--accent-grad` and Windows GRAD).
     var gradient: LinearGradient {
-        LinearGradient(colors: [primary, secondary],
-                       startPoint: .topLeading, endPoint: .bottomTrailing)
+        LinearGradient(
+            colors: [primary, secondary],
+            startPoint: .topLeading, endPoint: .bottomTrailing)
     }
 
     /// Semantic accent color for a component `variant`.
@@ -72,12 +73,14 @@ final class ThemeStore {
         if let preset = spec["preset"]?.stringValue { apply(preset: preset) }
         if let colors = spec["colors"]?.objectValue { apply(colors: colors) }
         if let key = spec["color_key"]?.stringValue,
-           let val = spec["color_value"]?.stringValue,
-           let color = Color(cssHex: val) {
+            let val = spec["color_value"]?.stringValue,
+            let color = Color(cssHex: val)
+        {
             set(channel: key, color)
         }
         if spec["preset"] == nil, spec["colors"] == nil, spec["color_key"] == nil,
-           let flat = spec.objectValue {
+            let flat = spec.objectValue
+        {
             apply(colors: flat)
         }
     }
@@ -111,26 +114,30 @@ final class ThemeStore {
     func apply(preset: String) {
         switch preset {
         case "daylight":
-            palette = AstralPalette(bg: Color(hex: 0xF8FAFC), surface: Color(hex: 0xFFFFFF),
-                                    surface2: Color(hex: 0xEEF0F5), border: Color.black.opacity(0.08),
-                                    primary: Color(hex: 0x4F46E5), secondary: Color(hex: 0x7C3AED),
-                                    accent: Color(hex: 0x0891B2), text: Color(hex: 0x1E293B),
-                                    muted: Color(hex: 0x64748B))
+            palette = AstralPalette(
+                bg: Color(hex: 0xF8FAFC), surface: Color(hex: 0xFFFFFF),
+                surface2: Color(hex: 0xEEF0F5), border: Color.black.opacity(0.08),
+                primary: Color(hex: 0x4F46E5), secondary: Color(hex: 0x7C3AED),
+                accent: Color(hex: 0x0891B2), text: Color(hex: 0x1E293B),
+                muted: Color(hex: 0x64748B))
         case "ocean":
-            palette = AstralPalette(bg: Color(hex: 0x0C1222), surface: Color(hex: 0x132038),
-                                    primary: Color(hex: 0x0EA5E9), secondary: Color(hex: 0x06B6D4),
-                                    accent: Color(hex: 0x2DD4BF), text: Color(hex: 0xE2E8F0),
-                                    muted: Color(hex: 0x94A3B8))
+            palette = AstralPalette(
+                bg: Color(hex: 0x0C1222), surface: Color(hex: 0x132038),
+                primary: Color(hex: 0x0EA5E9), secondary: Color(hex: 0x06B6D4),
+                accent: Color(hex: 0x2DD4BF), text: Color(hex: 0xE2E8F0),
+                muted: Color(hex: 0x94A3B8))
         case "sunset":
-            palette = AstralPalette(bg: Color(hex: 0x1C1017), surface: Color(hex: 0x2D1B24),
-                                    primary: Color(hex: 0xF97316), secondary: Color(hex: 0xEF4444),
-                                    accent: Color(hex: 0xFBBF24), text: Color(hex: 0xFEF2F2),
-                                    muted: Color(hex: 0xA8A29E))
+            palette = AstralPalette(
+                bg: Color(hex: 0x1C1017), surface: Color(hex: 0x2D1B24),
+                primary: Color(hex: 0xF97316), secondary: Color(hex: 0xEF4444),
+                accent: Color(hex: 0xFBBF24), text: Color(hex: 0xFEF2F2),
+                muted: Color(hex: 0xA8A29E))
         case "forest":
-            palette = AstralPalette(bg: Color(hex: 0x0F1A14), surface: Color(hex: 0x1A2E22),
-                                    primary: Color(hex: 0x22C55E), secondary: Color(hex: 0x10B981),
-                                    accent: Color(hex: 0xA3E635), text: Color(hex: 0xECFDF5),
-                                    muted: Color(hex: 0x86EFAC))
+            palette = AstralPalette(
+                bg: Color(hex: 0x0F1A14), surface: Color(hex: 0x1A2E22),
+                primary: Color(hex: 0x22C55E), secondary: Color(hex: 0x10B981),
+                accent: Color(hex: 0xA3E635), text: Color(hex: 0xECFDF5),
+                muted: Color(hex: 0x86EFAC))
         default:
             palette = .midnight
         }
@@ -139,11 +146,12 @@ final class ThemeStore {
 
 extension Color {
     init(hex: UInt32) {
-        self.init(.sRGB,
-                  red: Double((hex >> 16) & 0xFF) / 255,
-                  green: Double((hex >> 8) & 0xFF) / 255,
-                  blue: Double(hex & 0xFF) / 255,
-                  opacity: 1)
+        self.init(
+            .sRGB,
+            red: Double((hex >> 16) & 0xFF) / 255,
+            green: Double((hex >> 8) & 0xFF) / 255,
+            blue: Double(hex & 0xFF) / 255,
+            opacity: 1)
     }
 
     /// Parse `#rrggbb` / `rrggbb` (the wire format used by the theme spec).

@@ -1,0 +1,33 @@
+{
+  "document_type": "release_evidence_debt",
+  "schema_version": 1,
+  "approval_id": "55555555-5555-4555-8555-555555555555",
+  "exception_id": "44444444-4444-4444-8444-444444444444",
+  "repository": "AstralDeep/AstralDeep",
+  "candidate_sha": "cccccccccccccccccccccccccccccccccccccccc",
+  "release_id": "060-rc-c",
+  "platform": "windows",
+  "missing_checks": [
+    "windows_deployment_validation"
+  ],
+  "reason": "A distinct later hosted Windows runner outage was independently observed before any product behavior ran.",
+  "requester_login": "fixture-author",
+  "reviewer_login": "release-owner",
+  "reviewer_database_id": 6001,
+  "approved_at": "2026-07-29T19:00:00Z",
+  "expires_at": "2026-08-05T19:00:00Z",
+  "exception_request_artifact": {
+    "kind": "github_actions_artifact_member",
+    "repository": "AstralDeep/AstralDeep",
+    "run_id": "6003",
+    "run_attempt": 1,
+    "artifact_id": "7003",
+    "artifact_name": "release-evidence-exception-b",
+    "member": "requests/windows-runner-unavailable-b.json",
+    "immutable_reference": "gh://AstralDeep/AstralDeep/runs/6003/attempts/1/artifacts/7003/members/requests/windows-runner-unavailable-b.json",
+    "sha256": "1c1cbbbf4db41e438c86469e5a7ba7a9c1bfea8c211096834421e8f5f56afc6a"
+  },
+  "maximum_valid_days": 7,
+  "blocks_next_release": true,
+  "registered_at": "2026-07-29T19:01:00Z"
+}

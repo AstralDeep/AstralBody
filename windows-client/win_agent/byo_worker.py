@@ -1,15 +1,18 @@
-"""BYO agent worker entry — the child process side of the host (058 T012).
+"""BYO agent worker entry — always the child side of the 058/060 host.
 
 Runs ONE delivered bundle (`%LOCALAPPDATA%/AstralDeep/agents/<agent_id>/`) in a
-process of its own. The bundle's `agent_main.py` owns the stdio loop described in
-`contracts/host-bundle.md` §3 (emit `register_agent`, then read `mcp_request`
-JSON lines from stdin and answer with `mcp_response` lines on stdout); this
-module's whole job is to make that file importable and hand it control.
+process of its own. The versioned bundle's `agent_main.py` owns the stdio loop:
+v2 reads the non-secret launch fence/runtime metadata supplied by its parent,
+emits `agent_runtime_register`, then handles fully fenced request JSON lines.
+This module's whole job is to make that file importable and hand it control.
 
 **Imports no Qt.** Under PyInstaller onefile the worker's interpreter is
 AstralDeep.exe itself, so anything imported here is imported into every agent
 process; pulling in Qt would raise a second GUI (and cost ~100 MB of RSS per
-agent). `main.py` branches on `--byo-worker` before Qt loads for the same reason.
+agent). It also intentionally does not import or instantiate the process
+supervisor: only the parent host owns process trees, pipes, deadlines, and
+termination. `main.py` branches on `--byo-worker` before Qt loads for the same
+reason.
 
 Bundle entry contract (the seam T008's generator template must satisfy):
 `agent_main.py` either runs its stdio loop at import time, or exposes a

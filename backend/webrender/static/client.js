@@ -16,7 +16,11 @@
   // re-fetches /auth/session (which silently refreshes server-side) instead of
   // reusing a stale token. Mock-auth dev works because /auth/session answers
   // for it.
-  var token = sessionStorage.getItem(TOKEN_KEY) || window.__ASTRAL_TOKEN__ || "";
+  // A full shell load is an authentication boundary: its server-injected
+  // token reflects the current signed-cookie session and MUST win over a
+  // token left in this tab by a prior principal. The sessionStorage value is
+  // only a fallback for legacy/test shells that do not inject a token.
+  var token = window.__ASTRAL_TOKEN__ || sessionStorage.getItem(TOKEN_KEY) || "";
 
   var ws = null, attempts = 0, activeChatId = null, streamSeq = {}, firstConnect = true;
   var timelineMode = false; // read-only workspace history view
@@ -25,6 +29,212 @@
   // only right after interactive sign-in). Echoed into the first register_ui;
   // reconnects within a page are always resumes.
   var serverResumed = (window.__ASTRAL_RESUMED__ !== false);
+
+  // Feature 060 conversation continuity. Only the small active-chat locator is
+  // durable; committed transcript/canvas remain server authoritative.
+  var activeChatLocatorKey = null;
+  var accountIdentityInitialized = false;
+  var connectionGeneration = null;
+  var requestState = null;
+  var committedRevisionByChat = Object.create(null);
+  var lastSnapshotIdByChat = Object.create(null);
+  var seenSnapshotIdsByChat = Object.create(null);
+  var transientOverlay = null;
+  // Feature 060 server-owned status projections. These maps retain the highest
+  // accepted sequence/pair so reordered WebSocket delivery cannot regress the
+  // visible fallback or replace the first durable operation terminal.
+  var operationStatusById = Object.create(null);
+  var operationSubmissionByGeneration = Object.create(null);
+  var operationSubmissionById = Object.create(null);
+  var agentLifecycleById = Object.create(null);
+  var ACCOUNT_SESSION_KEY = "astraldeep.active_chat.account.v1";
+  var ALLOWED_LOCATOR_CLEAR_REASONS = Object.freeze({
+    explicit_new_chat: true,
+    definitive_sign_out: true,
+    account_switch: true,
+    confirmed_deletion: true,
+  });
+
+  /** Return a cryptographically random canonical UUID4. */
+  function randomUuid4() {
+    if (crypto.randomUUID) return crypto.randomUUID();
+    var bytes = new Uint8Array(16);
+    crypto.getRandomValues(bytes);
+    bytes[6] = (bytes[6] & 0x0f) | 0x40;
+    bytes[8] = (bytes[8] & 0x3f) | 0x80;
+    var hex = Array.prototype.map.call(bytes, function (value) {
+      return value.toString(16).padStart(2, "0");
+    }).join("");
+    return hex.slice(0, 8) + "-" + hex.slice(8, 12) + "-" + hex.slice(12, 16)
+      + "-" + hex.slice(16, 20) + "-" + hex.slice(20);
+  }
+
+  function isCanonicalUuid4(value) {
+    return typeof value === "string"
+      && /^[0-9a-f]{8}-[0-9a-f]{4}-4[0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}$/.test(value);
+  }
+
+  function isRfc3339Utc(value) {
+    return typeof value === "string" && /^\d{4}-\d{2}-\d{2}T\d{2}:\d{2}:\d{2}(?:\.\d+)?Z$/.test(value)
+      && !Number.isNaN(Date.parse(value));
+  }
+
+  /**
+   * Build the browser-store key from the authenticated Keycloak issuer and
+   * subject. The separator prevents ambiguous concatenations; only the digest
+   * enters storage, so account display identity is never persisted.
+   */
+  async function activeChatStorageKey(issuer, subject) {
+    if (typeof issuer !== "string" || !issuer || typeof subject !== "string" || !subject) return null;
+    var encoder = new TextEncoder();
+    var issuerBytes = encoder.encode(issuer);
+    var subjectBytes = encoder.encode(subject);
+    var input = new Uint8Array(issuerBytes.length + 1 + subjectBytes.length);
+    input.set(issuerBytes, 0);
+    input[issuerBytes.length] = 0;
+    input.set(subjectBytes, issuerBytes.length + 1);
+    var digest = await crypto.subtle.digest("SHA-256", input);
+    var hex = Array.prototype.map.call(new Uint8Array(digest), function (value) {
+      return value.toString(16).padStart(2, "0");
+    }).join("");
+    return "astraldeep.active_chat.v1." + hex;
+  }
+
+  function decodeTokenIdentity(rawToken, fallbackSubject) {
+    if (fallbackSubject && (typeof rawToken !== "string" || rawToken.split(".").length !== 3)) {
+      return { issuer: "astraldeep://mock-keycloak", subject: fallbackSubject || "test_user" };
+    }
+    if (typeof rawToken !== "string") return null;
+    var pieces = rawToken.split(".");
+    if (pieces.length !== 3) return null;
+    try {
+      var encoded = pieces[1].replace(/-/g, "+").replace(/_/g, "/");
+      encoded += "=".repeat((4 - encoded.length % 4) % 4);
+      var binary = atob(encoded);
+      var bytes = new Uint8Array(binary.length);
+      for (var index = 0; index < binary.length; index++) bytes[index] = binary.charCodeAt(index);
+      var claims = JSON.parse(new TextDecoder().decode(bytes));
+      if (typeof claims.iss !== "string" || !claims.iss || typeof claims.sub !== "string" || !claims.sub) return null;
+      // These unverified claims namespace local storage only. Authorization
+      // remains exclusively the server's verified-token responsibility.
+      return { issuer: claims.iss, subject: claims.sub };
+    } catch (e) { return null; }
+  }
+
+  function readActiveChatLocator() {
+    if (!activeChatLocatorKey) return null;
+    var raw;
+    try { raw = localStorage.getItem(activeChatLocatorKey); } catch (e) { return null; }
+    if (!raw) return null;
+    try {
+      var value = JSON.parse(raw);
+      if (!value || value.schema_version !== 1 || Object.keys(value).sort().join(",") !== "chat_id,schema_version,updated_at") return null;
+      if (!isCanonicalUuid4(value.chat_id) || !isRfc3339Utc(value.updated_at)) return null;
+      return value.chat_id;
+    } catch (e) { return null; }
+  }
+
+  /** Atomically persist the intentionally active non-credential locator. */
+  function persistActiveChatLocator(chatId) {
+    if (!activeChatLocatorKey || !isCanonicalUuid4(chatId)) return false;
+    var value = { schema_version: 1, chat_id: chatId, updated_at: new Date().toISOString() };
+    try { localStorage.setItem(activeChatLocatorKey, JSON.stringify(value)); return true; }
+    catch (e) { return false; }
+  }
+
+  /**
+   * Clear a locator only for the four definitive contract events. Transient
+   * socket/auth/provider failures never call this function.
+   */
+  function clearActiveChatLocator(reason, chatId, storageKey) {
+    // explicit_new_chat | definitive_sign_out | account_switch | confirmed_deletion
+    if (!ALLOWED_LOCATOR_CLEAR_REASONS[reason]) return false;
+    if (reason === "confirmed_deletion" && chatId !== activeChatId) return false;
+    var key = storageKey || activeChatLocatorKey;
+    if (key) { try { localStorage.removeItem(key); } catch (e) {} }
+    if (!storageKey || storageKey === activeChatLocatorKey) {
+      var clearedChatId = activeChatId;
+      activeChatId = null;
+      requestState = null;
+      clearTransientOverlay();
+      clearCommittedConversationView(reason, clearedChatId);
+    }
+    return true;
+  }
+
+  function clearCommittedConversationView(reason, chatId) {
+    if (chat) chat.replaceChildren();
+    if (canvas) { canvas.replaceChildren(); showCanvasEmpty(); }
+    timelineMode = false;
+    if (reason === "account_switch" || reason === "definitive_sign_out") {
+      committedRevisionByChat = Object.create(null);
+      lastSnapshotIdByChat = Object.create(null);
+      seenSnapshotIdsByChat = Object.create(null);
+      operationStatusById = Object.create(null);
+      operationSubmissionByGeneration = Object.create(null);
+      operationSubmissionById = Object.create(null);
+      agentLifecycleById = Object.create(null);
+    } else if (chatId) {
+      delete committedRevisionByChat[chatId];
+      delete lastSnapshotIdByChat[chatId];
+      delete seenSnapshotIdsByChat[chatId];
+    }
+  }
+
+  async function prepareAccountIdentity(rawToken, fallbackSubject) {
+    var identity = decodeTokenIdentity(rawToken, fallbackSubject);
+    if (!identity || !crypto.subtle) return false;
+    var nextKey = await activeChatStorageKey(identity.issuer, identity.subject);
+    if (!nextKey) return false;
+    var previousKey = activeChatLocatorKey;
+    if (!previousKey) {
+      try { previousKey = sessionStorage.getItem(ACCOUNT_SESSION_KEY); } catch (e) {}
+    }
+    if (previousKey && previousKey !== nextKey) {
+      clearActiveChatLocator("account_switch", null, previousKey);
+      activeChatId = null;
+      requestState = null;
+    }
+    var changed = activeChatLocatorKey !== nextKey;
+    activeChatLocatorKey = nextKey;
+    try { sessionStorage.setItem(ACCOUNT_SESSION_KEY, nextKey); } catch (e) {}
+    if (!accountIdentityInitialized || changed) {
+      accountIdentityInitialized = true;
+      var selected = new URLSearchParams(location.search).get("chat");
+      activeChatId = isCanonicalUuid4(selected) ? selected : readActiveChatLocator();
+      if (activeChatId) persistActiveChatLocator(activeChatId);
+    }
+    return true;
+  }
+
+  function lastCommittedRenderRevision() {
+    if (!activeChatId) return 0;
+    return committedRevisionByChat[activeChatId] || 0;
+  }
+
+  function openRequest(purpose, chatId, suppliedGeneration) {
+    requestState = {
+      chatId: chatId || null,
+      generation: isCanonicalUuid4(suppliedGeneration) ? suppliedGeneration : randomUuid4(),
+      purpose: purpose,
+      hydrationApplied: false,
+      acceptedSnapshotId: null,
+      acceptedSemantic: null,
+      acceptedPresentation: null,
+      lastFrameSequence: 0,
+      snapshotApplied: false,
+    };
+    clearTransientOverlay();
+    return requestState;
+  }
+
+  function selectActiveChat(chatId, purpose) {
+    if (!isCanonicalUuid4(chatId)) return false;
+    persistActiveChatLocator(chatId);
+    activeChatId = chatId;
+    if (purpose) openRequest(purpose, chatId);
+    return true;
+  }
 
   /** Redirect to the server-side Keycloak login, preserving the destination. */
   function gotoLogin() {
@@ -42,7 +252,9 @@
         if (j && j.authenticated && j.access_token) {
           token = j.access_token;
           try { sessionStorage.setItem(TOKEN_KEY, token); } catch (e) {}
-          if (cb) cb(true);
+          prepareAccountIdentity(token, j.user_id).then(function () {
+            if (cb) cb(true);
+          }).catch(function () { if (cb) cb(true); });
         } else if (redirect) { gotoLogin(); }
         else if (cb) cb(false);
       })
@@ -120,11 +332,109 @@
     layoutResizeTimer = setTimeout(applyLayoutClass, 120);
   });
 
-  function setStatus(s) { if (statusEl) statusEl.textContent = s || ""; }
+  function configureStatusElement(node) {
+    if (!node) return null;
+    node.setAttribute("role", "status");
+    node.setAttribute("aria-label", "Application status");
+    node.setAttribute("aria-live", "polite");
+    node.setAttribute("aria-atomic", "true");
+    node.setAttribute("aria-busy", "false");
+    return node;
+  }
+  configureStatusElement(statusEl);
+
+  function setStatus(s, busy) {
+    var current = document.getElementById("astral-status");
+    if (current !== statusEl) statusEl = configureStatusElement(current);
+    if (!statusEl) return;
+    statusEl.textContent = s || "";
+    statusEl.setAttribute("aria-busy", busy === true ? "true" : "false");
+    statusEl.setAttribute("data-status-state", s ? (busy === true ? "busy" : "settled") : "idle");
+  }
 
   function send(obj) { try { ws.send(JSON.stringify(obj)); } catch (e) {} }
+
+  /** Create the client-owned retry/generation identity before any socket I/O. */
+  function beginOperationSubmission(name, payload, suppliedGeneration) {
+    var body = Object.assign({}, payload || {});
+    var submissionId = isCanonicalUuid4(body.submission_id) ? body.submission_id : randomUuid4();
+    var requestGeneration = isCanonicalUuid4(suppliedGeneration)
+      ? suppliedGeneration
+      : (isCanonicalUuid4(body.request_generation) ? body.request_generation : randomUuid4());
+    body.submission_id = submissionId;
+    body.request_generation = requestGeneration;
+    var local = {
+      submission_id: submissionId,
+      request_generation: requestGeneration,
+      action: name,
+      chat_id: activeChatId || null,
+      state: "submitting",
+      label: "Submitting…",
+    };
+    operationSubmissionByGeneration[requestGeneration] = local;
+    operationSubmissionById[submissionId] = local;
+    setStatus(local.label, true);
+    return { payload: body, submissionId: submissionId, requestGeneration: requestGeneration };
+  }
+
+  function finishOperationSubmission(requestGeneration) {
+    var local = operationSubmissionByGeneration[requestGeneration];
+    if (!local) return false;
+    delete operationSubmissionByGeneration[requestGeneration];
+    delete operationSubmissionById[local.submission_id];
+    return true;
+  }
+
   function action(name, payload) {
-    send({ type: "ui_event", action: name, payload: payload || {}, session_id: activeChatId || undefined });
+    if (name === "chat_message") openRequest("commit", activeChatId);
+    var suppliedGeneration = requestState && (name === "chat_message" || name === "load_chat")
+      ? requestState.generation : null;
+    var submission = beginOperationSubmission(name, payload, suppliedGeneration);
+    var frame = {
+      type: "ui_event",
+      action: name,
+      payload: submission.payload,
+      session_id: activeChatId || undefined,
+      submission_id: submission.submissionId,
+      request_generation: submission.requestGeneration,
+    };
+    if (connectionGeneration) frame.connection_generation = connectionGeneration;
+    send(frame);
+    return submission;
+  }
+
+  /** Persist and bind resume scope before the registration frame is sent. */
+  function sendRegistration(resumed) {
+    var resume;
+    if (activeChatId) {
+      persistActiveChatLocator(activeChatId);
+      openRequest("hydration", activeChatId);
+      resume = {
+        schema_version: 1,
+        active_chat_id: activeChatId,
+        request_generation: requestState.generation,
+      };
+    }
+    send({
+      type: "register_ui",
+      token: token,
+      capabilities: ["render", "stream"],
+      session_id: "ui-" + Date.now(),
+      device: detectDeviceCapabilities(),
+      resumed: resumed,
+      connection_generation: connectionGeneration,
+      resume: resume,
+    });
+  }
+
+  function loadActiveChat(chatId) {
+    if (!selectActiveChat(chatId, "hydration")) return;
+    action("load_chat", {
+      chat_id: chatId,
+      connection_generation: connectionGeneration,
+      request_generation: requestState.generation,
+      snapshot_purpose: "hydration",
+    });
   }
 
   // ---- Plotly lazy loader: the library left the shell <head> (feature 052);
@@ -257,7 +567,8 @@
       + '<div class="astral-skeleton-line h-20 w-full mb-3"></div>'
       + '<div class="astral-skeleton-line h-20 w-full mb-3"></div>'
       + '<div class="astral-skeleton-line h-3 w-1/2 mb-2"></div>';
-    canvas.appendChild(d);
+    var host = requestState ? ensureTransientOverlay().canvas : canvas;
+    host.appendChild(d);
     canvas.scrollTop = canvas.scrollHeight;
   }
   function hideSkeleton() {
@@ -395,13 +706,583 @@
     processSideEffects(fresh);
   }
 
+  // ---- feature 060: atomic conversation snapshot + transient overlay ----
+  function exactKeys(value, expected) {
+    if (!value || typeof value !== "object" || Array.isArray(value)) return false;
+    return Object.keys(value).sort().join(",") === expected.slice().sort().join(",");
+  }
+
+  function stableStringify(value) {
+    if (value === null || typeof value !== "object") return JSON.stringify(value);
+    if (Array.isArray(value)) return "[" + value.map(stableStringify).join(",") + "]";
+    return "{" + Object.keys(value).sort().map(function (key) {
+      return JSON.stringify(key) + ":" + stableStringify(value[key]);
+    }).join(",") + "}";
+  }
+
+  /** Clone semantic protocol data while excluding web-only presentation. */
+  function semanticClone(value) {
+    if (Array.isArray(value)) return value.map(semanticClone);
+    if (!value || typeof value !== "object") return value;
+    var clone = {};
+    Object.keys(value).forEach(function (key) {
+      if (key === "_presentation") return;
+      clone[key] = semanticClone(value[key]);
+    });
+    return clone;
+  }
+
+  function validateSemanticJson(value) {
+    if (value === null || typeof value === "string" || typeof value === "boolean") return;
+    if (typeof value === "number") { if (!Number.isFinite(value)) throw new Error("semantic_number"); return; }
+    if (Array.isArray(value)) { value.forEach(validateSemanticJson); return; }
+    if (!value || typeof value !== "object") throw new Error("semantic_value");
+    Object.keys(value).forEach(function (key) {
+      if (key === "_presentation") throw new Error("nested_presentation");
+      validateSemanticJson(value[key]);
+    });
+  }
+
+  function validateSemanticComponent(component) {
+    if (!component || typeof component !== "object" || Array.isArray(component)
+        || typeof component.type !== "string" || !component.type) throw new Error("component_not_object");
+    if (component.component_id != null
+        && (typeof component.component_id !== "string" || !component.component_id)) throw new Error("component_identity");
+    Object.keys(component).forEach(function (key) {
+      if (key !== "_presentation") validateSemanticJson(component[key]);
+    });
+  }
+
+  /**
+   * Validate server-rendered web fragments before any live DOM mutation.
+   * Every non-empty top-level component carries exactly the reserved envelope;
+   * native semantic fields remain outside it and drive snapshot equality.
+   */
+  function prepareWebPresentation(components) {
+    if (!Array.isArray(components)) throw new Error("components_not_array");
+    var nodes = [];
+    var envelopes = [];
+    var sharedWorkspace = null;
+    components.forEach(function (component) {
+      validateSemanticComponent(component);
+      var envelope = component._presentation;
+      if (!exactKeys(envelope, ["html", "target", "workspace"])) throw new Error("presentation_shape");
+      if (envelope.target !== "web" || typeof envelope.html !== "string" || !envelope.html) throw new Error("presentation_target");
+      var workspace = envelope.workspace;
+      if (!exactKeys(workspace, ["export", "share"])
+          || typeof workspace.export !== "boolean" || typeof workspace.share !== "boolean") {
+        throw new Error("presentation_workspace");
+      }
+      if (sharedWorkspace === null) sharedWorkspace = { export: workspace.export, share: workspace.share };
+      else if (sharedWorkspace.export !== workspace.export || sharedWorkspace.share !== workspace.share) {
+        throw new Error("presentation_workspace_conflict");
+      }
+      var template = document.createElement("template");
+      template.innerHTML = envelope.html;
+      var hasTextSibling = Array.prototype.some.call(template.content.childNodes, function (node) {
+        return node.nodeType === 3 && node.textContent.trim();
+      });
+      if (template.content.childElementCount !== 1 || hasTextSibling) throw new Error("presentation_fragment");
+      if (template.content.querySelector("script,iframe,object,embed")) throw new Error("presentation_unsafe_element");
+      if (component.component_id
+          && template.content.firstElementChild.getAttribute("data-component-id") !== component.component_id) {
+        throw new Error("presentation_identity");
+      }
+      nodes.push(template.content.firstElementChild);
+      envelopes.push({ target: envelope.target, html: envelope.html, workspace: sharedWorkspace });
+    });
+    return { nodes: nodes, envelopes: envelopes, workspace: sharedWorkspace };
+  }
+
+  function createChatBubbleNode(role) {
+    var wrap = document.createElement("div");
+    wrap.className = role === "user" ? "flex justify-end" : "flex justify-start";
+    var bubble = document.createElement("div");
+    bubble.className = (role === "user"
+      ? "bg-astral-primary/20 border border-astral-primary/30"
+      : "bg-white/5 border border-white/5") + " rounded-lg p-3 max-w-[85%] text-sm text-astral-text";
+    wrap.appendChild(bubble);
+    return { wrap: wrap, bubble: bubble };
+  }
+
+  /** Decode one validated semantic message into a detached visible bubble. */
+  function decodeSemanticMessage(message) {
+    var built = createChatBubbleNode(message.role);
+    var presentations = [];
+    var hasVisibleContent = false;
+    message.attachments.forEach(function (attachment) {
+      var chip = document.createElement("div");
+      chip.className = "astral-attachment-chip";
+      var label = [attachment.filename, attachment.name, attachment.attachment_id].find(function (value) {
+        return typeof value === "string" && value;
+      }) || "file";
+      chip.textContent = "Attachment: " + label;
+      built.bubble.appendChild(chip);
+      hasVisibleContent = true;
+    });
+    message.parts.forEach(function (part) {
+      if (part.type === "text") {
+        var textPart = document.createElement("div");
+        textPart.textContent = part.text;
+        built.bubble.appendChild(textPart);
+        if (part.text) hasVisibleContent = true;
+      } else if (part.type === "components") {
+        var prepared = prepareWebPresentation(part.components);
+        if (!prepared.nodes.length) {
+          var emptyRecovery = document.createElement("div");
+          emptyRecovery.setAttribute("role", "alert");
+          emptyRecovery.textContent = "A saved response could not be displayed.";
+          built.bubble.appendChild(emptyRecovery);
+          hasVisibleContent = true;
+        }
+        prepared.nodes.forEach(function (node) { built.bubble.appendChild(node); });
+        if (prepared.nodes.length) hasVisibleContent = true;
+        presentations = presentations.concat(prepared.envelopes);
+      } else if (part.type === "structured") {
+        var structured = document.createElement("div");
+        structured.textContent = part.plain_text;
+        structured.setAttribute("data-structured-value", stableStringify(part.value));
+        built.bubble.appendChild(structured);
+        if (part.plain_text) hasVisibleContent = true;
+      } else if (part.type === "recovery") {
+        var recovery = document.createElement("div");
+        recovery.setAttribute("role", "alert");
+        recovery.setAttribute("data-recovery-code", part.code);
+        recovery.textContent = part.message;
+        built.bubble.appendChild(recovery);
+        hasVisibleContent = true;
+      }
+    });
+    if (!hasVisibleContent) {
+      var fallback = document.createElement("div");
+      fallback.setAttribute("role", "alert");
+      fallback.textContent = "A saved response could not be displayed.";
+      built.bubble.appendChild(fallback);
+    }
+    return { node: built.wrap, presentations: presentations };
+  }
+
+  function validateSnapshotShape(frame) {
+    var top = ["canvas", "chat_id", "committed_at", "connection_generation", "render_revision",
+      "request_generation", "schema_version", "snapshot_id", "snapshot_purpose", "transcript", "type"];
+    if (!exactKeys(frame, top) || frame.type !== "conversation_snapshot" || frame.schema_version !== 1) {
+      throw new Error("snapshot_shape");
+    }
+    if (!isCanonicalUuid4(frame.snapshot_id) || !isCanonicalUuid4(frame.chat_id)
+        || !isCanonicalUuid4(frame.connection_generation) || !isCanonicalUuid4(frame.request_generation)) {
+      throw new Error("snapshot_identity");
+    }
+    if (frame.snapshot_purpose !== "hydration" && frame.snapshot_purpose !== "commit") throw new Error("snapshot_purpose");
+    if (!Number.isSafeInteger(frame.render_revision) || frame.render_revision < 0) throw new Error("snapshot_revision");
+    if (!isRfc3339Utc(frame.committed_at) || !Array.isArray(frame.transcript)) throw new Error("snapshot_time_or_transcript");
+    frame.transcript.forEach(function (message) {
+      if (!exactKeys(message, ["attachments", "created_at", "message_id", "parts", "role"])
+          || typeof message.message_id !== "string" || !message.message_id
+          || ["user", "assistant", "system", "tool"].indexOf(message.role) === -1
+          || !isRfc3339Utc(message.created_at) || !Array.isArray(message.parts) || !message.parts.length
+          || !Array.isArray(message.attachments)) throw new Error("snapshot_message");
+      message.attachments.forEach(function (attachment) {
+        if (!attachment || typeof attachment !== "object" || Array.isArray(attachment)) throw new Error("snapshot_attachment");
+        validateSemanticJson(attachment);
+      });
+      message.parts.forEach(function (part) {
+        if (!part || typeof part !== "object" || Array.isArray(part)) throw new Error("snapshot_part");
+        if (part.type === "text") {
+          if (!exactKeys(part, ["text", "type"]) || typeof part.text !== "string") throw new Error("snapshot_text_part");
+        } else if (part.type === "components") {
+          if (!exactKeys(part, ["components", "type"]) || !Array.isArray(part.components)) throw new Error("snapshot_components_part");
+        } else if (part.type === "structured") {
+          if (!exactKeys(part, ["plain_text", "type", "value"]) || typeof part.plain_text !== "string") throw new Error("snapshot_structured_part");
+          validateSemanticJson(part.value);
+        } else if (part.type === "recovery") {
+          if (!exactKeys(part, ["code", "message", "type"]) || typeof part.code !== "string" || !part.code
+              || typeof part.message !== "string" || !part.message) throw new Error("snapshot_recovery_part");
+        } else throw new Error("snapshot_part_type");
+      });
+    });
+    if (!exactKeys(frame.canvas, ["components", "target"])
+        || frame.canvas.target !== "canvas" || !Array.isArray(frame.canvas.components)) throw new Error("snapshot_canvas");
+  }
+
+  function prepareSnapshotCandidate(frame) {
+    var transcriptFragment = document.createDocumentFragment();
+    var transcriptPresentations = [];
+    frame.transcript.forEach(function (message) {
+      var decoded = decodeSemanticMessage(message);
+      transcriptFragment.appendChild(decoded.node);
+      transcriptPresentations = transcriptPresentations.concat(decoded.presentations);
+    });
+    var canvasPresentation = prepareWebPresentation(frame.canvas.components);
+    var canvasRoot = null;
+    if (canvasPresentation.nodes.length) {
+      canvasRoot = document.createElement("div");
+      canvasRoot.className = "dynamic-renderer space-y-3";
+      if (canvasPresentation.workspace.export) canvasRoot.setAttribute("data-astral-export", "true");
+      if (canvasPresentation.workspace.share) canvasRoot.setAttribute("data-astral-share", "true");
+      canvasPresentation.nodes.forEach(function (node) { canvasRoot.appendChild(node); });
+    }
+    return {
+      chatFragment: transcriptFragment,
+      canvasRoot: canvasRoot,
+      emptyCanvas: !canvasPresentation.nodes.length,
+      semanticCanonical: stableStringify(semanticClone(frame)),
+      presentationCanonical: stableStringify({
+        transcript: transcriptPresentations,
+        canvas: canvasPresentation.envelopes,
+      }),
+    };
+  }
+
+  /** Commit a fully prepared transcript and ROTE canvas in one browser task. */
+  function commitSnapshotCandidate(candidate, frame) {
+    committedRevisionByChat[frame.chat_id] = frame.render_revision;
+    lastSnapshotIdByChat[frame.chat_id] = frame.snapshot_id;
+    transientOverlay = null;
+    chat.replaceChildren(candidate.chatFragment);
+    canvas.replaceChildren();
+    if (candidate.emptyCanvas) showCanvasEmpty();
+    else {
+      canvas.appendChild(candidate.canvasRoot);
+      processSideEffects(candidate.canvasRoot);
+    }
+    hideSkeleton();
+    timelineMode = false;
+    setStatus("");
+    readCanvasFlags();
+    syncCanvasToolbar();
+    // Keep the named revision read in this atomic commit seam for audit/source
+    // guards and to make clear that overlays never own it.
+    lastCommittedRenderRevision();
+  }
+
+  function continuityDisposition(code) {
+    if (window.console && console.info) console.info("conversation_continuity", code);
+    return code;
+  }
+
+  /** Open the exact commit fence advertised for detached server work. */
+  function acceptConversationCommitReady(frame) {
+    var expected = ["chat_id", "connection_generation", "render_revision", "request_generation",
+      "schema_version", "type"];
+    if (!exactKeys(frame, expected) || frame.type !== "conversation_commit_ready"
+        || frame.schema_version !== 1 || !isCanonicalUuid4(frame.chat_id)
+        || !isCanonicalUuid4(frame.connection_generation)
+        || !isCanonicalUuid4(frame.request_generation)
+        || !Number.isSafeInteger(frame.render_revision) || frame.render_revision <= 0) {
+      return continuityDisposition("invalid_commit_ready");
+    }
+    if (!activeChatId || frame.chat_id !== activeChatId
+        || frame.connection_generation !== connectionGeneration) {
+      return continuityDisposition("wrong_scope");
+    }
+    if (frame.render_revision <= lastCommittedRenderRevision()) {
+      return continuityDisposition("stale_commit_ready");
+    }
+    // Never steal the fence from a user turn that has been submitted but has
+    // not received its own snapshot yet. That later full snapshot will include
+    // this already-committed detached update.
+    if (requestState && requestState.purpose === "commit" && !requestState.snapshotApplied) {
+      return continuityDisposition("commit_request_busy");
+    }
+    openRequest("commit", frame.chat_id, frame.request_generation);
+    return continuityDisposition("commit_ready_applied");
+  }
+
+  /** Purpose-aware reducer for the sole committed-state publication. */
+  function reduceConversationSnapshot(frame) {
+    try { validateSnapshotShape(frame); }
+    catch (e) { return continuityDisposition("invalid_snapshot"); }
+    if (!activeChatId || !requestState || frame.chat_id !== activeChatId
+        || frame.connection_generation !== connectionGeneration
+        || frame.request_generation !== requestState.generation) return continuityDisposition("wrong_scope");
+    if (frame.snapshot_purpose !== requestState.purpose) return continuityDisposition("wrong_purpose");
+    var committed = lastCommittedRenderRevision();
+    if (frame.render_revision < committed) return continuityDisposition("stale_frame_ignored");
+    if (frame.render_revision === committed && requestState.purpose !== "hydration") {
+      return continuityDisposition("unexpected_equal_commit");
+    }
+    var candidate;
+    try { candidate = prepareSnapshotCandidate(frame); }
+    catch (e) { return continuityDisposition("invalid_snapshot"); }
+    if (frame.render_revision === committed && requestState.hydrationApplied) {
+      if (frame.snapshot_id === requestState.acceptedSnapshotId
+          && candidate.semanticCanonical === requestState.acceptedSemantic
+          && candidate.presentationCanonical === requestState.acceptedPresentation) {
+        return continuityDisposition("snapshot_replay");
+      }
+      return continuityDisposition("revision_conflict");
+    }
+    var seenIds = seenSnapshotIdsByChat[frame.chat_id];
+    if (lastSnapshotIdByChat[frame.chat_id] === frame.snapshot_id
+        || (seenIds && seenIds[frame.snapshot_id])) return continuityDisposition("revision_conflict");
+    commitSnapshotCandidate(candidate, frame);
+    if (!seenIds) { seenIds = Object.create(null); seenSnapshotIdsByChat[frame.chat_id] = seenIds; }
+    seenIds[frame.snapshot_id] = true;
+    requestState.acceptedSnapshotId = frame.snapshot_id;
+    requestState.acceptedSemantic = candidate.semanticCanonical;
+    requestState.acceptedPresentation = candidate.presentationCanonical;
+    if (requestState.purpose === "hydration") requestState.hydrationApplied = true;
+    requestState.snapshotApplied = true;
+    return continuityDisposition("snapshot_applied");
+  }
+
+  function clearTransientOverlay() {
+    if (transientOverlay) {
+      if (transientOverlay.chat && transientOverlay.chat.parentNode) transientOverlay.chat.parentNode.removeChild(transientOverlay.chat);
+      if (transientOverlay.canvas && transientOverlay.canvas.parentNode) transientOverlay.canvas.parentNode.removeChild(transientOverlay.canvas);
+    }
+    transientOverlay = null;
+  }
+
+  function ensureTransientOverlay() {
+    var generation = requestState && requestState.generation;
+    if (transientOverlay && transientOverlay.requestGeneration === generation) return transientOverlay;
+    clearTransientOverlay();
+    var chatRoot = document.createElement("div");
+    chatRoot.setAttribute("data-astral-transient-overlay", "chat");
+    var canvasRoot = document.createElement("div");
+    canvasRoot.setAttribute("data-astral-transient-overlay", "canvas");
+    canvasRoot.className = "astral-transient-overlay";
+    chat.appendChild(chatRoot);
+    canvas.appendChild(canvasRoot);
+    transientOverlay = { requestGeneration: generation, chat: chatRoot, canvas: canvasRoot };
+    return transientOverlay;
+  }
+
+  function acceptTransientFrame(frame) {
+    if (!activeChatId || !requestState || requestState.snapshotApplied || !isCanonicalUuid4(frame.chat_id)
+        || !isCanonicalUuid4(frame.connection_generation) || !isCanonicalUuid4(frame.request_generation)
+        || !Number.isSafeInteger(frame.base_render_revision) || frame.base_render_revision < 0
+        || !Number.isSafeInteger(frame.frame_sequence) || frame.frame_sequence < 0) return false;
+    if (frame.chat_id !== activeChatId || frame.connection_generation !== connectionGeneration
+        || frame.request_generation !== requestState.generation) return false;
+    if (frame.base_render_revision !== lastCommittedRenderRevision()) return false;
+    if (frame.frame_sequence <= requestState.lastFrameSequence) return false;
+    requestState.lastFrameSequence = frame.frame_sequence;
+    return true;
+  }
+
+  function appendChatBubbleTo(region, role, htmlStr) {
+    var built = createChatBubbleNode(role);
+    built.bubble.innerHTML = htmlStr || "";
+    region.appendChild(built.wrap);
+    processSideEffects(built.bubble);
+  }
+
+  function applyOverlayUpsert(region, frame) {
+    var renderer = region.querySelector(".dynamic-renderer");
+    if (!renderer) {
+      renderer = document.createElement("div");
+      renderer.className = "dynamic-renderer space-y-3";
+      region.replaceChildren(renderer);
+    }
+    (frame.ops || []).forEach(function (op) {
+      if (!op || !op.component_id) return;
+      var current = region.querySelector(componentSelector(op.component_id));
+      if (op.op === "remove") { if (current) current.remove(); return; }
+      if (typeof op.html !== "string") return;
+      var holder = document.createElement("div");
+      holder.innerHTML = op.html;
+      var fresh = holder.firstElementChild;
+      if (!fresh) return;
+      if (current) current.replaceWith(fresh); else renderer.appendChild(fresh);
+      processSideEffects(fresh);
+    });
+  }
+
+  /** Reduce one accepted live frame into disposable request-scoped overlay. */
+  function reduceTransientFrame(frame) {
+    if (!acceptTransientFrame(frame)) return continuityDisposition("transient_frame_ignored");
+    var overlay = ensureTransientOverlay();
+    if (frame.type === "ui_render") {
+      if (frame.target === "chat") appendChatBubbleTo(overlay.chat, "assistant", frame.html);
+      else setHTML(overlay.canvas, frame.html);
+    } else if (frame.type === "ui_update") setHTML(overlay.canvas, frame.html);
+    else if (frame.type === "ui_append") appendHTML(overlay.canvas, frame.html);
+    else if (frame.type === "ui_upsert") applyOverlayUpsert(overlay.canvas, frame);
+    else if (frame.type === "ui_stream_data") {
+      var streamId = "transient-stream-" + (frame.component_id || frame.stream_id || "current");
+      var streamNode = overlay.canvas.querySelector("#" + streamId);
+      if (!streamNode) { streamNode = document.createElement("div"); streamNode.id = streamId; overlay.canvas.appendChild(streamNode); }
+      streamNode.innerHTML = frame.html || "";
+      processSideEffects(streamNode);
+    }
+    return continuityDisposition("transient_overlay_applied");
+  }
+
+  function scopedStatusMatches(frame) {
+    var carriesScope = frame.chat_id != null || frame.connection_generation != null || frame.request_generation != null;
+    if (!carriesScope) return true;
+    if (frame.connection_generation !== connectionGeneration) return false;
+    var pending = operationSubmissionByGeneration[frame.request_generation];
+    if (pending) return frame.chat_id == null || frame.chat_id === activeChatId;
+    if (!requestState || frame.request_generation !== requestState.generation) return false;
+    // Surface-only operations deliberately carry chat_id:null. Chat operations
+    // additionally bind to the selected chat; neither may cross generations.
+    return frame.chat_id == null || !!(activeChatId && frame.chat_id === activeChatId);
+  }
+
+  /** Retain/render one canonical operation projection. */
+  function reduceOperationStatus(frame) {
+    var flags = {
+      accepted: [false, false], validating: [false, false],
+      persisting: [false, false], running: [false, false],
+      completed: [true, false], failed: [true, false],
+      cancelled: [true, false], retryable: [true, true],
+    };
+    var expected = flags[frame.state];
+    var errorCodes = {
+      invalid_input: true, validation_failed: true, provider_unavailable: true,
+      network_unavailable: true, deadline_exceeded: true, capacity_exceeded: true,
+      queue_wait_expired: true, registration_timeout: true, disconnected: true,
+      cancelled_by_user: true, operation_failed: true, conflict: true,
+      incompatible_runtime: true, agent_offline: true, stale_generation: true,
+    };
+    var keys = ["action", "chat_id", "connection_generation", "error", "label", "operation_id",
+      "phase", "request_generation", "retry_after_ms", "retryable", "sequence", "state",
+      "surface", "terminal", "type", "updated_at"];
+    var actualKeys = Object.keys(frame).sort();
+    var terminalError = ["failed", "cancelled", "retryable"].indexOf(frame.state) !== -1;
+    var validError = terminalError
+      ? !!(frame.error && Object.keys(frame.error).sort().join(",") === "code,message"
+        && errorCodes[frame.error.code] && typeof frame.error.message === "string" && frame.error.message)
+      : frame.error === null;
+    var validRetryAfter = frame.retry_after_ms === null
+      || (frame.state === "retryable" && Number.isSafeInteger(frame.retry_after_ms) && frame.retry_after_ms >= 0);
+    if (actualKeys.join(",") !== keys.sort().join(",")
+        || !scopedStatusMatches(frame) || !isCanonicalUuid4(frame.operation_id)
+        || !isCanonicalUuid4(frame.connection_generation) || !isCanonicalUuid4(frame.request_generation)
+        || (frame.chat_id !== null && !isCanonicalUuid4(frame.chat_id))
+        || !Number.isSafeInteger(frame.sequence) || frame.sequence < 0
+        || !expected || frame.terminal !== expected[0]
+        || frame.retryable !== expected[1]
+        || typeof frame.action !== "string" || !/^[a-z][a-z0-9_]*$/.test(frame.action)
+        || typeof frame.surface !== "string" || !/^[a-z][a-z0-9_]*$/.test(frame.surface)
+        || typeof frame.phase !== "string" || !/^[a-z][a-z0-9_]*$/.test(frame.phase)
+        || typeof frame.label !== "string" || !frame.label
+        || !validError || !validRetryAfter || !isRfc3339Utc(frame.updated_at)) return false;
+    var current = operationStatusById[frame.operation_id];
+    if (current && (current.terminal || frame.sequence <= current.sequence)) return false;
+    operationStatusById[frame.operation_id] = frame;
+    setStatus((frame.error && frame.error.message) || frame.label, !frame.terminal);
+    if (frame.terminal) finishOperationSubmission(frame.request_generation);
+    if (frame.terminal && ["failed", "cancelled", "retryable"].indexOf(frame.state) !== -1) {
+      clearTransientOverlay();
+    }
+    return true;
+  }
+
+  /** Correlate an admission refusal without inventing a server operation. */
+  function reduceAdmissionRefusal(frame) {
+    var keys = ["accepted", "code", "message", "retry_after_ms", "retryable", "submission_id", "type"];
+    var codes = {
+      capacity_exceeded: true, registration_required: true,
+      registration_timeout: true, idempotency_conflict: true,
+      connection_closing: true, service_draining: true,
+      invalid_input: true, registration_queue_full: true,
+      operation_failed: true,
+    };
+    var validRetryAfter = frame.retry_after_ms === null
+      || (frame.retryable === true
+        && Number.isSafeInteger(frame.retry_after_ms)
+        && frame.retry_after_ms >= 0);
+    if (Object.keys(frame).sort().join(",") !== keys.join(",")
+        || frame.type !== "error"
+        || frame.accepted !== false
+        || !isCanonicalUuid4(frame.submission_id)
+        || !Object.prototype.hasOwnProperty.call(codes, frame.code)
+        || typeof frame.message !== "string"
+        || !frame.message.trim()
+        || typeof frame.retryable !== "boolean"
+        || !validRetryAfter) return false;
+    var local = operationSubmissionById[frame.submission_id];
+    if (!local) return false;
+    finishOperationSubmission(local.request_generation);
+    setStatus(errorMessage(frame), false);
+    return true;
+  }
+
+  /** Update any open agent surface, with the shared label as a fallback. */
+  function renderAgentLifecycle(frame) {
+    var matched = false;
+    var nodes = document.querySelectorAll("[data-agent-id]");
+    for (var index = 0; index < nodes.length; index++) {
+      var node = nodes[index];
+      if (node.getAttribute("data-agent-id") !== frame.agent_id) continue;
+      matched = true;
+      node.setAttribute("data-lifecycle-state", frame.state);
+      var badge = node.querySelector("[data-agent-lifecycle]");
+      if (!badge) {
+        badge = document.createElement("span");
+        badge.setAttribute("data-agent-lifecycle", "");
+        badge.className = "text-xs text-astral-muted";
+        node.insertBefore(badge, node.firstChild);
+      }
+      badge.setAttribute("role", "status");
+      badge.setAttribute("aria-label", frame.agent_id + " lifecycle status");
+      badge.setAttribute("aria-live", "polite");
+      badge.setAttribute("aria-atomic", "true");
+      badge.setAttribute(
+        "aria-busy", frame.state === "starting" || frame.state === "updating" ? "true" : "false");
+      badge.textContent = frame.label;
+    }
+    if (!matched) {
+      setStatus(frame.label);
+      showToast(frame.label, frame.state === "failed" ? "error" : "info");
+    }
+  }
+
+  /** Retain/render one lexicographically newer canonical lifecycle pair. */
+  function reduceAgentLifecycle(frame) {
+    var states = { starting: true, online: true, updating: true, failed: true, offline: true };
+    var reasonCodes = {
+      invalid_host_registration: true, runtime_contract_unsupported: true,
+      runtime_lock_mismatch: true, bundle_digest_mismatch: true, bundle_install_failed: true,
+      child_start_failed: true, child_registration_timeout: true, child_exited: true,
+      child_hung: true, host_lost: true, agent_offline: true, agent_deleted: true,
+      stale_runtime_generation: true, revision_promotion_failed: true,
+      inventory_required: true, process_cleanup_timeout: true,
+    };
+    var keys = ["agent_id", "label", "lifecycle_generation", "reason_code", "revision_id",
+      "runtime_instance_id", "state", "state_revision", "type", "updated_at"];
+    var active = frame.state === "starting" || frame.state === "online" || frame.state === "updating";
+    if (Object.keys(frame).sort().join(",") !== keys.sort().join(",")
+        || typeof frame.agent_id !== "string" || !frame.agent_id
+        || !states[frame.state] || typeof frame.label !== "string" || !frame.label
+        || (frame.revision_id !== null && !isCanonicalUuid4(frame.revision_id))
+        || (frame.runtime_instance_id !== null && !isCanonicalUuid4(frame.runtime_instance_id))
+        || (active && (!isCanonicalUuid4(frame.revision_id) || !isCanonicalUuid4(frame.runtime_instance_id)))
+        || (frame.reason_code !== null && !reasonCodes[frame.reason_code])
+        || !isRfc3339Utc(frame.updated_at)
+        || !Number.isSafeInteger(frame.lifecycle_generation) || frame.lifecycle_generation < 0
+        || !Number.isSafeInteger(frame.state_revision) || frame.state_revision < 0) return false;
+    var current = agentLifecycleById[frame.agent_id];
+    if (current && (frame.lifecycle_generation < current.lifecycle_generation
+        || (frame.lifecycle_generation === current.lifecycle_generation
+          && frame.state_revision <= current.state_revision))) return false;
+    agentLifecycleById[frame.agent_id] = frame;
+    renderAgentLifecycle(frame);
+    return true;
+  }
+
+  function appendTransientChatBubble(role, htmlStr) {
+    appendChatBubbleTo(ensureTransientOverlay().chat, role, htmlStr);
+  }
+
   // ---- incoming messages ----
   function onMessage(ev) {
     var data; try { data = JSON.parse(ev.data); } catch (e) { return; }
     switch (data.type) {
+      case "conversation_commit_ready":
+        acceptConversationCommitReady(data);
+        break;
+      case "conversation_snapshot":
+        reduceConversationSnapshot(data);
+        break;
       case "ui_render":
-        if (data.target === "chat") appendChatBubble("assistant", data.html);
-        else if (data.target === "history") { var hr = document.getElementById("astral-history"); if (hr) setHTML(hr, data.html); }
+        if (data.target === "history") { var hr = document.getElementById("astral-history"); if (hr) setHTML(hr, data.html); }
+        else if (activeChatId) reduceTransientFrame(data);
+        else if (data.target === "chat") appendChatBubble("assistant", data.html);
         else {
           hideSkeleton(); setHTML(canvas, data.html);
           // Emptiness comes from the STRUCTURED payload: render_workspace
@@ -411,12 +1292,21 @@
           readCanvasFlags(); syncCanvasToolbar();
         }
         break;
-      case "ui_upsert": applyUpsert(data); break; // in-place workspace updates
+      case "ui_upsert":
+        if (activeChatId) reduceTransientFrame(data);
+        else applyUpsert(data);
+        break; // in-place workspace updates
       case "ui_update":
-        hideSkeleton(); setHTML(canvas, data.html); if (!data.html) showCanvasEmpty();
-        readCanvasFlags(); syncCanvasToolbar();
+        if (activeChatId) reduceTransientFrame(data);
+        else {
+          hideSkeleton(); setHTML(canvas, data.html); if (!data.html) showCanvasEmpty();
+          readCanvasFlags(); syncCanvasToolbar();
+        }
         break;
-      case "ui_append": hideSkeleton(); hideCanvasEmpty(); appendHTML(canvas, data.html); break;
+      case "ui_append":
+        if (activeChatId) reduceTransientFrame(data);
+        else { hideSkeleton(); hideCanvasEmpty(); appendHTML(canvas, data.html); }
+        break;
       case "workspace_timeline_mode": // read-only history view
         timelineMode = !!data.active;
         if (timelineMode) hideSkeleton();
@@ -425,6 +1315,7 @@
         break;
       case "chat_deleted": // chat removed (possibly from another tab)
         if (data.chat_id && data.chat_id === activeChatId) {
+          clearActiveChatLocator("confirmed_deletion", data.chat_id);
           activeChatId = null; timelineMode = false;
           setHTML(canvas, "");
           showCanvasEmpty();
@@ -436,13 +1327,15 @@
           authRetried = true;
           refreshToken(true, function (ok) {
             if (ok && ws && ws.readyState === 1) {
-              send({ type: "register_ui", token: token, capabilities: ["render", "stream"],
-                     session_id: "ui-" + Date.now(), device: detectDeviceCapabilities(), resumed: true });
+              // sendRegistration emits {type: "register_ui", token: token}
+              // after re-binding the locator and a fresh hydration request.
+              sendRegistration(true);
             } else if (ok) { try { ws.close(); } catch (e) {} }
           });
         } else { gotoLogin(); }
         break;
       case "ui_stream_data": {
+        if (activeChatId) { reduceTransientFrame(data); break; }
         if (data.session_id && activeChatId && data.session_id !== activeChatId) return;
         var last = streamSeq[data.stream_id]; if (last == null) last = -1;
         if (data.seq <= last) return; streamSeq[data.stream_id] = data.seq;
@@ -456,27 +1349,37 @@
         // in place; legacy subscriptions need no node until data arrives.
         if (!data.component_id) break;
         if (data.session_id && activeChatId && data.session_id !== activeChatId) break;
-        if (canvas.querySelector(componentSelector(data.component_id))) break;
-        hideSkeleton(); hideCanvasEmpty();
+        if (!scopedStatusMatches(data)) break;
+        var subscriptionCanvas = activeChatId ? ensureTransientOverlay().canvas : canvas;
+        if (subscriptionCanvas.querySelector(componentSelector(data.component_id))) break;
+        hideSkeleton(); if (!activeChatId) hideCanvasEmpty();
         var ph = document.createElement("div");
         ph.setAttribute("data-component-id", data.component_id);
         ph.innerHTML = '<div class="astral-skeleton" role="status" aria-busy="true">'
           + '<span class="sr-only">Loading…</span>'
           + '<div class="astral-skeleton-line h-20 w-full"></div></div>';
-        ensureRenderer().appendChild(ph);
+        if (activeChatId) subscriptionCanvas.appendChild(ph);
+        else ensureRenderer().appendChild(ph);
         break;
       }
       case "chrome_render": // server-rendered chrome regions
         if (data.region === "modal") setModal(data.html || "");
         else if (data.region === "topbar") {
           var tb = document.getElementById("astral-topbar");
-          if (tb) { tb.innerHTML = data.html || ""; }
+          if (tb) {
+            tb.innerHTML = data.html || "";
+            statusEl = configureStatusElement(document.getElementById("astral-status"));
+          }
         }
         break;
       case "chat_status":
+        if (!scopedStatusMatches(data)) break;
         // A turn that ends with no canvas output (text-only answer, error,
         // cancellation) must still clear the query-start skeleton.
-        if (data.status === "done" || data.status === "idle") hideSkeleton();
+        if (data.status === "done" || data.status === "idle") {
+          hideSkeleton();
+          clearTransientOverlay();
+        }
         if (data.status === "processing_async") {
           // Background dispatch ack (055): status text only — never the turn
           // lock (no skeleton), so the user can keep chatting or switch chats.
@@ -486,44 +1389,38 @@
         }
         setStatus({ idle: "", thinking: "Thinking…", executing: "Working…", done: "" }[data.status] || "");
         break;
-      case "chat_step": renderStep(data.step); break;
-      case "chat_created": if (data.payload) { activeChatId = data.payload.chat_id; } break;
+      case "chat_step":
+        if (scopedStatusMatches(data)) renderStep(data.step);
+        break;
+      case "chat_created":
+        if (data.payload && isCanonicalUuid4(data.payload.chat_id)) {
+          persistActiveChatLocator(data.payload.chat_id);
+          activeChatId = data.payload.chat_id;
+          if (requestState && !requestState.chatId) requestState.chatId = activeChatId;
+        }
+        break;
       case "chat_loaded":
-        activeChatId = data.chat && data.chat.id; chat.innerHTML = ""; canvas.innerHTML = "";
-        showCanvasEmpty(); // cleared canvas; the workspace ui_render (if any) replaces it
-        timelineMode = false; setStatus("");
-        // The chat rail is TEXT ONLY. Component messages carry a
-        // server-rendered `html` form containing only their text primitives
-        // (the server drops rich components); a turn whose output was purely
-        // rich gets no `html` and renders no bubble here — it lives on the
-        // canvas, which re-hydrates via the ui_render the server pushes right
-        // after.
-        if (data.chat && data.chat.messages) data.chat.messages.forEach(function (m) {
-          // Re-hydrated attachment chip leads the user's message on its own
-          // line (consistent with the live-send rendering above).
-          var attChip = "";
-          if (m.attachments && m.attachments.length) {
-            attChip = attachChipHtml(m.attachments.map(function (a) { return a.filename; }).join(", "));
-          }
-          if (typeof m.content === "string") {
-            appendChatBubble(m.role, attChip + (m.content ? "<div>" + escapeText(m.content) + "</div>" : ""));
-          } else if (m.html) {
-            appendChatBubble(m.role, attChip + m.html);
-          } else if (attChip) {
-            // Component-only message with no text — keep just the attachment chip.
-            appendChatBubble(m.role, attChip);
-          }
-          // else: a rich-component-only turn — shown on the canvas, no chat bubble.
-        });
+        // Bounded compatibility acknowledgement only. Feature-060 clients do
+        // not clear/replace either committed surface from the legacy two-frame
+        // chat_loaded + ui_render pair; the atomic snapshot must follow.
+        if (data.chat && isCanonicalUuid4(data.chat.id)) {
+          if (!activeChatId) selectActiveChat(data.chat.id, "hydration");
+          if (data.chat.id === activeChatId) setStatus("Restoring conversation…");
+        }
         break;
       case "user_preferences":
         if (data.preferences && data.preferences.theme) applyTheme(data.preferences.theme);
         break;
       case "error": { // feature 044 FR-002 — server error replies are never silent
+        if (!scopedStatusMatches(data)) break;
+        var admissionRefusal = reduceAdmissionRefusal(data);
         var em = errorMessage(data);
         showToast(em, "error");
         hideSkeleton(); // the turn is over; no components are coming
-        setStatus(""); // resolve any stuck "Thinking…" state (SC-006)
+        clearTransientOverlay();
+        if (["chat_not_found", "chat_deleted", "not_found"].indexOf(data.code) !== -1
+            && data.chat_id === activeChatId) clearActiveChatLocator("confirmed_deletion", data.chat_id);
+        if (!admissionRefusal) setStatus(""); // resolve any stuck "Thinking…" state (SC-006)
         break;
       }
       case "notification": // scheduler push (feature 044 parity matrix)
@@ -547,10 +1444,10 @@
         if (tcp.chat_id && tcp.chat_id === activeChatId) {
           showToast(tcMsg, tcFail ? "error" : "info");
           // Pull the narrative/canvas the task persisted while detached.
-          action("load_chat", { chat_id: tcp.chat_id });
+          loadActiveChat(tcp.chat_id);
         } else if (tcp.chat_id) {
           showToast(tcMsg + " — tap to open", tcFail ? "error" : "info", function () {
-            action("load_chat", { chat_id: tcp.chat_id }); // recents-click path
+            loadActiveChat(tcp.chat_id); // recents-click path
             closeHistoryOverlay();
           });
         } else {
@@ -559,6 +1456,7 @@
         break;
       }
       case "tool_progress": { // long-running job update (fan-out is chat-scoped)
+        if (!scopedStatusMatches(data)) break;
         var tpChat = data.session_id || data.chat_id;
         if (tpChat && activeChatId && tpChat !== activeChatId) break;
         if (data.terminal) { setStatus(""); break; } // outcome lands as a persisted upsert
@@ -567,9 +1465,17 @@
         setStatus(tpText);
         break;
       }
+      case "operation_status":
+        reduceOperationStatus(data);
+        break;
+      case "agent_lifecycle":
+        reduceAgentLifecycle(data);
+        break;
       case "rote_config": // ROTE's device verdict drives the shell layout
         applyDeviceProfile(data.device_profile && data.device_profile.device_type);
         break;
+      case "agent_host_inventory_reconciled": case "agent_host_registration_refused":
+      case "agent_host_registered": // host-only; the browser is author-only
       case "system_config": case "agent_list": case "agent_registered":
       case "history_list": case "heartbeat": case "llm_config_ack": case "saved_components_list":
         break; // not needed for the core flow
@@ -633,7 +1539,8 @@
     if (!el) {
       el = document.createElement("div");
       el.className = "text-xs text-astral-muted/70 px-2 py-1";
-      chat.appendChild(el); stepEls[step.id] = el;
+      var stepHost = requestState ? ensureTransientOverlay().chat : chat;
+      stepHost.appendChild(el); stepEls[step.id] = el;
     }
     var icon = step.status === "completed" ? "✓" : step.status === "errored" ? "✗" : "•";
     // Chat shows only the tool/step name; result summaries stay in the
@@ -649,21 +1556,37 @@
   function sendChat(message) {
     var ready = (typeof readyAttachments === "function") ? readyAttachments() : [];
     if (!message && !ready.length) return;
+    openRequest("commit", activeChatId);
     var html = "";
     if (ready.length) {
       var names = ready.map(function (a) { return a.filename; }).join(", ");
       html += attachChipHtml(names);  // pill on its own line above the request
     }
     if (message) html += "<div>" + escapeText(message) + "</div>";
-    appendChatBubble("user", html);
-    var payload = { message: message || "", chat_id: activeChatId };
+    appendTransientChatBubble("user", html);
+    var payload = {
+      message: message || "",
+      chat_id: activeChatId,
+      connection_generation: connectionGeneration,
+      request_generation: requestState.generation,
+      snapshot_purpose: "commit",
+    };
     if (ready.length) {
       payload.attachments = ready.map(function (a) {
         return { attachment_id: a.attachment_id, filename: a.filename, category: a.category };
       });
     }
     if (bgArmed) payload.async_mode = true; // one-shot background-run arming (055)
-    send({ type: "ui_event", action: "chat_message", session_id: activeChatId || undefined, payload: payload });
+    var submission = beginOperationSubmission("chat_message", payload, requestState.generation);
+    send({
+      type: "ui_event",
+      action: "chat_message",
+      session_id: activeChatId || undefined,
+      connection_generation: connectionGeneration,
+      submission_id: submission.submissionId,
+      request_generation: submission.requestGeneration,
+      payload: submission.payload,
+    });
     purgeWelcome(); // 055 uniform rule: welcome never survives the first send
     // Async turns never lock the composer: no skeleton — the processing_async
     // ack drives the status line instead.
@@ -686,6 +1609,7 @@
   // (it replies chat_created, which sets activeChatId).
   var newChatBtn = document.getElementById("astral-newchat-btn");
   if (newChatBtn) newChatBtn.addEventListener("click", function () {
+    clearActiveChatLocator("explicit_new_chat", activeChatId);
     activeChatId = null;
     timelineMode = false;
     streamSeq = {};
@@ -694,11 +1618,30 @@
     hideSkeleton();
     chat.innerHTML = "";
     canvas.innerHTML = "";
+    showCanvasEmpty();
     setStatus("");
     action("new_chat", {});
     closeHistoryOverlay();
     if (input) { try { input.focus(); } catch (e) {} }
   });
+
+  // The local endpoint invalidates the server session before redirecting to
+  // Keycloak, so a deliberate click is the web client's definitive sign-out
+  // event. Token refresh/auth_required never traverses this path.
+  document.addEventListener("click", function (event) {
+    var link = event.target.closest && event.target.closest('a[href^="/auth/logout"]');
+    if (link) {
+      // Clear credentials before navigation. A Keycloak end-session redirect
+      // leaves this tab's sessionStorage alive, so retaining TOKEN_KEY could
+      // register the next account's WebSocket as the previous principal.
+      token = "";
+      try {
+        sessionStorage.removeItem(TOKEN_KEY);
+        sessionStorage.removeItem(ACCOUNT_SESSION_KEY);
+      } catch (e) {}
+      clearActiveChatLocator("definitive_sign_out", activeChatId);
+    }
+  }, true);
 
   // ---- stacked-shell chrome: the web twin of Android's StackedShell.
   // Recent chats live behind the topbar speech-bubble button (full-screen
@@ -754,6 +1697,11 @@
       // chat payload shape.
       if (act === "chat_message" && payload.message) { sendChat(payload.message); return; }
       if (act === "chrome_open") showModalSkeleton(act, payload);
+      if (act === "load_chat" && payload.chat_id) {
+        loadActiveChat(payload.chat_id);
+        closeHistoryOverlay();
+        return;
+      }
       if (act) action(act, payload);
       if (act === "load_chat") closeHistoryOverlay(); // mobile: leave the full-screen list
       return;
@@ -1270,7 +2218,7 @@
     label.textContent = "Background task running" + (title ? " — " + title : "…");
     chip.appendChild(label);
     if (chatId) chip.addEventListener("click", function () {
-      if (chatId !== activeChatId) action("load_chat", { chat_id: chatId });
+      if (chatId !== activeChatId) loadActiveChat(chatId);
       closeHistoryOverlay();
     });
     host.appendChild(chip);
@@ -1346,6 +2294,7 @@
   /** Replace the chrome modal content; empty html closes it (restores focus). */
   function setModal(htmlStr) {
     if (!modalRoot) return;
+    clearAuthoringControlPending();
     clearModalSkeletonTimer();
     if (htmlStr) {
       modalReturnFocus = document.activeElement;
@@ -1446,10 +2395,51 @@
     return fields;
   }
 
+  var AUTHORING_MUTATION_ACTIONS = Object.freeze({
+    chrome_author_create: true,
+    chrome_author_edit: true,
+    chrome_author_clarify: true,
+    chrome_author_advance: true,
+    chrome_author_analyze: true,
+    chrome_author_generate: true,
+    chrome_author_draft: true,
+  });
+  var pendingAuthoringControl = null;
+  var pendingAuthoringTimer = null;
+
+  function clearAuthoringControlPending() {
+    if (pendingAuthoringTimer) clearTimeout(pendingAuthoringTimer);
+    pendingAuthoringTimer = null;
+    if (pendingAuthoringControl) {
+      pendingAuthoringControl.setAttribute("aria-busy", "false");
+      pendingAuthoringControl.setAttribute("aria-disabled", "false");
+      pendingAuthoringControl.setAttribute("data-control-state", "ready");
+    }
+    pendingAuthoringControl = null;
+  }
+
+  function beginAuthoringControlPending(el, actionName) {
+    if (!AUTHORING_MUTATION_ACTIONS[actionName]) return true;
+    if (pendingAuthoringControl || el.getAttribute("aria-busy") === "true") return false;
+    pendingAuthoringControl = el;
+    el.setAttribute("aria-busy", "true");
+    el.setAttribute("aria-disabled", "true");
+    el.setAttribute("data-control-state", "submitting");
+    // Preserve the native button in the focus order while exposing a guarded
+    // single-flight state. The server-rendered replacement clears the state;
+    // this bound restores it if a response never arrives.
+    pendingAuthoringTimer = setTimeout(clearAuthoringControlPending, 10000);
+    return true;
+  }
+
   document.addEventListener("click", function (e) {
     var el = e.target.closest && e.target.closest("[data-ui-action]");
     if (!el) return;
     var act = el.getAttribute("data-ui-action");
+    if (!beginAuthoringControlPending(el, act)) {
+      e.preventDefault();
+      return;
+    }
     var payload = {};
     try { payload = JSON.parse(el.getAttribute("data-ui-payload") || "{}"); } catch (err) {}
     if (el.getAttribute("data-ui-collect") === "true") {
@@ -1594,26 +2584,27 @@
 
   // ---- connection lifecycle ----
   function connect() {
+    connectionGeneration = randomUuid4();
     ws = new WebSocket(WS_URL);
     ws.onopen = function () {
       attempts = 0; authRetried = false; setStatus("");
-      send({ type: "register_ui", token: token, capabilities: ["render", "stream"],
-             session_id: "ui-" + Date.now(), device: detectDeviceCapabilities(),
-             resumed: firstConnect ? serverResumed : true });
+      // resumed: firstConnect ? serverResumed : true
+      sendRegistration(firstConnect ? serverResumed : true);
       firstConnect = false;
       action("get_history", {});
       // Re-attach to still-running background tasks: watch_task re-registers
       // this socket as a watcher and answers task_completed immediately when
       // the task finished while the socket was down.
       for (var tid in bgTaskChips) action("watch_task", { task_id: tid });
-      var qp = new URLSearchParams(location.search).get("chat");
-      if (qp) setTimeout(function () { action("load_chat", { chat_id: qp }); }, 500);
     };
     ws.onmessage = onMessage;
     ws.onerror = function () { try { ws.close(); } catch (e) {} };
     ws.onclose = function () {
+      operationSubmissionByGeneration = Object.create(null);
+      operationSubmissionById = Object.create(null);
       setStatus("Disconnected"); attempts++;
       hideSkeleton(); // the in-flight turn died with the socket
+      clearTransientOverlay(); // old connection/request previews are disposable
       // Refresh the session token BEFORE reconnecting so a register_ui after
       // the access-token TTL recovers silently instead of dead-ending. First
       // connect uses the shell-injected token directly.
@@ -1622,7 +2613,14 @@
       }, 3000);
     };
   }
-  connect();
+  // Account digest and locator selection complete before the first socket can
+  // register. If the shell token cannot be decoded, /auth/session gets one
+  // bounded chance to provide a fresh token; connection still fails closed at
+  // the server when that session is unavailable.
+  prepareAccountIdentity(token, null).then(function (ready) {
+    if (ready) connect();
+    else refreshToken(false, function () { connect(); });
+  }).catch(function () { connect(); });
 
   // Warm the lazy Plotly bundle once the boot work has settled so the first
   // chart-bearing turn is usually already loaded.

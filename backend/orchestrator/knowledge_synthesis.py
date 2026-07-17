@@ -10,18 +10,35 @@ Three components:
      orchestrator system prompts and agent generation prompts
 """
 import asyncio
+from dataclasses import dataclass
+from datetime import datetime, timedelta, timezone
+import hashlib
+import json
 import logging
 import os
+from pathlib import Path, PurePosixPath
 import time
 import re
+import socket
+import tempfile
+import uuid
 from collections import defaultdict
-from datetime import datetime, timezone
-from typing import Any, Dict, List, Optional
+from typing import Any, Callable, Dict, List, Mapping, Optional, Sequence
 
 from openai import OpenAI
 from httpx import Timeout
 
 from orchestrator.hooks import HookContext, HookResponse
+from orchestrator.bounded_work import run_maintenance
+from orchestrator.work_admission import (
+    AdmissionClass,
+    ExecutionFence,
+    OperationOwner,
+    OperationRequest,
+    OperationState,
+    OwnerScope,
+    WorkAdmissionCoordinator,
+)
 from shared.llm_text import strip_reasoning_markup
 
 logger = logging.getLogger("Orchestrator.Knowledge")
@@ -55,6 +72,682 @@ GENERATION_CONTEXT_MAX_CHARS = 2000
 STALENESS_DAYS = 7
 
 
+@dataclass(frozen=True)
+class MaintenanceClaim:
+    """One exact maintenance-unit attempt and its operation fence."""
+
+    unit_id: str
+    unit_kind: str
+    scope_key: str
+    lease_token: str
+    claim_generation: int
+    attempt_count: int
+    output_generation: str
+    inputs: tuple[Dict[str, Any], ...]
+    fence: ExecutionFence
+
+
+class MaintenanceClaimError(RuntimeError):
+    """The selected maintenance attempt no longer owns its durable fence."""
+
+
+class MaintenanceOutputPublisher:
+    """Crash-safe publisher rooted at the synthesized knowledge directory."""
+
+    _MAX_BYTES = 2 * 1024 * 1024
+
+    def __init__(self, root: str | os.PathLike[str]) -> None:
+        self.root = Path(root).resolve()
+        self.root.mkdir(parents=True, exist_ok=True)
+
+    def _target(self, relative_path: str) -> Path:
+        path = PurePosixPath(str(relative_path))
+        if path.is_absolute() or not path.parts or any(
+            part in {"", ".", ".."} for part in path.parts
+        ):
+            raise ValueError("maintenance output path is unsafe")
+        target = self.root.joinpath(*path.parts).resolve(strict=False)
+        if target == self.root or self.root not in target.parents:
+            raise ValueError("maintenance output escapes the knowledge root")
+        return target
+
+    @staticmethod
+    def _generation_in(data: bytes) -> Optional[str]:
+        prefix = data[:8192].decode("utf-8", "strict")
+        match = re.search(
+            r'^maintenance_generation:\s*"([0-9a-f-]{36})"\s*$',
+            prefix,
+            re.MULTILINE,
+        )
+        if match is None:
+            return None
+        try:
+            parsed = uuid.UUID(match.group(1))
+        except ValueError:
+            return None
+        return str(parsed) if parsed.version == 4 else None
+
+    def reconcile(
+        self, relative_path: str, output_generation: str
+    ) -> Optional[str]:
+        """Return the digest of an already-replaced output for this generation."""
+
+        generation = str(uuid.UUID(str(output_generation)))
+        target = self._target(relative_path)
+        if not target.exists():
+            return None
+        if target.is_symlink() or not target.is_file():
+            raise MaintenanceClaimError("maintenance output target is unsafe")
+        data = target.read_bytes()
+        if len(data) > self._MAX_BYTES:
+            raise MaintenanceClaimError("maintenance output exceeds size limit")
+        if self._generation_in(data) != generation:
+            return None
+        return hashlib.sha256(data).hexdigest()
+
+    def publish(
+        self,
+        relative_path: str,
+        content: str,
+        output_generation: str,
+        *,
+        fault_hook: Optional[Callable[[str], None]] = None,
+    ) -> str:
+        """Flush, replace, and directory-fsync one generation-marked output."""
+
+        generation_uuid = uuid.UUID(str(output_generation))
+        if generation_uuid.version != 4:
+            raise ValueError("output_generation must be a UUID4")
+        generation = str(generation_uuid)
+        if not isinstance(content, str):
+            raise TypeError("maintenance output content must be text")
+        data = content.encode("utf-8")
+        if not data or len(data) > self._MAX_BYTES:
+            raise ValueError("maintenance output size is invalid")
+        if self._generation_in(data) != generation:
+            raise ValueError("maintenance output generation marker is missing")
+        target = self._target(relative_path)
+        target.parent.mkdir(parents=True, exist_ok=True)
+        existing = self.reconcile(relative_path, generation)
+        digest = hashlib.sha256(data).hexdigest()
+        if existing is not None:
+            if existing != digest:
+                raise MaintenanceClaimError(
+                    "maintenance generation already has different bytes"
+                )
+            return digest
+
+        def fault(boundary: str) -> None:
+            if fault_hook is not None:
+                fault_hook(boundary)
+
+        fault("before_temp")
+        descriptor, temporary_name = tempfile.mkstemp(
+            dir=target.parent,
+            prefix=f".{target.name}.{generation}.",
+            suffix=".tmp",
+        )
+        temporary = Path(temporary_name)
+        try:
+            with os.fdopen(descriptor, "wb") as stream:
+                stream.write(data)
+                stream.flush()
+                os.fsync(stream.fileno())
+            fault("after_file_fsync")
+            fault("before_replace")
+            os.replace(temporary, target)
+            fault("after_replace")
+            directory_fd = os.open(target.parent, os.O_RDONLY | os.O_DIRECTORY)
+            try:
+                os.fsync(directory_fd)
+            finally:
+                os.close(directory_fd)
+            fault("after_directory_fsync")
+        finally:
+            try:
+                temporary.unlink()
+            except FileNotFoundError:
+                pass
+        return digest
+
+
+class MaintenanceUnitRepository:
+    """PostgreSQL authority for retry-stable synthesis units and input truth."""
+
+    def __init__(
+        self,
+        db,
+        *,
+        coordinator: Optional[WorkAdmissionCoordinator] = None,
+        lease_seconds: int = 600,
+        max_attempts: int = 5,
+    ) -> None:
+        if type(lease_seconds) is not int or not 5 <= lease_seconds <= 3600:
+            raise ValueError("maintenance lease must be between 5 and 3600 seconds")
+        if type(max_attempts) is not int or not 1 <= max_attempts <= 20:
+            raise ValueError("maintenance max attempts must be between 1 and 20")
+        self.db = db
+        self.lease_seconds = lease_seconds
+        self.max_attempts = max_attempts
+        self.coordinator = coordinator or WorkAdmissionCoordinator.from_database(
+            database=db,
+            slot_lease=timedelta(seconds=lease_seconds),
+        )
+
+    @staticmethod
+    def _input_digest(row: Mapping[str, Any]) -> str:
+        normalized = {
+            "id": str(row.get("id")),
+            "agent_id": str(row.get("agent_id") or ""),
+            "tool_name": str(row.get("tool_name") or ""),
+            "success": bool(row.get("success")),
+            "error_message": str(row.get("error_message") or ""),
+            "response_time_ms": row.get("response_time_ms"),
+            "created_at": row.get("created_at"),
+        }
+        encoded = json.dumps(
+            normalized, sort_keys=True, separators=(",", ":"), default=str
+        ).encode("utf-8")
+        return hashlib.sha256(encoded).hexdigest()
+
+    @classmethod
+    def _unit_key(
+        cls, unit_kind: str, scope_key: str, inputs: Sequence[Mapping[str, Any]]
+    ) -> str:
+        material = [
+            f"{row['id']}:{cls._input_digest(row)}"
+            for row in sorted(inputs, key=lambda item: int(item["id"]))
+        ]
+        return hashlib.sha256(
+            json.dumps(
+                [unit_kind, scope_key, material],
+                separators=(",", ":"),
+            ).encode("utf-8")
+        ).hexdigest()
+
+    def ensure_synthesis_units(
+        self, interactions: Sequence[Mapping[str, Any]]
+    ) -> tuple[str, ...]:
+        """Create every batch membership before any unit starts executing."""
+
+        if not interactions:
+            return ()
+        by_agent: Dict[str, list[Mapping[str, Any]]] = defaultdict(list)
+        for row in interactions:
+            if row.get("id") is None or not row.get("agent_id"):
+                raise ValueError("synthesis interaction identity is incomplete")
+            by_agent[str(row["agent_id"])].append(row)
+        units: list[tuple[str, str, Sequence[Mapping[str, Any]]]] = []
+        for agent_id, rows in sorted(by_agent.items()):
+            units.append(("agent_synthesis", agent_id[:256], rows))
+            units.append(("agent_capability", agent_id[:256], rows))
+        units.append(("cross_agent_synthesis", "system", interactions))
+
+        connection = self.db._get_connection()
+        cursor = connection.cursor()
+        unit_ids: list[str] = []
+        try:
+            for unit_kind, scope_key, rows in units:
+                idempotency_key = self._unit_key(unit_kind, scope_key, rows)
+                unit_id = str(uuid.uuid4())
+                output_generation = str(uuid.uuid4())
+                cursor.execute(
+                    """
+                    INSERT INTO maintenance_unit (
+                        unit_id, unit_kind, scope_key, idempotency_key, state,
+                        max_attempts, output_generation
+                    ) VALUES (%s, %s, %s, %s, 'pending', %s, %s)
+                    ON CONFLICT (unit_kind, idempotency_key) DO NOTHING
+                    RETURNING unit_id
+                    """,
+                    (
+                        unit_id,
+                        unit_kind,
+                        scope_key,
+                        idempotency_key,
+                        self.max_attempts,
+                        output_generation,
+                    ),
+                )
+                inserted = cursor.fetchone()
+                if inserted is None:
+                    cursor.execute(
+                        """
+                        SELECT unit_id FROM maintenance_unit
+                        WHERE unit_kind = %s AND idempotency_key = %s
+                        """,
+                        (unit_kind, idempotency_key),
+                    )
+                    inserted = cursor.fetchone()
+                stable_unit_id = str(inserted["unit_id"])
+                unit_ids.append(stable_unit_id)
+                for row in rows:
+                    cursor.execute(
+                        """
+                        INSERT INTO maintenance_unit_input (
+                            unit_id, input_kind, input_id, input_digest, state
+                        ) VALUES (%s, 'interaction', %s, %s, 'pending')
+                        ON CONFLICT (unit_id, input_kind, input_id) DO NOTHING
+                        """,
+                        (
+                            stable_unit_id,
+                            str(row["id"]),
+                            self._input_digest(row),
+                        ),
+                    )
+            connection.commit()
+            return tuple(unit_ids)
+        except BaseException:
+            connection.rollback()
+            raise
+        finally:
+            try:
+                cursor.close()
+            finally:
+                connection.close()
+
+    def has_pending(self) -> bool:
+        row = self.db.fetch_one(
+            """
+            SELECT EXISTS (
+                SELECT 1 FROM maintenance_unit
+                WHERE unit_kind IN (
+                    'agent_synthesis', 'agent_capability',
+                    'cross_agent_synthesis'
+                )
+                  AND state IN ('pending', 'claimed', 'running', 'failed_retryable')
+            ) AS pending
+            """
+        )
+        return bool(row and row["pending"])
+
+    def _release_claim(
+        self, unit_id: str, lease_token: str, claim_generation: int, code: str
+    ) -> None:
+        self.db.execute(
+            """
+            UPDATE maintenance_unit
+            SET state = CASE WHEN attempt_count >= max_attempts
+                             THEN 'failed_terminal' ELSE 'failed_retryable' END,
+                lease_token = NULL, claimed_by = NULL, lease_expires_at = NULL,
+                last_error_code = ?,
+                next_attempt_at = CASE WHEN attempt_count >= max_attempts
+                                       THEN NULL ELSE clock_timestamp() + interval '1 second' END,
+                terminal_at = CASE WHEN attempt_count >= max_attempts
+                                   THEN clock_timestamp() ELSE NULL END,
+                state_revision = state_revision + 1,
+                updated_at = clock_timestamp()
+            WHERE unit_id = ? AND lease_token = ? AND claim_generation = ?
+              AND state = 'claimed'
+            """,
+            (code[:128], unit_id, lease_token, claim_generation),
+        )
+
+    def claim_next(
+        self,
+        worker_id: str,
+        *,
+        eligible_unit_ids: Optional[Sequence[str]] = None,
+    ) -> Optional[MaintenanceClaim]:
+        """Recover expired units and claim one oldest eligible scope."""
+
+        worker_id = str(worker_id)[:128]
+        if not worker_id:
+            raise ValueError("maintenance worker identity is required")
+        eligible_ids = None
+        if eligible_unit_ids is not None:
+            eligible_ids = [str(uuid.UUID(str(value))) for value in eligible_unit_ids]
+            if not eligible_ids:
+                return None
+        # Expire operation slots before attempting a new domain claim so a
+        # crashed worker cannot consume the maintenance lane indefinitely.
+        self.coordinator.expire_execution_leases()
+        connection = self.db._get_connection()
+        cursor = connection.cursor()
+        try:
+            cursor.execute(
+                """
+                UPDATE maintenance_unit
+                SET state = CASE WHEN attempt_count >= max_attempts
+                                 THEN 'failed_terminal' ELSE 'failed_retryable' END,
+                    lease_token = NULL, claimed_by = NULL,
+                    lease_expires_at = NULL, last_error_code = 'lease_expired',
+                    next_attempt_at = CASE WHEN attempt_count >= max_attempts
+                                           THEN NULL ELSE clock_timestamp() END,
+                    terminal_at = CASE WHEN attempt_count >= max_attempts
+                                       THEN clock_timestamp() ELSE NULL END,
+                    state_revision = state_revision + 1,
+                    updated_at = clock_timestamp()
+                WHERE state IN ('claimed', 'running')
+                  AND lease_expires_at <= clock_timestamp()
+                """
+            )
+            eligible_sql = (
+                "" if eligible_ids is None
+                else "AND candidate.unit_id = ANY(%s::uuid[])"
+            )
+            cursor.execute(
+                f"""
+                SELECT candidate.* FROM maintenance_unit AS candidate
+                WHERE candidate.unit_kind IN (
+                    'agent_synthesis', 'agent_capability',
+                    'cross_agent_synthesis'
+                )
+                  {eligible_sql}
+                  AND candidate.state IN ('pending', 'failed_retryable')
+                  AND candidate.attempt_count < candidate.max_attempts
+                  AND (candidate.next_attempt_at IS NULL
+                       OR candidate.next_attempt_at <= clock_timestamp())
+                  AND NOT EXISTS (
+                      SELECT 1 FROM maintenance_unit AS older
+                      WHERE older.unit_kind = candidate.unit_kind
+                        AND older.scope_key = candidate.scope_key
+                        AND older.created_at < candidate.created_at
+                        AND older.state NOT IN (
+                            'succeeded', 'failed_terminal', 'cancelled'
+                        )
+                  )
+                ORDER BY candidate.created_at, candidate.unit_id
+                FOR UPDATE SKIP LOCKED
+                LIMIT 1
+                """
+                ,
+                () if eligible_ids is None else (eligible_ids,),
+            )
+            row = cursor.fetchone()
+            if row is None:
+                connection.commit()
+                return None
+            lease_token = str(uuid.uuid4())
+            claim_generation = int(row["claim_generation"]) + 1
+            attempt_count = int(row["attempt_count"]) + 1
+            cursor.execute(
+                """
+                UPDATE maintenance_unit
+                SET state = 'claimed', lease_token = %s,
+                    claim_generation = %s, claimed_by = %s,
+                    lease_expires_at = clock_timestamp()
+                        + (%s * interval '1 second'),
+                    attempt_count = %s, last_error_code = NULL,
+                    next_attempt_at = NULL, terminal_at = NULL,
+                    state_revision = state_revision + 1,
+                    updated_at = clock_timestamp()
+                WHERE unit_id = %s AND state_revision = %s
+                RETURNING *
+                """,
+                (
+                    lease_token,
+                    claim_generation,
+                    worker_id,
+                    self.lease_seconds,
+                    attempt_count,
+                    row["unit_id"],
+                    row["state_revision"],
+                ),
+            )
+            claimed = cursor.fetchone()
+            if claimed is None:
+                raise MaintenanceClaimError("maintenance claim CAS was lost")
+            connection.commit()
+        except BaseException:
+            connection.rollback()
+            raise
+        finally:
+            try:
+                cursor.close()
+            finally:
+                connection.close()
+
+        unit_id = str(claimed["unit_id"])
+        attempt_key = f"{unit_id}:{attempt_count}"
+        request = OperationRequest(
+            operation_kind="maintenance",
+            admission_class=AdmissionClass.MAINTENANCE,
+            owner=OperationOwner(OwnerScope.MAINTENANCE, None, None),
+            submission_id=uuid.uuid4(),
+            idempotency_namespace="maintenance_unit_attempt",
+            idempotency_key=attempt_key,
+            normalized_input_digest=hashlib.sha256(
+                attempt_key.encode("utf-8")
+            ).hexdigest(),
+            chat_id=None,
+            parent_operation_id=None,
+            connection_generation=None,
+            request_generation=None,
+        )
+        admitted = self.coordinator.submit(request)
+        if not admitted.accepted:
+            self._release_claim(
+                unit_id, lease_token, claim_generation, "capacity_refused"
+            )
+            return None
+        operation_claim = self.coordinator.claim_operation(
+            AdmissionClass.MAINTENANCE, admitted.operation_id
+        )
+        if operation_claim is None:
+            self.coordinator.terminalize_unselected(
+                admitted.operation_id,
+                terminal_code="maintenance_handoff_unavailable",
+                safe_summary="Maintenance handoff unavailable.",
+                retry_after_ms=1000,
+            )
+            self._release_claim(
+                unit_id, lease_token, claim_generation, "handoff_unavailable"
+            )
+            return None
+
+        connection = self.db._get_connection()
+        cursor = connection.cursor()
+        try:
+            cursor.execute(
+                """
+                UPDATE maintenance_unit
+                SET state = 'running', operation_id = %s,
+                    operation_execution_generation = %s,
+                    state_revision = state_revision + 1,
+                    updated_at = clock_timestamp()
+                WHERE unit_id = %s AND state = 'claimed'
+                  AND lease_token = %s AND claim_generation = %s
+                  AND lease_expires_at > clock_timestamp()
+                RETURNING *
+                """,
+                (
+                    str(operation_claim.fence.operation_id),
+                    operation_claim.fence.execution_generation,
+                    unit_id,
+                    lease_token,
+                    claim_generation,
+                ),
+            )
+            running = cursor.fetchone()
+            if running is None:
+                raise MaintenanceClaimError("maintenance claim expired before handoff")
+            cursor.execute(
+                """
+                SELECT source.* FROM maintenance_unit_input AS membership
+                JOIN interaction_log AS source
+                  ON source.id::text = membership.input_id
+                WHERE membership.unit_id = %s
+                  AND membership.input_kind = 'interaction'
+                ORDER BY source.id
+                """,
+                (unit_id,),
+            )
+            inputs = tuple(dict(item) for item in cursor.fetchall())
+            connection.commit()
+        except BaseException:
+            connection.rollback()
+            self.coordinator.terminalize(
+                operation_claim.fence,
+                state=OperationState.RETRYABLE,
+                terminal_code="maintenance_claim_stale",
+                safe_summary="Maintenance claim became stale.",
+                retry_after_ms=1000,
+            )
+            raise
+        finally:
+            try:
+                cursor.close()
+            finally:
+                connection.close()
+        return MaintenanceClaim(
+            unit_id=unit_id,
+            unit_kind=str(running["unit_kind"]),
+            scope_key=str(running["scope_key"]),
+            lease_token=lease_token,
+            claim_generation=claim_generation,
+            attempt_count=attempt_count,
+            output_generation=str(running["output_generation"]),
+            inputs=inputs,
+            fence=operation_claim.fence,
+        )
+
+    @staticmethod
+    def _assert_claim(cursor, claim: MaintenanceClaim) -> None:
+        cursor.execute(
+            """
+            SELECT unit_id FROM maintenance_unit
+            WHERE unit_id = %s AND state = 'running'
+              AND lease_token = %s AND claim_generation = %s
+              AND operation_id = %s AND operation_execution_generation = %s
+              AND lease_expires_at > clock_timestamp()
+            FOR UPDATE
+            """,
+            (
+                claim.unit_id,
+                claim.lease_token,
+                claim.claim_generation,
+                str(claim.fence.operation_id),
+                claim.fence.execution_generation,
+            ),
+        )
+        if cursor.fetchone() is None:
+            raise MaintenanceClaimError("maintenance execution fence is stale")
+
+    def complete(
+        self, claim: MaintenanceClaim, *, output_relative_path: str, output_digest: str
+    ) -> None:
+        """Commit output metadata, unit inputs, sources, and operation together."""
+
+        if not re.fullmatch(r"[0-9a-f]{64}", output_digest or ""):
+            raise ValueError("maintenance output digest is invalid")
+        with self.coordinator.repository.fenced_transaction(
+            claim.fence
+        ) as cursor:
+            self._assert_claim(cursor, claim)
+            cursor.execute(
+                """
+                UPDATE maintenance_unit_input
+                SET state = 'completed', operation_id = %s,
+                    operation_execution_generation = %s,
+                    completed_at = clock_timestamp()
+                WHERE unit_id = %s AND state = 'pending'
+                """,
+                (
+                    str(claim.fence.operation_id),
+                    claim.fence.execution_generation,
+                    claim.unit_id,
+                ),
+            )
+            if claim.unit_kind == "agent_synthesis":
+                cursor.execute(
+                    """
+                    UPDATE interaction_log AS source SET synthesized = TRUE
+                    FROM maintenance_unit_input AS membership
+                    WHERE membership.unit_id = %s
+                      AND membership.input_kind = 'interaction'
+                      AND membership.input_id = source.id::text
+                      AND membership.state = 'completed'
+                    """,
+                    (claim.unit_id,),
+                )
+            cursor.execute(
+                """
+                UPDATE maintenance_unit
+                SET state = 'succeeded', lease_token = NULL,
+                    claimed_by = NULL, lease_expires_at = NULL,
+                    output_relative_path = %s, output_digest = %s,
+                    last_error_code = NULL, terminal_at = clock_timestamp(),
+                    next_attempt_at = NULL, state_revision = state_revision + 1,
+                    updated_at = clock_timestamp()
+                WHERE unit_id = %s AND state = 'running'
+                  AND lease_token = %s AND claim_generation = %s
+                """,
+                (
+                    output_relative_path,
+                    output_digest,
+                    claim.unit_id,
+                    claim.lease_token,
+                    claim.claim_generation,
+                ),
+            )
+            if cursor.rowcount != 1:
+                raise MaintenanceClaimError("maintenance completion CAS was lost")
+            self.coordinator.terminalize(
+                claim.fence,
+                state=OperationState.COMPLETED,
+                terminal_code=None,
+                safe_summary="Maintenance unit completed.",
+                retry_after_ms=None,
+                transaction=cursor,
+            )
+
+    def fail(
+        self, claim: MaintenanceClaim, *, error_code: str, retry_after_seconds: int = 1
+    ) -> None:
+        """Retain pending inputs and terminalize only this exact failed attempt."""
+
+        if not re.fullmatch(r"[a-z][a-z0-9_]{0,127}", error_code or ""):
+            raise ValueError("maintenance error code is invalid")
+        if type(retry_after_seconds) is not int or not 0 <= retry_after_seconds <= 3600:
+            raise ValueError("maintenance retry delay is invalid")
+        with self.coordinator.repository.fenced_transaction(
+            claim.fence
+        ) as cursor:
+            self._assert_claim(cursor, claim)
+            cursor.execute(
+                "SELECT attempt_count, max_attempts FROM maintenance_unit "
+                "WHERE unit_id = %s FOR UPDATE",
+                (claim.unit_id,),
+            )
+            unit = cursor.fetchone()
+            terminal = int(unit["attempt_count"]) >= int(unit["max_attempts"])
+            cursor.execute(
+                """
+                UPDATE maintenance_unit
+                SET state = %s, lease_token = NULL, claimed_by = NULL,
+                    lease_expires_at = NULL, last_error_code = %s,
+                    next_attempt_at = CASE WHEN %s THEN NULL
+                        ELSE clock_timestamp() + (%s * interval '1 second') END,
+                    terminal_at = CASE WHEN %s THEN clock_timestamp() ELSE NULL END,
+                    state_revision = state_revision + 1,
+                    updated_at = clock_timestamp()
+                WHERE unit_id = %s AND state = 'running'
+                  AND lease_token = %s AND claim_generation = %s
+                """,
+                (
+                    "failed_terminal" if terminal else "failed_retryable",
+                    error_code,
+                    terminal,
+                    retry_after_seconds,
+                    terminal,
+                    claim.unit_id,
+                    claim.lease_token,
+                    claim.claim_generation,
+                ),
+            )
+            if cursor.rowcount != 1:
+                raise MaintenanceClaimError("maintenance failure CAS was lost")
+            self.coordinator.terminalize(
+                claim.fence,
+                state=OperationState.FAILED if terminal else OperationState.RETRYABLE,
+                terminal_code=error_code,
+                safe_summary="Maintenance unit failed.",
+                retry_after_ms=None if terminal else retry_after_seconds * 1000,
+                transaction=cursor,
+            )
+
+
 # =========================================================================
 # INTERACTION COLLECTOR — Hook handler for POST_TOOL_USE / POST_TOOL_FAILURE
 # =========================================================================
@@ -86,7 +779,8 @@ class InteractionCollector:
 
             chat_id = ctx.metadata.get("chat_id")
 
-            self.db.log_interaction(
+            await run_maintenance(
+                self.db.log_interaction,
                 agent_id=ctx.agent_id,
                 tool_name=ctx.tool_name,
                 success=success,
@@ -107,8 +801,17 @@ class InteractionCollector:
 class KnowledgeSynthesizer:
     """Periodically analyzes interaction data and produces knowledge markdown."""
 
-    def __init__(self, db, knowledge_dir: str = None, knowledge_index: "KnowledgeIndex" = None,
-                 config_resolver=None):
+    def __init__(
+        self,
+        db,
+        knowledge_dir: str = None,
+        knowledge_index: "KnowledgeIndex" = None,
+        config_resolver=None,
+        *,
+        maintenance_repository: Optional[MaintenanceUnitRepository] = None,
+        maintenance_publisher: Optional[MaintenanceOutputPublisher] = None,
+        maintenance_fault_hook: Optional[Callable[[str], None]] = None,
+    ):
         """Args:
             config_resolver: Zero-arg SYNC callable returning the current
                 system LLM configuration, or ``None``. Feature 054: the
@@ -123,6 +826,12 @@ class KnowledgeSynthesizer:
         self.knowledge_dir = knowledge_dir or DEFAULT_KNOWLEDGE_DIR
         self.knowledge_index = knowledge_index
         self._config_resolver = config_resolver
+        self._maintenance_repository = maintenance_repository
+        self._maintenance_publisher = maintenance_publisher
+        self._maintenance_fault_hook = maintenance_fault_hook
+        self._maintenance_worker_id = (
+            f"{socket.gethostname()}:{os.getpid()}:{uuid.uuid4()}"[:128]
+        )
 
         self.model = None
         self.client = None
@@ -130,6 +839,12 @@ class KnowledgeSynthesizer:
         self.min_interactions = int(os.getenv("KNOWLEDGE_MIN_INTERACTIONS", str(DEFAULT_MIN_INTERACTIONS)))
 
         self._ensure_dirs()
+        if self.db is not None and self._maintenance_repository is None:
+            self._maintenance_repository = MaintenanceUnitRepository(self.db)
+        if self._maintenance_publisher is None:
+            self._maintenance_publisher = MaintenanceOutputPublisher(
+                self.knowledge_dir
+            )
 
     def _refresh_client(self) -> bool:
         """Per-cycle system-credential resolution (SYNC — call off-loop).
@@ -190,9 +905,14 @@ class KnowledgeSynthesizer:
                 logger.error(f"Knowledge synthesis cycle failed: {e}")
 
     async def _synthesis_cycle(self):
-        """One synthesis cycle: fetch interactions, analyze, write markdown."""
-        interactions = self.db.get_unsynthesized_interactions(limit=500)
-        if len(interactions) < self.min_interactions:
+        """Claim and settle independent synthesis units with durable retry truth."""
+        if self.db is None or self._maintenance_repository is None:
+            return
+        interactions = await run_maintenance(
+            self.db.get_unsynthesized_interactions, limit=500
+        )
+        pending = await run_maintenance(self._maintenance_repository.has_pending)
+        if len(interactions) < self.min_interactions and not pending:
             logger.debug(
                 f"Skipping synthesis: {len(interactions)} interactions "
                 f"(need {self.min_interactions})"
@@ -201,44 +921,185 @@ class KnowledgeSynthesizer:
 
         # Feature 054: re-resolve the admin-managed system credential each
         # cycle (system_llm_unconfigured ⇒ honest skip, data preserved).
-        if not await asyncio.to_thread(self._refresh_client):
+        if not await run_maintenance(self._refresh_client):
             logger.warning(
                 "system_llm_unconfigured: knowledge synthesis skipped — "
                 "configure the System LLM in admin settings; data preserved")
             return
 
-        logger.info(f"Starting knowledge synthesis with {len(interactions)} interactions")
+        if len(interactions) >= self.min_interactions:
+            await run_maintenance(
+                self._maintenance_repository.ensure_synthesis_units,
+                interactions,
+            )
 
-        # Group by agent
-        by_agent: Dict[str, List[Dict]] = defaultdict(list)
-        for row in interactions:
-            by_agent[row["agent_id"]].append(row)
+        logger.info(
+            "Starting durable knowledge synthesis with %d new interactions",
+            len(interactions),
+        )
+        completed = 0
+        # At most one bounded fetch worth of independent outputs is processed
+        # per cycle; persistent failures retain their identity for the next run.
+        for _index in range(128):
+            claim = await run_maintenance(
+                self._maintenance_repository.claim_next,
+                self._maintenance_worker_id,
+            )
+            if claim is None:
+                break
+            if await self._process_maintenance_claim(claim):
+                completed += 1
 
-        # Synthesize per-agent techniques
-        for agent_id, agent_interactions in by_agent.items():
-            try:
-                await self._synthesize_agent(agent_id, agent_interactions)
-            except Exception as e:
-                logger.error(f"Synthesis failed for agent {agent_id}: {e}")
+        if completed:
+            await run_maintenance(self._update_index)
+            if self.knowledge_index:
+                self.knowledge_index.invalidate_cache()
+        logger.info(
+            "Knowledge synthesis cycle complete (%d unit(s) committed)", completed
+        )
 
-        # Synthesize cross-agent patterns
+    @staticmethod
+    def _safe_agent_slug(agent_id: str) -> str:
+        normalized = re.sub(r"[^a-zA-Z0-9_]+", "_", agent_id.replace("-", "_"))
+        normalized = normalized.strip("_").rstrip("_1234567890") or "agent"
+        if len(normalized) > 96:
+            suffix = hashlib.sha256(agent_id.encode("utf-8")).hexdigest()[:12]
+            normalized = f"{normalized[:80]}_{suffix}"
+        return normalized
+
+    @staticmethod
+    def _render_knowledge_file(frontmatter: Mapping[str, Any], content: str) -> str:
+        fm_lines = []
+        for key, value in frontmatter.items():
+            if isinstance(value, str):
+                escaped = value.replace("\\", "\\\\").replace('"', '\\"')
+                fm_lines.append(f'{key}: "{escaped}"')
+            elif isinstance(value, bool):
+                fm_lines.append(f"{key}: {'true' if value else 'false'}")
+            else:
+                fm_lines.append(f"{key}: {value}")
+        fm_text = "\n".join(fm_lines)
+        return f"---\n{fm_text}\n---\n\n{content.rstrip()}\n"
+
+    async def _process_maintenance_claim(self, claim: MaintenanceClaim) -> bool:
+        repository = self._maintenance_repository
+        publisher = self._maintenance_publisher
+        if repository is None or publisher is None:
+            return False
+        slug = self._safe_agent_slug(claim.scope_key)
+        if claim.unit_kind == "agent_synthesis":
+            relative_path = f"techniques/{slug}.md"
+        elif claim.unit_kind == "agent_capability":
+            relative_path = f"capabilities/{slug}.md"
+        elif claim.unit_kind == "cross_agent_synthesis":
+            relative_path = "patterns/tool_patterns.md"
+        else:  # pragma: no cover - repository only selects the allow-list
+            await run_maintenance(
+                repository.fail, claim, error_code="unsupported_unit_kind"
+            )
+            return False
+
         try:
-            await self._synthesize_patterns(interactions)
-        except Exception as e:
-            logger.error(f"Cross-agent pattern synthesis failed: {e}")
+            reconciled = await run_maintenance(
+                publisher.reconcile,
+                relative_path,
+                claim.output_generation,
+            )
+            if reconciled is not None:
+                await run_maintenance(
+                    repository.complete,
+                    claim,
+                    output_relative_path=relative_path,
+                    output_digest=reconciled,
+                )
+                return True
 
-        # Mark all processed
-        ids = [row["id"] for row in interactions]
-        self.db.mark_interactions_synthesized(ids)
-
-        # Update index
-        self._update_index()
-
-        # Invalidate cache
-        if self.knowledge_index:
-            self.knowledge_index.invalidate_cache()
-
-        logger.info("Knowledge synthesis cycle complete")
+            interactions = [dict(row) for row in claim.inputs]
+            if not interactions:
+                raise MaintenanceClaimError(
+                    "maintenance unit inputs are unavailable"
+                )
+            stats = self._compute_stats(interactions)
+            now = datetime.now(timezone.utc).isoformat(timespec="seconds")
+            if claim.unit_kind == "agent_synthesis":
+                prompt = self._build_agent_prompt(
+                    claim.scope_key, interactions, stats
+                )
+                content = await self._call_llm(prompt)
+                if not content:
+                    raise MaintenanceClaimError("llm returned no agent synthesis")
+                existing_path = os.path.join(self.knowledge_dir, relative_path)
+                existing = await run_maintenance(
+                    self._read_frontmatter, existing_path
+                )
+                frontmatter = {
+                    "name": f"{slug}_techniques",
+                    "type": "technique",
+                    "agent": claim.scope_key,
+                    "created_at": existing.get("created_at", now),
+                    "updated_at": now,
+                    "synthesis_count": int(existing.get("synthesis_count", 0)) + 1,
+                    "interaction_count": len(interactions),
+                    "confidence": min(0.95, 0.5 + (len(interactions) / 200)),
+                    "maintenance_generation": claim.output_generation,
+                }
+            elif claim.unit_kind == "agent_capability":
+                content = self._build_capability_summary(claim.scope_key, stats)
+                frontmatter = {
+                    "name": f"{slug}_capabilities",
+                    "type": "capability",
+                    "agent": claim.scope_key,
+                    "updated_at": now,
+                    "maintenance_generation": claim.output_generation,
+                }
+            else:
+                prompt = self._build_patterns_prompt(interactions, stats)
+                content = await self._call_llm(prompt)
+                if not content:
+                    raise MaintenanceClaimError("llm returned no pattern synthesis")
+                frontmatter = {
+                    "name": "tool_patterns",
+                    "type": "pattern",
+                    "agent": "system",
+                    "updated_at": now,
+                    "interaction_count": len(interactions),
+                    "maintenance_generation": claim.output_generation,
+                }
+            rendered = self._render_knowledge_file(frontmatter, content)
+            digest = await run_maintenance(
+                publisher.publish,
+                relative_path,
+                rendered,
+                claim.output_generation,
+                fault_hook=self._maintenance_fault_hook,
+            )
+            await run_maintenance(
+                repository.complete,
+                claim,
+                output_relative_path=relative_path,
+                output_digest=digest,
+            )
+            return True
+        except Exception:
+            logger.exception(
+                "Knowledge maintenance unit failed",
+                extra={"unit_id": claim.unit_id, "unit_kind": claim.unit_kind},
+            )
+            try:
+                await run_maintenance(
+                    repository.fail,
+                    claim,
+                    error_code="synthesis_failed",
+                )
+            except Exception:
+                # A crash-after-replace simulation or a lost lease leaves the
+                # durable claim for expiry/reconciliation; never fake completion.
+                logger.warning(
+                    "Could not terminalize maintenance unit %s",
+                    claim.unit_id,
+                    exc_info=True,
+                )
+            return False
 
     async def _synthesize_agent(self, agent_id: str, interactions: List[Dict]):
         """Synthesize technique document for a single agent."""
@@ -416,7 +1277,7 @@ Be concise and data-driven."""
     async def _call_llm(self, prompt: str) -> Optional[str]:
         """Call the local LLM. Returns None on failure."""
         try:
-            response = await asyncio.to_thread(
+            response = await run_maintenance(
                 self.client.chat.completions.create,
                 model=self.model,
                 messages=[
@@ -435,14 +1296,17 @@ Be concise and data-driven."""
             return strip_reasoning_markup(response.choices[0].message.content)
         except Exception as e:
             logger.warning(f"Knowledge LLM call failed: {e}")
-            self._available = False  # stop retrying until next cycle
+            # ``_available`` is a read-only compatibility property. Clearing the
+            # concrete client honestly disables further calls until next cycle.
+            self.client = None
+            self.model = None
             return None
 
     # ─── File I/O ────────────────────────────────────────────────────────
 
     @staticmethod
     def _write_knowledge_file(filepath: str, frontmatter: Dict, content: str):
-        """Write a knowledge markdown file with simple key: value frontmatter."""
+        """Atomically write a legacy knowledge file with durable replacement."""
         fm_lines = []
         for key, value in frontmatter.items():
             if isinstance(value, str):
@@ -452,8 +1316,29 @@ Be concise and data-driven."""
             else:
                 fm_lines.append(f"{key}: {value}")
         fm_str = "\n".join(fm_lines)
-        with open(filepath, "w", encoding="utf-8") as f:
-            f.write(f"---\n{fm_str}\n---\n\n{content}\n")
+        target = Path(filepath)
+        target.parent.mkdir(parents=True, exist_ok=True)
+        data = f"---\n{fm_str}\n---\n\n{content}\n".encode("utf-8")
+        descriptor, temporary_name = tempfile.mkstemp(
+            dir=target.parent, prefix=f".{target.name}.", suffix=".tmp"
+        )
+        temporary = Path(temporary_name)
+        try:
+            with os.fdopen(descriptor, "wb") as stream:
+                stream.write(data)
+                stream.flush()
+                os.fsync(stream.fileno())
+            os.replace(temporary, target)
+            directory_fd = os.open(target.parent, os.O_RDONLY | os.O_DIRECTORY)
+            try:
+                os.fsync(directory_fd)
+            finally:
+                os.close(directory_fd)
+        finally:
+            try:
+                temporary.unlink()
+            except FileNotFoundError:
+                pass
 
     @staticmethod
     def _read_frontmatter(filepath: str) -> Dict:
@@ -524,8 +1409,28 @@ Be concise and data-driven."""
                 lines.extend(entries)
 
         index_path = os.path.join(self.knowledge_dir, "_index.md")
-        with open(index_path, "w", encoding="utf-8") as f:
-            f.write("\n".join(lines) + "\n")
+        target = Path(index_path)
+        data = ("\n".join(lines) + "\n").encode("utf-8")
+        descriptor, temporary_name = tempfile.mkstemp(
+            dir=target.parent, prefix="._index.md.", suffix=".tmp"
+        )
+        temporary = Path(temporary_name)
+        try:
+            with os.fdopen(descriptor, "wb") as stream:
+                stream.write(data)
+                stream.flush()
+                os.fsync(stream.fileno())
+            os.replace(temporary, target)
+            directory_fd = os.open(target.parent, os.O_RDONLY | os.O_DIRECTORY)
+            try:
+                os.fsync(directory_fd)
+            finally:
+                os.close(directory_fd)
+        finally:
+            try:
+                temporary.unlink()
+            except FileNotFoundError:
+                pass
 
 
 # =========================================================================
@@ -691,7 +1596,7 @@ async def _refine_proposal_via_llm(synth: "KnowledgeSynthesizer", base_markdown:
         "them. Preserve the document's section headings."
     )
     try:
-        response = await asyncio.to_thread(
+        response = await run_maintenance(
             synth.client.chat.completions.create,
             model=synth.model,
             messages=[
@@ -729,7 +1634,7 @@ async def _classify_comment_safe(synth: "KnowledgeSynthesizer", comment: str) ->
         f"\n\n<<<COMMENT>>>\n{comment}\n<<<END>>>"
     )
     try:
-        response = await asyncio.to_thread(
+        response = await run_maintenance(
             synth.client.chat.completions.create,
             model=synth.model,
             messages=[

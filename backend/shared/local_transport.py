@@ -87,3 +87,58 @@ class TunnelSocket:
 
     async def close(self, *args: Any, **kwargs: Any) -> None:  # parity no-op
         return None
+
+
+class FencedTunnelSocket:
+    """Projection of one durably promoted personal-agent runtime.
+
+    Unlike the feature-058 compatibility adapter, this socket never invents a
+    route from ``agent_id`` alone. Every outbound request is supplied with the
+    exact runtime/request fence already committed by the server repository and
+    is pushed only to the selected server-acknowledged host session.
+    """
+
+    def __init__(
+        self,
+        ui_websocket: Any,
+        owner_sub: str,
+        runtime_fence: Any,
+        send_fn: Any,
+    ) -> None:
+        self.ui_websocket = ui_websocket
+        self.owner_sub = owner_sub
+        self.runtime_fence = runtime_fence
+        self.agent_id = runtime_fence.agent_id
+        self.host_session_id = runtime_fence.host_session_id
+        self._send_fn = send_fn
+        self.client = ("fenced-tunnel", 0)
+        self.is_user_agent_tunnel = True
+        self.is_fenced_user_agent_tunnel = True
+
+    async def send_fenced(self, frame: dict[str, Any]) -> None:
+        """Push one already-validated v2 request to this exact host/runtime."""
+
+        if frame.get("fence") != self.runtime_fence.to_dict():
+            raise ValueError("personal-agent request runtime fence is stale")
+        await self._send_fn(
+            self.ui_websocket,
+            json.dumps(
+                {
+                    "type": "agent_tunnel",
+                    "fence": self.runtime_fence.to_dict(),
+                    "frame": frame,
+                },
+                separators=(",", ":"),
+            ),
+        )
+
+    async def send(self, _text: str) -> None:
+        """Refuse the unfenced legacy dispatch path."""
+
+        raise RuntimeError("v2 personal-agent calls require a durable request fence")
+
+    async def send_text(self, text: str) -> None:
+        await self.send(text)
+
+    async def close(self, *args: Any, **kwargs: Any) -> None:
+        return None

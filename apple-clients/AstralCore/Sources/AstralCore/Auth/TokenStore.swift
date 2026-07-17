@@ -4,8 +4,9 @@
 //               precedent, public client);
 //   watch     → refresh via the backend broker (single TLS peer).
 import Foundation
+
 #if canImport(Security)
-import Security
+    import Security
 #endif
 
 public protocol TokenStorage: Sendable {
@@ -26,8 +27,9 @@ public struct StoredTokens: Codable, Sendable, Equatable {
     }
 
     public var tokenSet: TokenSet {
-        TokenSet(accessToken: accessToken, refreshToken: refreshToken,
-                 expiresIn: expiresAt.timeIntervalSinceNow)
+        TokenSet(
+            accessToken: accessToken, refreshToken: refreshToken,
+            expiresIn: expiresAt.timeIntervalSinceNow)
     }
 }
 
@@ -38,64 +40,70 @@ public final class InMemoryTokenStore: TokenStorage, @unchecked Sendable {
     public init() {}
 
     public func load() -> StoredTokens? {
-        lock.lock(); defer { lock.unlock() }
+        lock.lock()
+        defer { lock.unlock() }
         return tokens
     }
 
     public func save(_ tokens: StoredTokens) {
-        lock.lock(); defer { lock.unlock() }
+        lock.lock()
+        defer { lock.unlock() }
         self.tokens = tokens
     }
 
     public func wipe() {
-        lock.lock(); defer { lock.unlock() }
+        lock.lock()
+        defer { lock.unlock() }
         tokens = nil
     }
 }
 
 #if canImport(Security)
-/// Keychain-backed store (FR-007: tokens live in the platform keychain).
-public final class KeychainTokenStore: TokenStorage, @unchecked Sendable {
-    private let service: String
+    /// Keychain-backed store (FR-007: tokens live in the platform keychain).
+    public final class KeychainTokenStore: TokenStorage, @unchecked Sendable {
+        private let service: String
 
-    public init(service: String = "com.personalailabs.astraldeep.tokens") {
-        self.service = service
-    }
+        public init(service: String = "com.personalailabs.astraldeep.tokens") {
+            self.service = service
+        }
 
-    private var query: [String: Any] {
-        [kSecClass as String: kSecClassGenericPassword,
-         kSecAttrService as String: service,
-         kSecAttrAccount as String: "session"]
-    }
+        private var query: [String: Any] {
+            [
+                kSecClass as String: kSecClassGenericPassword,
+                kSecAttrService as String: service,
+                kSecAttrAccount as String: "session",
+            ]
+        }
 
-    public func load() -> StoredTokens? {
-        var q = query
-        q[kSecReturnData as String] = true
-        q[kSecMatchLimit as String] = kSecMatchLimitOne
-        var out: AnyObject?
-        guard SecItemCopyMatching(q as CFDictionary, &out) == errSecSuccess,
-              let data = out as? Data else { return nil }
-        return try? JSONDecoder().decode(StoredTokens.self, from: data)
-    }
+        public func load() -> StoredTokens? {
+            var q = query
+            q[kSecReturnData as String] = true
+            q[kSecMatchLimit as String] = kSecMatchLimitOne
+            var out: AnyObject?
+            guard SecItemCopyMatching(q as CFDictionary, &out) == errSecSuccess,
+                let data = out as? Data
+            else { return nil }
+            return try? JSONDecoder().decode(StoredTokens.self, from: data)
+        }
 
-    public func save(_ tokens: StoredTokens) {
-        guard let data = try? JSONEncoder().encode(tokens) else { return }
-        // Delete-then-add so the accessibility class is always applied
-        // (SecItemUpdate cannot change it on an existing item).
-        SecItemDelete(query as CFDictionary)
-        var add = query
-        add[kSecValueData as String] = data
-        // Available after first unlock: cold launches (including before the
-        // UI is unlocked post-reboot) restore the session without sign-in.
-        // ThisDeviceOnly: refresh tokens never ride iCloud Keychain backups.
-        add[kSecAttrAccessible as String] = kSecAttrAccessibleAfterFirstUnlockThisDeviceOnly
-        SecItemAdd(add as CFDictionary, nil)
-    }
+        public func save(_ tokens: StoredTokens) {
+            guard let data = try? JSONEncoder().encode(tokens) else { return }
+            // Delete-then-add so the accessibility class is always applied
+            // (SecItemUpdate cannot change it on an existing item).
+            SecItemDelete(query as CFDictionary)
+            var add = query
+            add[kSecValueData as String] = data
+            // Available after first unlock: cold launches (including before the
+            // UI is unlocked post-reboot) restore the session without sign-in.
+            // ThisDeviceOnly: refresh tokens never ride iCloud Keychain backups.
+            add[kSecAttrAccessible as String] = kSecAttrAccessibleAfterFirstUnlockThisDeviceOnly
+            SecItemAdd(add as CFDictionary, nil)
+        }
 
-    public func wipe() {
-        SecItemDelete(query as CFDictionary)
+        public func wipe() {
+            SecItemDelete(query as CFDictionary)
+        }
     }
-}
 #endif
 
 /// Outcome of a refresh attempt, classified so callers can tell a definitive
@@ -125,8 +133,9 @@ public enum RefreshStrategy: Sendable {
         case .direct(let config):
             var request = URLRequest(url: config.tokenEndpoint)
             request.httpMethod = "POST"
-            request.setValue("application/x-www-form-urlencoded",
-                             forHTTPHeaderField: "Content-Type")
+            request.setValue(
+                "application/x-www-form-urlencoded",
+                forHTTPHeaderField: "Content-Type")
             request.httpBody = Data(config.refreshRequestBody(refreshToken: refreshToken).utf8)
             let (data, response): (Data, URLResponse)
             do {
@@ -139,7 +148,8 @@ public enum RefreshStrategy: Sendable {
                 throw DeviceLoginError.rejected("refresh rejected (HTTP \(status))")
             }
             guard status == 200, let json = try? JSONValue.parse(data),
-                  let tokens = TokenSet(json: json) else {
+                let tokens = TokenSet(json: json)
+            else {
                 throw DeviceLoginError.unavailable("refresh failed (HTTP \(status))")
             }
             return tokens
@@ -155,9 +165,10 @@ public enum RefreshStrategy: Sendable {
         do {
             var set = try await refresh(refreshToken: refreshToken)
             if set.refreshToken == nil {
-                set = TokenSet(accessToken: set.accessToken,
-                               refreshToken: refreshToken,
-                               expiresIn: set.expiresAt.timeIntervalSinceNow)
+                set = TokenSet(
+                    accessToken: set.accessToken,
+                    refreshToken: refreshToken,
+                    expiresIn: set.expiresAt.timeIntervalSinceNow)
             }
             return .ok(set)
         } catch let error as DeviceLoginError {

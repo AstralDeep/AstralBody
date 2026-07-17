@@ -1,7 +1,7 @@
+import AstralCore
 // Feature 051 US4 — signed-in watch home: one-tap new conversation, bounded
 // recents, visible account identity, one-tap sign-out (FR-028).
 import SwiftUI
-import AstralCore
 
 struct WatchHomeView: View {
     @Environment(WatchModel.self) var model
@@ -31,13 +31,33 @@ struct WatchHomeView: View {
                 }
             }
 
+            if let status = model.rootStatusText {
+                let accessibility = WatchAccessibility060.rootStatus(status)
+                Section("Live status") {
+                    Label {
+                        Text(status).lineLimit(3)
+                    } icon: {
+                        Image(systemName: "waveform.path.ecg")
+                    }
+                    .font(.footnote)
+                    .foregroundStyle(.secondary)
+                    .accessibilityElement(children: .ignore)
+                    .accessibilityIdentifier(accessibility.identifier)
+                    .accessibilityLabel(accessibility.name)
+                    .accessibilityValue(accessibility.state)
+                    .accessibilityAddTraits(.updatesFrequently)
+                }
+            }
+
             Section {
                 // The approving account is always visible so a mistaken
                 // approval is immediately obvious (spec edge case).
-                Label(model.accountName.isEmpty ? "Signed in" : model.accountName,
-                      systemImage: "person.crop.circle")
-                    .font(.footnote)
-                    .foregroundStyle(.secondary)
+                Label(
+                    model.accountName.isEmpty ? "Signed in" : model.accountName,
+                    systemImage: "person.crop.circle"
+                )
+                .font(.footnote)
+                .foregroundStyle(.secondary)
                 Button(role: .destructive) {
                     Task { await model.signOut() }
                 } label: {

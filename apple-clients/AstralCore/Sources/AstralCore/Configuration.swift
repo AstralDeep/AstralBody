@@ -55,9 +55,10 @@ public enum AstralConfig {
         bundle: Bundle = .main,
         override: String? = nil
     ) -> String {
-        resolve(override: override,
-                infoValue: bundle.object(forInfoDictionaryKey: serverBaseURLInfoKey) as? String,
-                fallback: fallbackServerBaseURL)
+        resolve(
+            override: override,
+            infoValue: bundle.object(forInfoDictionaryKey: serverBaseURLInfoKey) as? String,
+            fallback: fallbackServerBaseURL)
     }
 
     /// Resolve the Keycloak authority. `override` wins when it is a usable endpoint.
@@ -65,9 +66,10 @@ public enum AstralConfig {
         bundle: Bundle = .main,
         override: String? = nil
     ) -> String {
-        resolve(override: override,
-                infoValue: bundle.object(forInfoDictionaryKey: keycloakAuthorityInfoKey) as? String,
-                fallback: fallbackKeycloakAuthority)
+        resolve(
+            override: override,
+            infoValue: bundle.object(forInfoDictionaryKey: keycloakAuthorityInfoKey) as? String,
+            fallback: fallbackKeycloakAuthority)
     }
 
     /// The resolution ladder, isolated from `Bundle` so it can be tested headlessly.
@@ -87,11 +89,11 @@ public enum AstralConfig {
         guard let raw else { return nil }
         let trimmed = raw.trimmingCharacters(in: .whitespacesAndNewlines)
         guard !trimmed.isEmpty,
-              let url = URL(string: trimmed),
-              let scheme = url.scheme?.lowercased(),
-              scheme == "http" || scheme == "https",
-              let host = url.host,
-              !host.isEmpty
+            let url = URL(string: trimmed),
+            let scheme = url.scheme?.lowercased(),
+            scheme == "http" || scheme == "https",
+            let host = url.host,
+            !host.isEmpty
         else { return nil }
         return trimmed
     }

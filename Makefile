@@ -5,9 +5,29 @@
 # both yield that form; native shells fall through to $(CURDIR).
 HOST_PWD := $(shell cygpath -m "$(CURDIR)" 2>/dev/null || pwd -W 2>/dev/null || echo "$(CURDIR)")
 
-.PHONY: help up down restart build ps logs logs-db shell psql \
+.PHONY: help up down restart apply-config build ps logs logs-db shell psql \
         sync sync-backend \
-        test test-backend lint lint-backend
+        test test-backend check-060-selection test-060 lint lint-backend \
+        prepare-release-evidence
+
+FEATURE_060_FOCUSED_TESTS := \
+	tests/test_release_contract_schemas.py \
+	tests/test_staging_fixtures_060.py \
+	tests/test_documentation_060.py \
+	tests/test_status_lifecycle_060.py \
+	tests/test_ui_protocol_manifest.py \
+	tests/test_quickstart_commands.py \
+	tests/test_ci_javascript_lint.py
+
+# The running product container intentionally mounts only mutable backend data,
+# not the repository root. Feature-060 contract tests also inspect tracked
+# specs/scripts/workflows, so run that lane in the same image with a read-only
+# full-tree mount instead of assuming those paths exist inside `astraldeep`.
+FEATURE_060_TEST_CONTAINER := docker run --rm \
+	-e PYTHONDONTWRITEBYTECODE=1 \
+	-v "$(HOST_PWD):/app:ro" \
+	-w /app/backend \
+	astraldeep:latest
 
 ## ---------- Lifecycle ----------
 
@@ -19,6 +39,10 @@ down: ## Stop containers (volumes preserved)
 
 restart: ## Restart the astraldeep app container
 	docker compose restart astraldeep
+
+apply-config: ## Recreate the app with boot-time config and report the safe BYO flag
+	docker compose up -d --force-recreate astraldeep
+	docker compose exec -T astraldeep python -c 'import os; value = os.getenv("FF_BYO_AGENTS", "false").strip().lower(); print("Effective FF_BYO_AGENTS=" + ("true" if value in {"1", "true", "yes"} else "false"))'
 
 build: ## Build images without starting containers
 	docker compose build
@@ -58,7 +82,21 @@ sync: sync-backend ## Sync backend source into the running container
 test-backend: ## Run pytest inside the astraldeep container
 	docker exec astraldeep bash -c "cd /app/backend && python -m pytest -q"
 
+check-060-selection: ## Collect the focused 060 setup/contract suite; empty selection fails
+	$(FEATURE_060_TEST_CONTAINER) python -m pytest -p no:cacheprovider --collect-only -q $(FEATURE_060_FOCUSED_TESTS)
+
+test-060: check-060-selection ## Run the focused 060 setup/contract suite
+	$(FEATURE_060_TEST_CONTAINER) python -m pytest -p no:cacheprovider -q $(FEATURE_060_FOCUSED_TESTS)
+
 test: test-backend ## Run all tests
+
+## ---------- Release evidence (feature 060) ----------
+
+# Deterministic local pre-push evidence command (T107). Diagnostic only: the
+# emitted JSON always states protected_release_authorization: false and only
+# the protected-decision GitHub job can produce a trusted release decision.
+prepare-release-evidence: ## Collect, normalize, and parse local release evidence (diagnostic, BASE_SHA required)
+	python3 scripts/prepare_release_evidence.py --base-sha "$${BASE_SHA}" --candidate-sha "$$(git rev-parse HEAD)"
 
 ## ---------- Lint ----------
 

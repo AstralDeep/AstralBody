@@ -1,0 +1,243 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "https://astraldeep.local/specs/060/windows-deployment-profile.schema.json",
+  "title": "AstralDeep Windows Deployment Profile",
+  "description": "Strict, non-secret, whole-profile input resolved and frozen before Qt, authentication, transport, or personal-agent hosting is constructed.",
+  "type": "object",
+  "additionalProperties": false,
+  "required": [
+    "schema_version",
+    "profile_id",
+    "release_id",
+    "client_version",
+    "distribution",
+    "local_only",
+    "authority",
+    "websocket_endpoint",
+    "client_id",
+    "auth_mode",
+    "override_policy",
+    "agent_connection"
+  ],
+  "properties": {
+    "schema_version": {
+      "const": 1
+    },
+    "profile_id": {
+      "type": "string",
+      "pattern": "^[a-z0-9][a-z0-9._-]{2,63}$",
+      "not": {
+        "enum": ["changeme", "placeholder", "example", "default"]
+      }
+    },
+    "release_id": {
+      "type": "string",
+      "pattern": "^[a-zA-Z0-9][a-zA-Z0-9._-]{2,127}$",
+      "not": {
+        "enum": ["changeme", "placeholder", "example", "default"]
+      }
+    },
+    "client_version": {
+      "type": "string",
+      "pattern": "^(?![\\s\\S]*\\s)(0|[1-9][0-9]*)\\.(0|[1-9][0-9]*)\\.(0|[1-9][0-9]*)(?:-(?:(?:0|[1-9][0-9]*|[0-9]*[A-Za-z-][0-9A-Za-z-]*)(?:\\.(?:0|[1-9][0-9]*|[0-9]*[A-Za-z-][0-9A-Za-z-]*))*))?(?:\\+[0-9A-Za-z-]+(?:\\.[0-9A-Za-z-]+)*)?$"
+    },
+    "distribution": {
+      "type": "string",
+      "enum": ["production", "generic_developer"]
+    },
+    "local_only": {
+      "type": "boolean"
+    },
+    "authority": {
+      "type": "string",
+      "format": "uri",
+      "minLength": 12,
+      "maxLength": 2048,
+      "not": {
+        "enum": [
+          "https://example.com",
+          "https://example.invalid",
+          "https://changeme.invalid"
+        ]
+      },
+      "allOf": [
+        {
+          "not": {
+            "pattern": "(?:^[A-Za-z][A-Za-z0-9+.-]*://[^/?#]*@)|[?#]"
+          }
+        }
+      ]
+    },
+    "websocket_endpoint": {
+      "type": "string",
+      "format": "uri",
+      "minLength": 10,
+      "maxLength": 2048,
+      "not": {
+        "enum": [
+          "wss://example.com/ws",
+          "wss://example.invalid/ws",
+          "wss://changeme.invalid/ws"
+        ]
+      },
+      "allOf": [
+        {
+          "not": {
+            "pattern": "(?:^[A-Za-z][A-Za-z0-9+.-]*://[^/?#]*@)|[?#]"
+          }
+        }
+      ]
+    },
+    "client_id": {
+      "type": "string",
+      "pattern": "^[A-Za-z0-9][A-Za-z0-9._:-]{2,127}$",
+      "not": {
+        "enum": ["changeme", "placeholder", "example", "default"]
+      }
+    },
+    "auth_mode": {
+      "type": "string",
+      "enum": ["keycloak_oidc_pkce", "keycloak_bff"]
+    },
+    "override_policy": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": [
+        "managed_profile_allowed",
+        "command_line_profile_allowed",
+        "persisted_profile_allowed",
+        "configure_dialog_allowed",
+        "development_defaults_allowed"
+      ],
+      "properties": {
+        "managed_profile_allowed": { "type": "boolean" },
+        "command_line_profile_allowed": { "type": "boolean" },
+        "persisted_profile_allowed": { "type": "boolean" },
+        "configure_dialog_allowed": { "type": "boolean" },
+        "development_defaults_allowed": { "type": "boolean" }
+      }
+    },
+    "agent_connection": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["byo_host", "legacy_tools"],
+      "properties": {
+        "byo_host": {
+          "type": "object",
+          "additionalProperties": false,
+          "required": ["disposition"],
+          "properties": {
+            "disposition": {
+              "type": "string",
+              "enum": ["authenticated_ui_tunnel", "disabled"]
+            }
+          }
+        },
+        "legacy_tools": {
+          "type": "object",
+          "additionalProperties": false,
+          "required": ["disposition", "credential_source"],
+          "properties": {
+            "disposition": {
+              "type": "string",
+              "enum": ["disabled", "managed_api_key"]
+            },
+            "credential_source": {
+              "type": "string",
+              "enum": ["none", "managed_environment_agent_api_key"]
+            }
+          },
+          "allOf": [
+            {
+              "if": {
+                "properties": { "disposition": { "const": "disabled" } },
+                "required": ["disposition"]
+              },
+              "then": {
+                "properties": { "credential_source": { "const": "none" } }
+              }
+            },
+            {
+              "if": {
+                "properties": { "disposition": { "const": "managed_api_key" } },
+                "required": ["disposition"]
+              },
+              "then": {
+                "properties": {
+                  "credential_source": { "const": "managed_environment_agent_api_key" }
+                }
+              }
+            }
+          ]
+        }
+      }
+    }
+  },
+  "allOf": [
+    {
+      "if": {
+        "properties": { "local_only": { "const": false } },
+        "required": ["local_only"]
+      },
+      "then": {
+        "properties": {
+          "authority": { "pattern": "^https://" },
+          "websocket_endpoint": { "pattern": "^wss://" }
+        }
+      },
+      "else": {
+        "properties": {
+          "authority": {
+            "pattern": "^https?://(?:localhost|127\\.0\\.0\\.1|\\[::1\\])(?::[0-9]{1,5})?(?:/|$)"
+          },
+          "websocket_endpoint": {
+            "pattern": "^wss?://(?:localhost|127\\.0\\.0\\.1|\\[::1\\])(?::[0-9]{1,5})?/"
+          }
+        }
+      }
+    },
+    {
+      "if": {
+        "properties": { "distribution": { "const": "production" } },
+        "required": ["distribution"]
+      },
+      "then": {
+        "properties": {
+          "local_only": { "const": false },
+          "authority": {
+            "not": {
+              "pattern": "^https?://(?:localhost|127\\.0\\.0\\.1|\\[::1\\])(?::[0-9]{1,5})?(?:/|$)"
+            }
+          },
+          "websocket_endpoint": {
+            "not": {
+              "pattern": "^wss?://(?:localhost|127\\.0\\.0\\.1|\\[::1\\])(?::[0-9]{1,5})?/"
+            }
+          },
+          "override_policy": {
+            "properties": {
+              "configure_dialog_allowed": { "const": false },
+              "development_defaults_allowed": { "const": false }
+            }
+          },
+          "agent_connection": {
+            "properties": {
+              "byo_host": {
+                "properties": {
+                  "disposition": { "const": "authenticated_ui_tunnel" }
+                }
+              },
+              "legacy_tools": {
+                "properties": {
+                  "disposition": { "const": "disabled" },
+                  "credential_source": { "const": "none" }
+                }
+              }
+            }
+          }
+        }
+      }
+    }
+  ],
+  "$comment": "The feature-060 bundled release instance must carry client_version 0.4.0. The pre-sign validator additionally compares every value and the canonical document digest to the release-owned allowlist; JSON Schema alone cannot prove release approval. No credential-value property exists by design."
+}

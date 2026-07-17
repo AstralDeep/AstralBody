@@ -28,8 +28,10 @@ import hashlib
 import json
 import logging
 import os
+import re
 import urllib.request
 from dataclasses import dataclass
+from functools import total_ordering
 from typing import Optional
 
 logger = logging.getLogger("astral.integrity")
@@ -60,6 +62,8 @@ class ReleaseAssets:
     bundle_url: str
     html_url: str
     tag: str = ""
+    release_id: int = 0
+    asset_ids: tuple[int, int, int] = (0, 0, 0)
 
 
 @dataclass
@@ -68,6 +72,95 @@ class VerifyResult:
     reason: str = ""
     exe_path: str = ""
     version: str = ""
+
+
+_SEMVER_RE = re.compile(
+    r"\A(0|[1-9][0-9]*)\.(0|[1-9][0-9]*)\.(0|[1-9][0-9]*)"
+    r"(?:-((?:0|[1-9][0-9]*|[0-9]*[A-Za-z-][0-9A-Za-z-]*)"
+    r"(?:\.(?:0|[1-9][0-9]*|[0-9]*[A-Za-z-][0-9A-Za-z-]*))*))?"
+    r"(?:\+([0-9A-Za-z-]+(?:\.[0-9A-Za-z-]+)*))?\Z"
+)
+
+
+@total_ordering
+@dataclass(frozen=True)
+class SemVer:
+    """Strict Semantic Version 2.0 identity and precedence value."""
+
+    major: int
+    minor: int
+    patch: int
+    prerelease: tuple[str, ...] = ()
+    build: tuple[str, ...] = ()
+
+    def __str__(self) -> str:
+        value = f"{self.major}.{self.minor}.{self.patch}"
+        if self.prerelease:
+            value += "-" + ".".join(self.prerelease)
+        if self.build:
+            value += "+" + ".".join(self.build)
+        return value
+
+    def _compare_precedence(self, other: "SemVer") -> int:
+        left_core = (self.major, self.minor, self.patch)
+        right_core = (other.major, other.minor, other.patch)
+        if left_core != right_core:
+            return -1 if left_core < right_core else 1
+        if not self.prerelease and not other.prerelease:
+            return 0
+        if not self.prerelease:
+            return 1
+        if not other.prerelease:
+            return -1
+        for left, right in zip(self.prerelease, other.prerelease):
+            if left == right:
+                continue
+            left_numeric = left.isdigit()
+            right_numeric = right.isdigit()
+            if left_numeric and right_numeric:
+                return -1 if int(left) < int(right) else 1
+            if left_numeric != right_numeric:
+                return -1 if left_numeric else 1
+            return -1 if left < right else 1
+        if len(self.prerelease) == len(other.prerelease):
+            return 0
+        return -1 if len(self.prerelease) < len(other.prerelease) else 1
+
+    def __lt__(self, other: object) -> bool:
+        if not isinstance(other, SemVer):
+            return NotImplemented
+        return self._compare_precedence(other) < 0
+
+    def __eq__(self, other: object) -> bool:
+        if not isinstance(other, SemVer):
+            return False
+        # Build metadata does not participate in SemVer precedence/equality.
+        return self._compare_precedence(other) == 0
+
+
+def parse_semver(value: str) -> SemVer:
+    """Parse exact SemVer without trimming, prefix removal, or line tolerance."""
+
+    if not isinstance(value, str) or any(character.isspace() for character in value):
+        raise ValueError("version must be strict SemVer without whitespace")
+    match = _SEMVER_RE.fullmatch(value)
+    if match is None:
+        raise ValueError("version must be strict SemVer")
+    prerelease = tuple(match.group(4).split(".")) if match.group(4) else ()
+    build = tuple(match.group(5).split(".")) if match.group(5) else ()
+    return SemVer(
+        int(match.group(1)),
+        int(match.group(2)),
+        int(match.group(3)),
+        prerelease,
+        build,
+    )
+
+
+def is_newer_version(candidate: str, current: str) -> bool:
+    """Return whether ``candidate`` has greater strict SemVer precedence."""
+
+    return parse_semver(candidate) > parse_semver(current)
 
 
 def _api_get(path: str) -> Optional[dict]:
@@ -94,20 +187,61 @@ def latest_release() -> Optional[ReleaseAssets]:
     data = _api_get(f"repos/{_REPO}/releases/latest")
     if not data:
         return None
-    assets = {a.get("name"): a for a in (data.get("assets") or [])}
+    release_id = data.get("id")
+    tag = data.get("tag_name")
+    if isinstance(release_id, bool) or not isinstance(release_id, int) or release_id <= 0:
+        logger.info("release missing immutable numeric identity")
+        return None
+    if not isinstance(tag, str) or not tag.startswith("v"):
+        logger.info("release tag is not v<strict-semver>")
+        return None
+    try:
+        version = str(parse_semver(tag[1:]))
+    except ValueError:
+        logger.info("release tag is not v<strict-semver>")
+        return None
+    # Publisher contract (spec 060, FR-048): the protected publisher names the
+    # release exactly its tag and only ever transitions a non-draft,
+    # non-prerelease release to public/latest. Enforce the same contract here
+    # fail-closed. The live GitHub API always carries ``name`` (null when
+    # unset — refused); the key-absent default only tolerates pre-060 fixtures.
+    if data.get("name", tag) != tag:
+        logger.info("release name does not equal its tag")
+        return None
+    if data.get("draft") or data.get("prerelease"):
+        logger.info("release is draft/prerelease; refusing selection")
+        return None
+    asset_rows = data.get("assets") or []
+    required_names = (_EXE_NAME, _SHA_NAME, _BUNDLE_NAME)
+    if len(asset_rows) != len(required_names) or any(
+        sum(row.get("name") == name for row in asset_rows) != 1 for name in required_names
+    ):
+        logger.info("release does not contain exactly the three required assets")
+        return None
+    assets = {a.get("name"): a for a in asset_rows}
     exe = assets.get(_EXE_NAME, {}).get("browser_download_url", "")
     sha = assets.get(_SHA_NAME, {}).get("browser_download_url", "")
     bundle = assets.get(_BUNDLE_NAME, {}).get("browser_download_url", "")
-    if not exe or not sha or not bundle:
+    asset_ids = tuple(assets[name].get("id") for name in required_names)
+    if (
+        not exe
+        or not sha
+        or not bundle
+        or len({exe, sha, bundle}) != 3
+        or any(isinstance(value, bool) or not isinstance(value, int) or value <= 0 for value in asset_ids)
+        or len(set(asset_ids)) != 3
+    ):
         logger.info("release missing required assets (exe/sha/bundle)")
         return None
     return ReleaseAssets(
-        version=(data.get("name") or data.get("tag_name") or "").strip(),
+        version=version,
         exe_url=exe,
         sha_url=sha,
         bundle_url=bundle,
         html_url=data.get("html_url", ""),
-        tag=(data.get("tag_name") or "").strip(),
+        tag=tag,
+        release_id=release_id,
+        asset_ids=asset_ids,
     )
 
 
@@ -295,10 +429,6 @@ def verify_running_exe(exe_path: str, *, workdir: str, _release=None) -> VerifyR
         _cleanup(bundle_path)
 
 
-def _norm_version(v: str) -> str:
-    return (v or "").strip().lstrip("vV")
-
-
 def check_at_launch(
     current_version: str,
     exe_path: str,
@@ -344,23 +474,39 @@ def check_at_launch(
                 "version": current_version,
                 "message": f"Astral {current_version} — integrity check skipped (offline)",
             }
-        latest = rel.version or rel.tag or ""
-        if _norm_version(latest) == _norm_version(current_version):
+        try:
+            current = parse_semver(current_version)
+            latest = parse_semver(rel.version)
+        except ValueError:
+            return {
+                "status": "invalid_version",
+                "level": "warning",
+                "version": rel.version,
+                "message": "Release metadata has an invalid semantic version; update ignored.",
+            }
+        if latest == current:
             res = verify_running(exe_path, workdir=workdir)
             if res.ok:
                 return {
                     "status": "verified",
                     "level": "success",
-                    "version": latest,
-                    "message": f"✓ Integrity verified — {latest} (SHA-256 + sigstore)",
+                    "version": rel.version,
+                    "message": f"✓ Integrity verified — {rel.version} (SHA-256 + sigstore)",
                 }
             return {
                 "status": "unverified",
                 "level": "error",
-                "version": latest,
+                "version": rel.version,
                 "message": f"⚠ This build's signature did not verify ({res.reason})",
             }
-        # Running build differs from the latest release → a newer release exists.
+        if latest < current:
+            return {
+                "status": "current_newer",
+                "level": "muted",
+                "version": current_version,
+                "message": f"Astral {current_version}",
+            }
+        # A strictly greater release exists.
         # Verify that release's artifact before offering it as an update.
         res = verify_latest_fn(workdir)
         if res.ok:

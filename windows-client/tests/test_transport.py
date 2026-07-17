@@ -46,7 +46,7 @@ def test_should_reconnect_states(qapp):
 def test_offline_sends_queue_fifo(qapp):
     c = _client(qapp)
     c.send_event("get_history", {})
-    c.send_chat("hello", chat_id="c1")
+    c.send_chat("hello", chat_id="11111111-1111-4111-8111-111111111111")
     assert len(c._pending) == 2
     first = json.loads(c._pending[0])
     assert first["action"] == "get_history"
@@ -55,17 +55,42 @@ def test_offline_sends_queue_fifo(qapp):
 def test_queue_overflow_drops_oldest_and_signals(qapp):
     c = _client(qapp)
     drops: list[str] = []
+    dropped_submissions = []
     c.status.connect(lambda s: drops.append(s) if s.startswith("send_dropped:") else None)
+    c.submission_dropped.connect(dropped_submissions.append)
     for i in range(MAX_QUEUE + 3):
         c.send_event("chat_message", {"message": f"m{i}"})
     assert len(c._pending) == MAX_QUEUE
     assert len(drops) == 3  # overflow surfaced, never a silent vanish
+    assert len(dropped_submissions) == 3
     # oldest were dropped: the queue starts at m3
     assert json.loads(c._pending[0])["payload"]["message"] == "m3"
 
 
+def test_malformed_queued_identity_is_rejected_visibly(qapp):
+    c = _client(qapp)
+    statuses: list[str] = []
+    c.status.connect(statuses.append)
+
+    c._queue_frame(
+        json.dumps(
+            {
+                "type": "ui_event",
+                "action": "curated_example",
+                "submission_id": "not-a-uuid",
+                "request_generation": "33333333-3333-4333-8333-333333333333",
+                "payload": {},
+            }
+        )
+    )
+
+    assert not c._pending
+    assert statuses == ["send_rejected:curated_example"]
+
+
 def test_flush_pending_sends_fifo_then_empties(qapp):
     c = _client(qapp)
+    c.connection_generation = "22222222-2222-4222-8222-222222222222"
     c.send_event("a", {})
     c.send_event("b", {})
 
@@ -80,6 +105,67 @@ def test_flush_pending_sends_fifo_then_empties(qapp):
     assert not c._pending
 
 
+def test_replay_preparation_rejection_requeues_and_is_visible(qapp):
+    c = _client(qapp)
+    local = c.send_event("curated_example", {})
+    c.connection_generation = "22222222-2222-4222-8222-222222222222"
+    statuses: list[str] = []
+    c.status.connect(statuses.append)
+    c.queued_replay_preparation.connect(
+        lambda _preparation, acknowledgement: acknowledgement.complete(
+            False,
+            "test rejection",
+        )
+    )
+    c.require_queued_replay_preparation()
+
+    class FakeWs:
+        async def send(self, _frame):
+            raise AssertionError("rejected replay must not reach the socket")
+
+    with pytest.raises(ConnectionError):
+        asyncio.run(c._flush_pending(FakeWs()))
+
+    assert len(c._pending) == 1
+    retained = json.loads(c._pending[0])
+    assert retained["submission_id"] == local.submission_id
+    assert statuses == ["replay_deferred:curated_example"]
+
+
+def test_disconnect_during_replay_handshake_requeues_before_send(qapp):
+    c = _client(qapp)
+    local = c.send_chat("queued", "11111111-1111-4111-8111-111111111111")
+    c.connection_generation = "22222222-2222-4222-8222-222222222222"
+    statuses: list[str] = []
+    c.status.connect(statuses.append)
+
+    class SocketState:
+        name = "OPEN"
+
+    class FakeWs:
+        state = SocketState()
+
+        async def send(self, _frame):
+            raise AssertionError("disconnected replay must not reach the socket")
+
+    ws = FakeWs()
+
+    def disconnect(_preparation, acknowledgement):
+        acknowledgement.complete(True)
+        ws.state.name = "CLOSED"
+
+    c.queued_replay_preparation.connect(disconnect)
+    c.require_queued_replay_preparation()
+
+    with pytest.raises(ConnectionError):
+        asyncio.run(c._flush_pending(ws))
+
+    assert len(c._pending) == 1
+    retained = json.loads(c._pending[0])
+    assert retained["submission_id"] == local.submission_id
+    assert statuses == ["replay_deferred:chat_message"]
+
+
 def test_auth_required_holds_reconnect(qapp):
     c = _client(qapp)
     # simulate the inbound handling contract: transport flags the hold
@@ -92,6 +178,7 @@ def test_frame_sent_in_connect_window_is_delivered(qapp):
     `_connected` must still go out on THIS connection (the second drain), not
     sit queued until the next reconnect."""
     c = _client(qapp)
+    c.connection_generation = "22222222-2222-4222-8222-222222222222"
     sent: list[str] = []
 
     class FakeWs:

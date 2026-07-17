@@ -7,6 +7,7 @@ auth_revocation_queue.client_id migration against the live Postgres.
 """
 import asyncio
 import json
+from pathlib import Path
 
 import pytest
 from fastapi import FastAPI
@@ -14,6 +15,23 @@ from fastapi.testclient import TestClient
 
 from orchestrator import web_auth
 from orchestrator.auth import auth_router, get_current_user_payload
+
+
+REPO_ROOT = Path(__file__).resolve().parents[2]
+
+
+def _swift_function(source: str, signature: str) -> str:
+    start = source.index(signature)
+    opening = source.index("{", start)
+    depth = 0
+    for index in range(opening, len(source)):
+        if source[index] == "{":
+            depth += 1
+        elif source[index] == "}":
+            depth -= 1
+            if depth == 0:
+                return source[start : index + 1]
+    raise AssertionError(f"unterminated Swift function: {signature}")
 
 
 def _client(monkeypatch, payload=None):
@@ -182,3 +200,33 @@ def test_client_local_manifest_untouched():
     manifest = json.loads((Path(__file__).resolve().parents[1] / "shared" /
                            "ui_protocol.json").read_text(encoding="utf-8"))
     assert "native_logout" not in manifest["accept_actions"]
+
+
+@pytest.mark.skipif(
+    not (REPO_ROOT / "apple-clients").is_dir(),  # repo root absent inside the product image
+    reason="repo-root tooling files are not part of the product image",
+)
+@pytest.mark.parametrize(
+    "relative_path",
+    [
+        "apple-clients/AstralApp/AstralApp/AppModel.swift",
+        "apple-clients/AstralWatch/WatchModel.swift",
+    ],
+)
+def test_apple_sign_out_wipes_local_credentials_before_any_network_await(
+    relative_path,
+):
+    """A killed or frozen revocation request cannot restore the prior account."""
+
+    source = (REPO_ROOT / relative_path).read_text(encoding="utf-8")
+    body = _swift_function(source, "func signOut(revokeRemote: Bool = true) async")
+
+    wipe = body.index("store.wipe()")
+    token_clear = body.index("tokens = nil")
+    first_await = body.index("await ")
+    remote_logout = body.index("logoutClient.logout")
+    assert "let logoutClient = RestClient(serverBase: serverBase) { access }" in body
+    assert wipe < first_await < remote_logout
+    assert token_clear < first_await
+    assert "refreshTask?.cancel()" in body
+    assert "wsTask?.cancel()" in body

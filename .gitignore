@@ -18,6 +18,7 @@ docs/*
 # 2026-07-07 release audit; its four siblings had needed `git add -f`).
 !docs/keycloak*.md
 !docs/production-deployment.md
+!docs/byo-client-agents.md
 /.ruff_cache/
 Qualifying_Exam/
 .docker-cache/
@@ -33,6 +34,7 @@ docker_logs_fixes_known_remaining.md
 
 .claude/
 .kilocode/
+.specify/integrations/.cache/
 
 # General
 .DS_Store
@@ -78,6 +80,7 @@ yarn-error.log*
 .pnpm-debug.log*
 dist/
 coverage/
+tooling/web-ci/test-results/
 
 # Environment Variables
 .env

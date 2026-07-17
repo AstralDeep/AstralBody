@@ -1,0 +1,9 @@
+# Spec 060 CI-only Python tooling. This manifest is never installed into a
+# product runtime or shipping client artifact. Keep every direct input exact;
+# requirements.lock.txt owns the complete transitive hashes.
+coverage[toml]==7.15.2
+diff-cover==10.3.0
+psycopg2-binary==2.9.12
+pytest==9.1.1
+pytest-cov==7.0.0
+ruff==0.15.21

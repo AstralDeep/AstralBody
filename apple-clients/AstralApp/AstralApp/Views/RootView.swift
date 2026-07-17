@@ -1,10 +1,10 @@
+import AstralCore
 // Feature 051 — the app shell, a 1:1 match to the Android RootScaffold: a
 // minimal top bar (square brand mark · New pill · Recent · server-owned chrome
 // actions · Settings gear whose dropdown is built ENTIRELY from the server
 // `chrome_menu` model), a connection strip + dismissible banner, and the
 // navigable surfaces (Chat / Agents / History / Audit / Surface).
 import SwiftUI
-import AstralCore
 
 struct RootView: View {
     @Environment(AppModel.self) var model
@@ -28,10 +28,12 @@ struct RootView: View {
     private var rootBackground: some View {
         ZStack {
             p.bg
-            RadialGradient(colors: [p.secondary.opacity(0.10), .clear],
-                           center: .topTrailing, startRadius: 0, endRadius: 500)
-            RadialGradient(colors: [p.primary.opacity(0.08), .clear],
-                           center: .bottomLeading, startRadius: 0, endRadius: 500)
+            RadialGradient(
+                colors: [p.secondary.opacity(0.10), .clear],
+                center: .topTrailing, startRadius: 0, endRadius: 500)
+            RadialGradient(
+                colors: [p.primary.opacity(0.08), .clear],
+                center: .bottomLeading, startRadius: 0, endRadius: 500)
         }
     }
 
@@ -54,12 +56,14 @@ struct RootView: View {
             GeometryReader { geo in
                 Color.clear
                     .onAppear {
-                        model.viewportChanged(width: Int(geo.size.width),
-                                              height: Int(geo.size.height))
+                        model.viewportChanged(
+                            width: Int(geo.size.width),
+                            height: Int(geo.size.height))
                     }
                     .onChange(of: geo.size) { _, size in
-                        model.viewportChanged(width: Int(size.width),
-                                              height: Int(size.height))
+                        model.viewportChanged(
+                            width: Int(size.width),
+                            height: Int(size.height))
                     }
             }
         )
@@ -99,7 +103,9 @@ struct AstralTopBar: View {
             if !model.mandatorySurface {
                 newButton
 
-                Button { model.goTo(.history) } label: {
+                Button {
+                    model.goTo(.history)
+                } label: {
                     Image(systemName: "bubble.left.and.bubble.right")
                         .font(.system(size: 18)).foregroundStyle(p.text)
                 }
@@ -163,8 +169,9 @@ struct AstralTopBar: View {
             Button(role: .destructive) {
                 Task { await model.signOut() }
             } label: {
-                Label(model.chromeMenu?.signout.label ?? "Sign out",
-                      systemImage: "rectangle.portrait.and.arrow.right")
+                Label(
+                    model.chromeMenu?.signout.label ?? "Sign out",
+                    systemImage: "rectangle.portrait.and.arrow.right")
             }
         } label: {
             Image(systemName: "gearshape").font(.system(size: 18)).foregroundStyle(p.text)
@@ -293,9 +300,10 @@ private func previewChrome() -> ChromeMenuModel? {
 private func previewCanvas() -> [AstralComponent] {
     // Authored with AstralPrims (the Swift astralprims mirror).
     [
-        AstralPrims.Hero(title: "Q3 Sales",
-                         subtitle: "Revenue up 12% quarter over quarter",
-                         variant: "gradient"),
+        AstralPrims.Hero(
+            title: "Q3 Sales",
+            subtitle: "Revenue up 12% quarter over quarter",
+            variant: "gradient"),
         AstralPrims.MetricCard(title: "Revenue", value: "$1.2M", subtitle: "+12%"),
     ].compactMap { AstralComponent(json: $0.toDict()) }
 }

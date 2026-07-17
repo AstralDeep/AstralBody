@@ -1,112 +1,234 @@
-# Feature 039 — build, sign (keyless sigstore), and release the Windows desktop
-# client as a GitHub Release. Fires only on version tags (v*) so it does not
-# gate PRs or slow the main CI. Separate from ci.yml by design.
-#
-# Produces three assets per release:
-#   AstralDeep.exe   — the PyInstaller-built native client
-#   SHA256SUMS       — the SHA-256 of the exe (the client's primary integrity check)
-#   cosign.bundle    — the sigstore bundle (keyless, signed with the workflow's
-#                      GitHub OIDC identity; verified client-side against the
-#                      AstralDeep/AstralDeep workflow identity)
-#
-# No long-lived signing secret: sigstore keyless signing uses the job's OIDC
-# token (permissions.id-token: write). The client verifies both the hash and
-# the sigstore signature before it ever runs a downloaded binary.
-
+# Spec 060 (T119) — the exact-byte-pinned v0.3.0-compatible BRIDGE SIGNER.
+# This workflow's path and name are pinned by the shipped Windows updater's
+# sigstore identity policy (windows-client/astral_client/integrity.py), so the
+# legacy 0.3.0 verifier keeps validating new signatures. The bridge NEVER
+# rebuilds: it downloads the exact archived build-once executable by the
+# artifact id recorded in the trusted decision, re-hashes it, detach-signs the
+# identical bytes keylessly, and uploads ONLY a run artifact. Publication is a
+# separate environment-approved workflow; this job holds no write authority.
 name: Release Windows client
 
 on:
   push:
     tags: ["v*"]
+  # Dispatch exists for rehearsal in a DISPOSABLE repository only (T128); the
+  # signing identity then carries the branch ref, which the shipped updater
+  # policy rejects — rehearsals prove mechanics, never produce shippable
+  # signatures for this repository.
   workflow_dispatch:
+    inputs:
+      tag:
+        description: Existing v<semver> tag to rehearse against
+        required: true
+        type: string
 
 permissions:
-  contents: write   # create the GitHub Release + upload assets
-  id-token: write   # sigstore keyless signing (OIDC)
+  contents: read
+  actions: read
+  id-token: write
 
 jobs:
-  build-sign-release:
-    runs-on: windows-latest
-    timeout-minutes: 45
+  bridge-sign:
+    runs-on: ubuntu-latest
+    timeout-minutes: 30
+    env:
+      GH_TOKEN: ${{ github.token }}
     steps:
-      - uses: actions/checkout@v5
+      - name: Resolve the exact tag and target commit
+        id: resolve
+        shell: bash
+        run: |
+          set -euo pipefail
+          if [ "${{ github.event_name }}" = "workflow_dispatch" ]; then
+            TAG="${{ inputs.tag }}"
+          else
+            TAG="${{ github.ref_name }}"
+          fi
+          [[ "$TAG" =~ ^v(0|[1-9][0-9]*)\.(0|[1-9][0-9]*)\.(0|[1-9][0-9]*)$ ]] || {
+            echo "::error::tag must be v<strict-semver>: $TAG" >&2; exit 1; }
+          if [ "${{ github.event_name }}" = "workflow_dispatch" ]; then
+            OBJECT_SHA="$(gh api "repos/$GITHUB_REPOSITORY/git/ref/tags/$TAG" --jq .object.sha)"
+            OBJECT_TYPE="$(gh api "repos/$GITHUB_REPOSITORY/git/ref/tags/$TAG" --jq .object.type)"
+            if [ "$OBJECT_TYPE" = "tag" ]; then
+              TARGET_SHA="$(gh api "repos/$GITHUB_REPOSITORY/git/tags/$OBJECT_SHA" --jq .object.sha)"
+            else
+              TARGET_SHA="$OBJECT_SHA"
+            fi
+          else
+            TARGET_SHA="${{ github.sha }}"
+          fi
+          [[ "$TARGET_SHA" =~ ^[0-9a-f]{40}$ ]]
+          echo "tag=$TAG" >> "$GITHUB_OUTPUT"
+          echo "target_sha=$TARGET_SHA" >> "$GITHUB_OUTPUT"
 
-      - uses: actions/setup-python@v6
+      - name: Check out the exact signed-for commit
+        uses: actions/checkout@93cb6efe18208431cddfb8368fd83d5badbf9bfd # v5.0.1
         with:
-          python-version: "3.11"
+          ref: ${{ steps.resolve.outputs.target_sha }}
+          persist-credentials: false
 
-      # Guard: the pushed tag must equal v<astral_client.__version__>. Without
-      # this, a tag pushed against a stale version constant builds and signs
-      # cleanly but ships an exe whose launch integrity check permanently
-      # reports "A verified update is available" (it compares the baked
-      # __version__ to the latest release tag). Tag-push runs only —
-      # workflow_dispatch runs from a branch ref and is exempt.
-      - name: Tag matches astral_client.__version__
-        if: startsWith(github.ref, 'refs/tags/')
-        working-directory: windows-client
+      # The decision names the windows candidate's originating run, attempt,
+      # and artifact id; the bridge consumes those EXACT identities, never a
+      # latest/name-based lookup.
+      - name: Locate and verify the trusted decision for this commit
         shell: bash
         env:
-          TAG: ${{ github.ref_name }}
+          TARGET_SHA: ${{ steps.resolve.outputs.target_sha }}
         run: |
-          python - <<'EOF'
-          import os, sys
-          import astral_client
-          tag = os.environ["TAG"]
-          want = f"v{astral_client.__version__}"
-          if tag != want:
-              sys.exit(f"Tag {tag!r} != v<__version__> ({want!r}) — bump "
-                       "windows-client/astral_client/__init__.py before tagging.")
-          print(f"tag {tag} matches __version__")
-          EOF
+          set -euo pipefail
+          mkdir -p build/060/bridge build/060/decision
+          DECISION_ARTIFACT_ID=""
+          for run_id in $(gh api "repos/$GITHUB_REPOSITORY/actions/runs?head_sha=$TARGET_SHA&status=success&per_page=100" \
+              --paginate --jq '.workflow_runs[].id'); do
+            candidate_id="$(gh api "repos/$GITHUB_REPOSITORY/actions/runs/$run_id/artifacts?per_page=100" \
+              --jq '[.artifacts[] | select(.name == "trusted-release-decision")][0].id // empty')"
+            if [ -n "$candidate_id" ]; then
+              DECISION_ARTIFACT_ID="$candidate_id"
+              break
+            fi
+          done
+          test -n "$DECISION_ARTIFACT_ID" || {
+            echo "::error::no passing protected-decision run exposes a trusted decision for $TARGET_SHA" >&2
+            exit 1
+          }
+          gh api "repos/$GITHUB_REPOSITORY/actions/artifacts/$DECISION_ARTIFACT_ID/zip" > build/060/decision.zip
+          unzip -o -q build/060/decision.zip -d build/060/decision
+          gh attestation verify build/060/decision/trusted-release-decision.json \
+            --repo "$GITHUB_REPOSITORY" \
+            --signer-workflow "$GITHUB_REPOSITORY/.github/workflows/release-trusted-builder.yml"
 
-      - name: Install build + runtime deps
-        run: |
-          python -m pip install --upgrade pip
-          pip install -r windows-client/requirements.txt
-          pip install "pyinstaller==6.21.0" "sigstore>=3.0,<4"
-
-      - name: Build the exe (PyInstaller)
-        working-directory: windows-client
-        run: pyinstaller --noconfirm AstralDeep.spec
-
-      - name: Create SHA256SUMS
-        working-directory: windows-client/dist
-        shell: bash
-        run: |
-          sha256sum AstralDeep.exe > SHA256SUMS
-          cat SHA256SUMS
-
-      - name: Keyless sign with sigstore (GitHub OIDC)
-        working-directory: windows-client/dist
-        shell: bash
-        # Keyless signing uses the job's ambient GitHub OIDC credential
-        # (permissions.id-token: write) — no --identity/--oidc-issuer flags,
-        # which conflict with the ambient token. Fulcio issues a cert whose
-        # SAN is the token's `sub`:
-        #   https://github.com/AstralDeep/AstralDeep/.github/workflows/release-windows.yml@refs/tags/<tag>
-        # The client verifier rebuilds that exact string from the release tag.
-        run: |
-          sigstore sign AstralDeep.exe --bundle cosign.bundle
-
-      - name: Verify the signature (self-check)
-        working-directory: windows-client/dist
+      - name: Extract the windows candidate identities from the decision
         shell: bash
         env:
-          SIGSTORE_IDENTITY: "https://github.com/AstralDeep/AstralDeep/.github/workflows/release-windows.yml@refs/tags/${{ github.ref_name }}"
-        # sigstore 3.x merged verify-github into `verify` (same --cert-identity
-        # + --cert-oidc-issuer flags). The client verifier uses the equivalent
-        # sigstore-python Identity policy with the same exact-match string.
+          TARGET_SHA: ${{ steps.resolve.outputs.target_sha }}
         run: |
-          sigstore verify identity AstralDeep.exe --bundle cosign.bundle \
-            --cert-identity "$SIGSTORE_IDENTITY" \
-            --cert-oidc-issuer https://token.actions.githubusercontent.com
+          set -euo pipefail
+          python3 - <<'PY'
+          import json, os, pathlib, re, subprocess
 
-      - name: Create / update the GitHub Release
-        uses: softprops/action-gh-release@v2
+          decision = json.loads(pathlib.Path(
+              "build/060/decision/trusted-release-decision.json"
+          ).read_text(encoding="utf-8"))
+          if decision["candidate_sha"] != os.environ["TARGET_SHA"]:
+              raise SystemExit("decision candidate SHA differs from the tagged commit")
+          member = decision["evidence_set_artifact"]
+          evidence_zip = pathlib.Path("build/060/evidence.zip")
+          with evidence_zip.open("wb") as handle:
+              subprocess.run(
+                  ["gh", "api",
+                   f"repos/{os.environ['GITHUB_REPOSITORY']}/actions/artifacts/{member['artifact_id']}/zip"],
+                  check=True, stdout=handle,
+              )
+          subprocess.run(
+              ["unzip", "-o", "-q", str(evidence_zip), "-d", "build/060/evidence"],
+              check=True,
+          )
+          evidence_set = json.loads(
+                  pathlib.Path("build/060/evidence", member["member"]).read_text(encoding="utf-8")
+          )
+          windows = next(
+              item for item in evidence_set["evidence"] if item["platform"] == "windows"
+          )
+          reference = windows["artifact"]["immutable_reference"]
+          match = re.fullmatch(
+              r"gh://[A-Za-z0-9_.-]+/[A-Za-z0-9_.-]+/runs/([0-9]+)/attempts/([0-9]+)"
+              r"/artifacts/([0-9]+)/members/(.+)",
+              reference,
+          )
+          if match is None:
+              raise SystemExit(f"windows artifact reference is not exact: {reference}")
+          lines = [
+              f"ORIGIN_RUN_ID={match.group(1)}",
+              f"ORIGIN_RUN_ATTEMPT={match.group(2)}",
+              f"ORIGIN_ARTIFACT_ID={match.group(3)}",
+              f"ORIGIN_MEMBER={match.group(4)}",
+              f"EXECUTABLE_SHA256={windows['artifact']['sha256']}",
+          ]
+          with open(os.environ["GITHUB_ENV"], "a", encoding="utf-8") as handle:
+              handle.write("\n".join(lines) + "\n")
+          PY
+
+      - name: Download the archived build-once executable by exact artifact id
+        shell: bash
+        run: |
+          set -euo pipefail
+          gh api "repos/$GITHUB_REPOSITORY/actions/artifacts/$ORIGIN_ARTIFACT_ID/zip" > build/060/candidate.zip
+          unzip -j -o -q build/060/candidate.zip "$ORIGIN_MEMBER" -d build/060/bridge
+          PRE_SHA256="$(sha256sum build/060/bridge/AstralDeep.exe | cut -d ' ' -f 1)"
+          test "$PRE_SHA256" = "$EXECUTABLE_SHA256" || {
+            echo "::error::archived executable digest $PRE_SHA256 differs from the decision-recorded executable_sha256" >&2
+            exit 1
+          }
+          echo "PRE_SHA256=$PRE_SHA256" >> "$GITHUB_ENV"
+
+      # Keyless ambient OIDC: Fulcio issues a certificate whose SAN is this
+      # workflow's identity at the triggering ref —
+      #   https://github.com/<repo>/.github/workflows/release-windows.yml@refs/tags/<tag>
+      # for tag pushes, which is exactly what the shipped 0.3.0 verifier pins.
+      - name: Detach-sign the identical bytes with sigstore
+        uses: sigstore/gh-action-sigstore-python@5b79a39c381910c090341a2c9b0bf022c8b387e1 # v3.4.0
         with:
-          files: |
-            windows-client/dist/AstralDeep.exe
-            windows-client/dist/SHA256SUMS
-            windows-client/dist/cosign.bundle
-          generate_release_notes: true
-          fail_on_unmatched_files: true
+          inputs: build/060/bridge/AstralDeep.exe
+          verify: true
+          verify-cert-identity: https://github.com/${{ github.repository }}/.github/workflows/release-windows.yml@${{ github.ref }}
+          verify-oidc-issuer: https://token.actions.githubusercontent.com
+          upload-signing-artifacts: false
+          release-signing-artifacts: false
+
+      - name: Emit the bridge-signing manifest
+        shell: bash
+        env:
+          TAG: ${{ steps.resolve.outputs.tag }}
+          TARGET_SHA: ${{ steps.resolve.outputs.target_sha }}
+        run: |
+          set -euo pipefail
+          mv build/060/bridge/AstralDeep.exe.sigstore.json build/060/bridge/cosign.bundle
+          POST_SHA256="$(sha256sum build/060/bridge/AstralDeep.exe | cut -d ' ' -f 1)"
+          test "$POST_SHA256" = "$PRE_SHA256" || {
+            echo "::error::executable bytes changed during signing" >&2
+            exit 1
+          }
+          BRIDGE_WORKFLOW_SHA256="$(sha256sum .github/workflows/release-windows.yml | cut -d ' ' -f 1)"
+          export POST_SHA256 BRIDGE_WORKFLOW_SHA256
+          python3 - <<'PY'
+          import json, os, pathlib
+
+          manifest = {
+              "document_type": "windows_bridge_signing",
+              "schema_version": 1,
+              "tag": os.environ["TAG"],
+              "target_sha": os.environ["TARGET_SHA"],
+              "originating_run_id": os.environ["ORIGIN_RUN_ID"],
+              "originating_run_attempt": int(os.environ["ORIGIN_RUN_ATTEMPT"]),
+              "originating_artifact_id": os.environ["ORIGIN_ARTIFACT_ID"],
+              "executable_sha256": os.environ["EXECUTABLE_SHA256"],
+              "pre_signing_sha256": os.environ["PRE_SHA256"],
+              "post_signing_sha256": os.environ["POST_SHA256"],
+              "executable_bytes_modified": False,
+              "rebuild_performed": False,
+              "verification_outcome": "passed",
+              "signature_bundle": "cosign.bundle",
+              "bridge_workflow_path": ".github/workflows/release-windows.yml",
+              "bridge_workflow_sha256": os.environ["BRIDGE_WORKFLOW_SHA256"],
+              "oidc_issuer": "https://token.actions.githubusercontent.com",
+              "signer_identity": (
+                  f"https://github.com/{os.environ['GITHUB_REPOSITORY']}"
+                  f"/.github/workflows/release-windows.yml@refs/tags/{os.environ['TAG']}"
+              ),
+              "workflow_run_id": os.environ["GITHUB_RUN_ID"],
+              "workflow_run_attempt": int(os.environ["GITHUB_RUN_ATTEMPT"]),
+          }
+          if manifest["pre_signing_sha256"] != manifest["post_signing_sha256"]:
+              raise SystemExit("pre/post signing digests differ")
+          out = pathlib.Path("build/060/bridge/bridge-signing-manifest.json")
+          out.write_text(json.dumps(manifest, indent=2, sort_keys=True) + "\n", encoding="utf-8")
+          print(f"wrote {out}")
+          PY
+
+      - name: Upload the bridge-signing run artifact
+        uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4.6.2
+        with:
+          name: windows-bridge-signing-${{ github.run_id }}-${{ github.run_attempt }}
+          path: build/060/bridge/
+          if-no-files-found: error
+          retention-days: 90

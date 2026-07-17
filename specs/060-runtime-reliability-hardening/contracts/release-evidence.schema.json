@@ -1,0 +1,1342 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "https://astraldeep.local/specs/060/release-evidence.schema.json",
+  "title": "AstralDeep Release Readiness Evidence",
+  "description": "Schema for one platform report, a bounded platform-exception request, the same-candidate aggregate release decision, or Windows draft-verification provenance. Local parsing is diagnostic; protected native CI independently authorizes decisions.",
+  "oneOf": [
+    { "$ref": "#/$defs/platform_evidence" },
+    { "$ref": "#/$defs/evidence_exception_request" },
+    { "$ref": "#/$defs/evidence_set" },
+    { "$ref": "#/$defs/windows_draft_verification_provenance" }
+  ],
+  "$defs": {
+    "uuid": {
+      "type": "string",
+      "format": "uuid"
+    },
+    "git_sha": {
+      "type": "string",
+      "pattern": "^[0-9a-f]{40}$"
+    },
+    "sha256": {
+      "type": "string",
+      "pattern": "^[0-9a-f]{64}$"
+    },
+    "timestamp": {
+      "type": "string",
+      "format": "date-time"
+    },
+    "semver": {
+      "type": "string",
+      "pattern": "^(?![\\s\\S]*\\s)(0|[1-9][0-9]*)\\.(0|[1-9][0-9]*)\\.(0|[1-9][0-9]*)(?:-(?:(?:0|[1-9][0-9]*|[0-9]*[A-Za-z-][0-9A-Za-z-]*)(?:\\.(?:0|[1-9][0-9]*|[0-9]*[A-Za-z-][0-9A-Za-z-]*))*))?(?:\\+[0-9A-Za-z-]+(?:\\.[0-9A-Za-z-]+)*)?$"
+    },
+    "release_tag": {
+      "type": "string",
+      "pattern": "^v(?![\\s\\S]*\\s)(0|[1-9][0-9]*)\\.(0|[1-9][0-9]*)\\.(0|[1-9][0-9]*)(?:-(?:(?:0|[1-9][0-9]*|[0-9]*[A-Za-z-][0-9A-Za-z-]*)(?:\\.(?:0|[1-9][0-9]*|[0-9]*[A-Za-z-][0-9A-Za-z-]*))*))?(?:\\+[0-9A-Za-z-]+(?:\\.[0-9A-Za-z-]+)*)?$"
+    },
+    "immutable_reference": {
+      "type": "string",
+      "minLength": 1,
+      "maxLength": 2048,
+      "oneOf": [
+        {
+          "pattern": "^bundle://[A-Za-z0-9._~!$&'()*+,;=:@%/-]+$"
+        },
+        {
+          "pattern": "^gh://[A-Za-z0-9_.-]+/[A-Za-z0-9_.-]+/runs/[1-9][0-9]*/attempts/[1-9][0-9]*/artifacts/[1-9][0-9]*/members/[A-Za-z0-9._~!$&'()*+,;=:@%/-]+$"
+        },
+        {
+          "pattern": "^gh://[A-Za-z0-9_.-]+/[A-Za-z0-9_.-]+/releases/[1-9][0-9]*/assets/[1-9][0-9]*$"
+        },
+        {
+          "pattern": "^oci://[A-Za-z0-9.-]+(?::[0-9]{1,5})?/[A-Za-z0-9._/-]+@sha256:[0-9a-f]{64}$"
+        }
+      ],
+      "$comment": "Policy validation percent-decodes and normalizes bundle/member paths, rejects absolute paths, traversal, empty segments where disallowed, and symlinks, and resolves gh/oci identity only through an attestation-verified trust manifest."
+    },
+    "platform": {
+      "type": "string",
+      "enum": ["backend", "web", "windows", "android", "macos", "ios", "watchos", "docs"]
+    },
+    "check_id": {
+      "type": "string",
+      "enum": [
+        "sign_in",
+        "rendered_chat",
+        "reconnect_resume",
+        "agent_lifecycle",
+        "personal_agent",
+        "windows_deployment_validation",
+        "windows_clean_profile_no_dialog",
+        "windows_frozen_worker",
+        "windows_upgrade_from_0_3_0",
+        "dependency_lock_reproducibility",
+        "apple_first_login_llm",
+        "android_next_toolchain_readiness",
+        "accessibility_semantics",
+        "documentation_links",
+        "apply_config_reload",
+        "candidate_staging",
+        "runtime_admission_stress",
+        "scheduler_exactly_once",
+        "migration_multi_instance",
+        "process_supervision_stress",
+        "macos_personal_agent_host"
+      ]
+    },
+    "artifact": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["name", "kind", "immutable_reference", "sha256", "build_identity"],
+      "properties": {
+        "name": {
+          "type": "string",
+          "minLength": 1,
+          "maxLength": 200,
+          "pattern": "^[^/\\\\]+$"
+        },
+        "kind": {
+          "type": "string",
+          "enum": ["container", "web_deployment", "windows_exe", "android_apk", "macos_app", "ios_app", "watchos_app", "source_tree", "checksum_manifest", "sigstore_bundle", "protected_decision"]
+        },
+        "immutable_reference": {
+          "$ref": "#/$defs/immutable_reference"
+        },
+        "sha256": { "$ref": "#/$defs/sha256" },
+        "build_identity": {
+          "type": "string",
+          "minLength": 1,
+          "maxLength": 200
+        }
+      }
+    },
+    "runner": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["os", "architecture", "runner_image", "runner_name", "runner_environment"],
+      "properties": {
+        "os": {
+          "type": "string",
+          "enum": ["linux", "windows", "macos"]
+        },
+        "architecture": {
+          "type": "string",
+          "enum": ["x86_64", "arm64"]
+        },
+        "runner_image": {
+          "type": "string",
+          "minLength": 1,
+          "maxLength": 200
+        },
+        "runner_name": {
+          "type": "string",
+          "minLength": 1,
+          "maxLength": 200
+        },
+        "runner_environment": {
+          "type": "string",
+          "enum": ["github_hosted", "self_hosted"]
+        }
+      }
+    },
+    "workflow": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["name", "run_id", "run_attempt", "job_id"],
+      "properties": {
+        "name": { "type": "string", "minLength": 1, "maxLength": 200 },
+        "run_id": { "type": "string", "minLength": 1, "maxLength": 100 },
+        "run_attempt": { "type": "integer", "minimum": 1 },
+        "job_id": { "type": "string", "pattern": "^[A-Za-z0-9_.-]{1,200}$" }
+      }
+    },
+    "protected_publisher": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": [
+        "repository",
+        "controller_workflow_path",
+        "controller_digest",
+        "workflow_path",
+        "signer_digest",
+        "certificate_identity",
+        "bridge_workflow_path",
+        "bridge_workflow_sha256",
+        "token_broker_policy_sha256",
+        "approval_environment",
+        "deployment_id",
+        "approval_state",
+        "reviewer_login",
+        "reviewer_database_id",
+        "requester_login",
+        "github_api_reference",
+        "approval_payload_sha256",
+        "approved_at"
+      ],
+      "properties": {
+        "repository": {
+          "type": "string",
+          "pattern": "^[A-Za-z0-9_.-]+/[A-Za-z0-9_.-]+$"
+        },
+        "controller_workflow_path": {
+          "const": ".github/workflows/release-windows-publisher-controller.yml"
+        },
+        "controller_digest": { "$ref": "#/$defs/git_sha" },
+        "workflow_path": { "const": ".github/workflows/release-windows-publisher.yml" },
+        "signer_digest": { "$ref": "#/$defs/git_sha" },
+        "certificate_identity": { "type": "string", "minLength": 1, "maxLength": 500 },
+        "bridge_workflow_path": { "const": ".github/workflows/release-windows.yml" },
+        "bridge_workflow_sha256": { "$ref": "#/$defs/sha256" },
+        "token_broker_policy_sha256": { "$ref": "#/$defs/sha256" },
+        "approval_environment": { "const": "release-publisher" },
+        "deployment_id": { "type": "integer", "minimum": 1 },
+        "approval_state": { "const": "approved" },
+        "reviewer_login": { "type": "string", "pattern": "^[A-Za-z0-9-]{1,39}$" },
+        "reviewer_database_id": { "type": "integer", "minimum": 1 },
+        "requester_login": { "type": "string", "pattern": "^[A-Za-z0-9-]{1,39}$" },
+        "github_api_reference": {
+          "type": "string",
+          "pattern": "^ghapi://[A-Za-z0-9_.-]+/[A-Za-z0-9_.-]+/deployments/[1-9][0-9]*$"
+        },
+        "approval_payload_sha256": {
+          "$ref": "#/$defs/sha256",
+          "$comment": "SHA-256 of compact sorted-key UTF-8 JSON (ensure_ascii=false, sort_keys=true, separators=(',', ':'), allow_nan=false, no trailing newline; reject duplicate keys/non-finite values) containing only candidate_sha, release_id, release_version, requested_tag, target_commit_sha, trusted_decision_immutable_reference, trusted_decision_sha256, controller_digest, publisher_digest, bridge_workflow_sha256, and requester_login. Values are taken from this parent provenance and protected-publisher request."
+        },
+        "approved_at": { "$ref": "#/$defs/timestamp" }
+      },
+      "$comment": "These fields are cross-checks only. Before any tag/release mutation, policy requires equality with independently installed full controller/publisher commits, bridge blob hash, and token-broker policy; re-queries the same-repository protected deployment/payload; requires an allowlisted reviewer different from the requester; and proves the broker granted the scoped publication token only to the exact pinned publisher workflow SHA. Moved-main/modified-publisher or self-declared approval fails before authority is issued. The legacy bridge has no mutation permission and can receive OIDC only after the protected publisher creates its exact tag and proves byte equality with bridge_workflow_sha256."
+    },
+    "trusted_decision_reference": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": [
+        "decision_id",
+        "evidence_set_id",
+        "manifest_artifact",
+        "required_check_name",
+        "protected_builder_digest",
+        "protected_builder_certificate_identity",
+        "protected_policy_sha256",
+        "valid_until",
+        "attestation_verified_at",
+        "verification_outcome"
+      ],
+      "properties": {
+        "decision_id": { "$ref": "#/$defs/uuid" },
+        "evidence_set_id": { "$ref": "#/$defs/uuid" },
+        "manifest_artifact": {
+          "allOf": [
+            { "$ref": "#/$defs/artifact" },
+            {
+              "properties": {
+                "name": { "const": "trusted-release-decision.json" },
+                "kind": { "const": "protected_decision" },
+                "immutable_reference": {
+                  "pattern": "^gh://[A-Za-z0-9_.-]+/[A-Za-z0-9_.-]+/runs/[1-9][0-9]*/attempts/[1-9][0-9]*/artifacts/[1-9][0-9]*/members/[A-Za-z0-9._~!$&'()*+,;=:@%/-]+$"
+                }
+              },
+              "required": ["name", "kind", "immutable_reference"]
+            }
+          ]
+        },
+        "required_check_name": { "const": "release-readiness / protected-decision" },
+        "protected_builder_digest": { "$ref": "#/$defs/git_sha" },
+        "protected_builder_certificate_identity": {
+          "type": "string",
+          "minLength": 1,
+          "maxLength": 500
+        },
+        "protected_policy_sha256": { "$ref": "#/$defs/sha256" },
+        "valid_until": { "$ref": "#/$defs/timestamp" },
+        "attestation_verified_at": { "$ref": "#/$defs/timestamp" },
+        "verification_outcome": { "const": "passed" }
+      },
+      "$comment": "Policy resolves and re-hashes manifest_artifact by canonical current-repository run/artifact/member identity, independently verifies its attestation against protected builder values, parses trusted_release_decision, and requires exact decision/evidence-set/candidate/release/policy/check identity plus current time before valid_until. Self-declared or expired fields never establish readiness."
+    },
+    "runner_requirement": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["os", "architecture", "runner_image", "runner_environment", "labels"],
+      "properties": {
+        "os": {
+          "type": "string",
+          "enum": ["linux", "windows", "macos"]
+        },
+        "architecture": {
+          "type": "string",
+          "enum": ["x86_64", "arm64"]
+        },
+        "runner_image": { "type": "string", "minLength": 1, "maxLength": 200 },
+        "runner_environment": {
+          "type": "string",
+          "enum": ["github_hosted", "self_hosted"]
+        },
+        "labels": {
+          "type": "array",
+          "minItems": 1,
+          "maxItems": 16,
+          "uniqueItems": true,
+          "items": { "type": "string", "pattern": "^[A-Za-z0-9_.-]{1,100}$" }
+        }
+      }
+    },
+    "unavailability_observation": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": [
+        "observation_id",
+        "failure_class",
+        "attempted_workflow",
+        "target_runner_requirement",
+        "observed_at",
+        "immutable_reference",
+        "sha256"
+      ],
+      "properties": {
+        "observation_id": { "$ref": "#/$defs/uuid" },
+        "failure_class": {
+          "type": "string",
+          "enum": ["runner_unavailable", "platform_unavailable", "runner_queue_timeout"]
+        },
+        "attempted_workflow": { "$ref": "#/$defs/workflow" },
+        "target_runner_requirement": { "$ref": "#/$defs/runner_requirement" },
+        "observed_at": { "$ref": "#/$defs/timestamp" },
+        "immutable_reference": { "$ref": "#/$defs/immutable_reference" },
+        "sha256": { "$ref": "#/$defs/sha256" }
+      },
+      "$comment": "The always-running control producer records a bounded API/log snapshot for an attempted target job. Policy resolves and re-hashes this reference through an independently verified producer manifest and proves failure occurred before any product test ran; a candidate-authored reason string is insufficient."
+    },
+    "measurement": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["metric", "aggregation", "value", "unit", "sample_count", "comparator", "threshold"],
+      "properties": {
+        "metric": {
+          "type": "string",
+          "pattern": "^[a-z][a-z0-9_]{0,127}$"
+        },
+        "aggregation": {
+          "type": "string",
+          "enum": ["exact", "total", "minimum", "maximum", "mean", "p50", "p95", "p99", "rate"]
+        },
+        "value": { "type": "number", "minimum": 0 },
+        "unit": {
+          "type": "string",
+          "enum": ["count", "milliseconds", "seconds", "percent", "bytes"]
+        },
+        "sample_count": { "type": "integer", "minimum": 1 },
+        "comparator": {
+          "type": "string",
+          "enum": ["eq", "lt", "lte", "gt", "gte"]
+        },
+        "threshold": { "type": "number", "minimum": 0 }
+      }
+    },
+    "evidence_artifact": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["name", "kind", "immutable_reference", "sha256"],
+      "properties": {
+        "name": {
+          "type": "string",
+          "pattern": "^[a-z][a-z0-9_.-]{0,127}$"
+        },
+        "kind": {
+          "type": "string",
+          "enum": ["json_metrics", "junit", "log", "screenshot", "video", "other"]
+        },
+        "immutable_reference": {
+          "$ref": "#/$defs/immutable_reference"
+        },
+        "sha256": { "$ref": "#/$defs/sha256" }
+      }
+    },
+    "staging_environment": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": [
+        "environment_id",
+        "topology",
+        "deployment_run_id",
+        "deployed_at",
+        "candidate_image_reference",
+        "candidate_image_sha256",
+        "representative_dataset_sha256",
+        "fixture_manifest_sha256",
+        "keycloak_realm_sha256",
+        "source_schema_revision",
+        "migrated_schema_revision",
+        "authentication_posture",
+        "database_posture",
+        "worker_paths",
+        "macos_personal_agent_host",
+        "endpoint"
+      ],
+      "properties": {
+        "environment_id": {
+          "type": "string",
+          "pattern": "^[A-Za-z0-9][A-Za-z0-9._-]{2,127}$"
+        },
+        "topology": {
+          "type": "string",
+          "enum": ["shared_persistent", "shared_reachable_ephemeral"]
+        },
+        "deployment_run_id": {
+          "type": "string",
+          "minLength": 1,
+          "maxLength": 100
+        },
+        "deployed_at": { "$ref": "#/$defs/timestamp" },
+        "candidate_image_reference": {
+          "type": "string",
+          "minLength": 1,
+          "maxLength": 2048,
+          "pattern": "^[^\\s]+@sha256:[0-9a-f]{64}$"
+        },
+        "candidate_image_sha256": { "$ref": "#/$defs/sha256" },
+        "representative_dataset_sha256": { "$ref": "#/$defs/sha256" },
+        "fixture_manifest_sha256": { "$ref": "#/$defs/sha256" },
+        "keycloak_realm_sha256": { "$ref": "#/$defs/sha256" },
+        "source_schema_revision": { "const": "057.001" },
+        "migrated_schema_revision": { "const": "060.004" },
+        "authentication_posture": { "const": "real_keycloak_oidc" },
+        "database_posture": { "const": "representative_postgresql" },
+        "worker_paths": {
+          "type": "array",
+          "minItems": 2,
+          "uniqueItems": true,
+          "items": {
+            "type": "string",
+            "enum": ["background", "scheduler", "maintenance"]
+          },
+          "allOf": [
+            { "contains": { "const": "background" } },
+            { "contains": { "const": "scheduler" } }
+          ]
+        },
+        "macos_personal_agent_host": {
+          "type": "object",
+          "additionalProperties": false,
+          "required": [
+            "supported",
+            "runtime_contract_versions",
+            "source_feature",
+            "source",
+            "manifest_sha256"
+          ],
+          "properties": {
+            "supported": { "type": "boolean" },
+            "runtime_contract_versions": {
+              "type": "array",
+              "maxItems": 16,
+              "uniqueItems": true,
+              "items": { "type": "integer", "minimum": 1 }
+            },
+            "source_feature": { "type": ["string", "null"] },
+            "source": { "const": "candidate_capability_map" },
+            "manifest_sha256": { "$ref": "#/$defs/sha256" }
+          },
+          "allOf": [
+            {
+              "if": {
+                "properties": { "supported": { "const": true } },
+                "required": ["supported"]
+              },
+              "then": {
+                "properties": {
+                  "runtime_contract_versions": {
+                    "minItems": 1,
+                    "contains": { "const": 2 }
+                  },
+                  "source_feature": { "const": "059" }
+                }
+              },
+              "else": {
+                "properties": {
+                  "runtime_contract_versions": { "maxItems": 0 },
+                  "source_feature": { "type": "null" }
+                }
+              }
+            }
+          ]
+        },
+        "endpoint": {
+          "type": "string",
+          "format": "uri",
+          "minLength": 8,
+          "maxLength": 2048,
+          "pattern": "^https://[^\\s]+$",
+          "not": {
+            "pattern": "(?:^https://(?:localhost|127\\.0\\.0\\.1|\\[::1\\])(?::[0-9]{1,5})?(?:/|$)|^https://[^/]*@|[?#])"
+          },
+          "$comment": "The URI parser policy also requires empty userinfo/query/fragment components; request identity belongs in the host or path and archived endpoints never contain credentials."
+        }
+      }
+    },
+    "check": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["id", "outcome", "duration_ms", "detail_code", "applicability_reason", "measurements", "evidence_artifacts"],
+      "properties": {
+        "id": { "$ref": "#/$defs/check_id" },
+        "outcome": {
+          "type": "string",
+          "enum": ["passed", "failed", "not_applicable", "not_run"]
+        },
+        "duration_ms": {
+          "type": ["integer", "null"],
+          "minimum": 0
+        },
+        "detail_code": {
+          "type": ["string", "null"],
+          "pattern": "^[a-z0-9][a-z0-9_]{0,127}$"
+        },
+        "applicability_reason": {
+          "type": ["string", "null"],
+          "maxLength": 500
+        },
+        "measurements": {
+          "type": "array",
+          "maxItems": 64,
+          "items": { "$ref": "#/$defs/measurement" }
+        },
+        "evidence_artifacts": {
+          "type": "array",
+          "maxItems": 32,
+          "items": { "$ref": "#/$defs/evidence_artifact" }
+        }
+      },
+      "allOf": [
+        {
+          "if": {
+            "properties": { "outcome": { "const": "not_applicable" } },
+            "required": ["outcome"]
+          },
+          "then": {
+            "properties": {
+              "applicability_reason": { "type": "string", "minLength": 1 }
+            }
+          },
+          "else": {
+            "properties": { "applicability_reason": { "type": "null" } }
+          }
+        },
+        {
+          "if": {
+            "properties": { "outcome": { "enum": ["failed", "not_run"] } },
+            "required": ["outcome"]
+          },
+          "then": {
+            "properties": {
+              "detail_code": { "type": "string", "minLength": 1 }
+            }
+          }
+        }
+      ]
+    },
+    "platform_evidence": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": [
+        "document_type",
+        "schema_version",
+        "evidence_id",
+        "candidate_sha",
+        "release_id",
+        "release_version",
+        "platform",
+        "target_description",
+        "artifact",
+        "staging_environment",
+        "runner",
+        "workflow",
+        "started_at",
+        "completed_at",
+        "outcome",
+        "unavailable_reason",
+        "unavailability_observation",
+        "checks"
+      ],
+      "properties": {
+        "document_type": { "const": "platform_evidence" },
+        "schema_version": { "const": 1 },
+        "evidence_id": { "$ref": "#/$defs/uuid" },
+        "candidate_sha": { "$ref": "#/$defs/git_sha" },
+        "release_id": {
+          "type": "string",
+          "pattern": "^[A-Za-z0-9][A-Za-z0-9._-]{2,127}$"
+        },
+        "release_version": { "$ref": "#/$defs/semver" },
+        "platform": { "$ref": "#/$defs/platform" },
+        "target_description": {
+          "type": "string",
+          "minLength": 1,
+          "maxLength": 500
+        },
+        "artifact": {
+          "oneOf": [
+            { "$ref": "#/$defs/artifact" },
+            { "type": "null" }
+          ]
+        },
+        "staging_environment": {
+          "oneOf": [
+            { "$ref": "#/$defs/staging_environment" },
+            { "type": "null" }
+          ]
+        },
+        "runner": { "$ref": "#/$defs/runner" },
+        "workflow": { "$ref": "#/$defs/workflow" },
+        "started_at": { "$ref": "#/$defs/timestamp" },
+        "completed_at": { "$ref": "#/$defs/timestamp" },
+        "outcome": {
+          "type": "string",
+          "enum": ["passed", "failed", "unavailable"]
+        },
+        "unavailable_reason": {
+          "type": ["string", "null"],
+          "maxLength": 1000
+        },
+        "unavailability_observation": {
+          "oneOf": [
+            { "$ref": "#/$defs/unavailability_observation" },
+            { "type": "null" }
+          ]
+        },
+        "checks": {
+          "type": "array",
+          "minItems": 1,
+          "maxItems": 32,
+          "items": { "$ref": "#/$defs/check" },
+          "$comment": "The policy validator rejects duplicate check.id values within one platform report, including duplicates whose remaining fields differ. The same check ID may appear in different platform reports."
+        }
+      },
+      "allOf": [
+        {
+          "if": {
+            "properties": { "outcome": { "const": "passed" } },
+            "required": ["outcome"]
+          },
+          "then": {
+            "properties": {
+              "artifact": { "$ref": "#/$defs/artifact" },
+              "unavailable_reason": { "type": "null" },
+              "unavailability_observation": { "type": "null" },
+              "checks": {
+                "items": {
+                  "allOf": [
+                    { "$ref": "#/$defs/check" },
+                    { "properties": { "outcome": { "enum": ["passed", "not_applicable"] } } }
+                  ]
+                }
+              }
+            }
+          }
+        },
+        {
+          "if": {
+            "properties": {
+              "outcome": { "enum": ["passed", "unavailable"] },
+              "platform": { "not": { "const": "docs" } }
+            },
+            "required": ["outcome", "platform"]
+          },
+          "then": {
+            "properties": {
+              "staging_environment": { "$ref": "#/$defs/staging_environment" }
+            }
+          }
+        },
+        {
+          "if": {
+            "properties": { "outcome": { "enum": ["passed", "unavailable"] } },
+            "required": ["outcome"]
+          },
+          "then": {
+            "allOf": [
+              {
+                "if": {
+                  "properties": { "platform": { "const": "backend" } },
+                  "required": ["platform"]
+                },
+                "then": {
+                  "properties": {
+                    "artifact": {
+                      "properties": { "kind": { "const": "container" } },
+                      "required": ["kind"]
+                    }
+                  }
+                }
+              },
+              {
+                "if": {
+                  "properties": { "platform": { "const": "web" } },
+                  "required": ["platform"]
+                },
+                "then": {
+                  "properties": {
+                    "artifact": {
+                      "properties": { "kind": { "const": "web_deployment" } },
+                      "required": ["kind"]
+                    }
+                  }
+                }
+              },
+              {
+                "if": {
+                  "properties": { "platform": { "const": "windows" } },
+                  "required": ["platform"]
+                },
+                "then": {
+                  "properties": {
+                    "artifact": {
+                      "properties": { "kind": { "const": "windows_exe" } },
+                      "required": ["kind"]
+                    }
+                  }
+                }
+              },
+              {
+                "if": {
+                  "properties": { "platform": { "const": "android" } },
+                  "required": ["platform"]
+                },
+                "then": {
+                  "properties": {
+                    "artifact": {
+                      "properties": { "kind": { "const": "android_apk" } },
+                      "required": ["kind"]
+                    }
+                  }
+                }
+              },
+              {
+                "if": {
+                  "properties": { "platform": { "const": "macos" } },
+                  "required": ["platform"]
+                },
+                "then": {
+                  "properties": {
+                    "artifact": {
+                      "properties": { "kind": { "const": "macos_app" } },
+                      "required": ["kind"]
+                    }
+                  }
+                }
+              },
+              {
+                "if": {
+                  "properties": { "platform": { "const": "ios" } },
+                  "required": ["platform"]
+                },
+                "then": {
+                  "properties": {
+                    "artifact": {
+                      "properties": { "kind": { "const": "ios_app" } },
+                      "required": ["kind"]
+                    }
+                  }
+                }
+              },
+              {
+                "if": {
+                  "properties": { "platform": { "const": "watchos" } },
+                  "required": ["platform"]
+                },
+                "then": {
+                  "properties": {
+                    "artifact": {
+                      "properties": { "kind": { "const": "watchos_app" } },
+                      "required": ["kind"]
+                    }
+                  }
+                }
+              },
+              {
+                "if": {
+                  "properties": { "platform": { "const": "docs" } },
+                  "required": ["platform"]
+                },
+                "then": {
+                  "properties": {
+                    "artifact": {
+                      "properties": { "kind": { "const": "source_tree" } },
+                      "required": ["kind"]
+                    }
+                  }
+                }
+              }
+            ]
+          }
+        },
+        {
+          "if": {
+            "properties": {
+              "outcome": { "const": "passed" },
+              "platform": { "const": "windows" }
+            },
+            "required": ["outcome", "platform"]
+          },
+          "then": {
+            "properties": {
+              "runner": {
+                "properties": { "os": { "const": "windows" } },
+                "required": ["os"]
+              }
+            }
+          }
+        },
+        {
+          "if": {
+            "properties": {
+              "outcome": { "const": "passed" },
+              "platform": { "enum": ["macos", "ios", "watchos"] }
+            },
+            "required": ["outcome", "platform"]
+          },
+          "then": {
+            "properties": {
+              "runner": {
+                "properties": { "os": { "const": "macos" } },
+                "required": ["os"]
+              }
+            }
+          }
+        },
+        {
+          "if": {
+            "properties": { "outcome": { "const": "failed" } },
+            "required": ["outcome"]
+          },
+          "then": {
+            "properties": {
+              "artifact": { "$ref": "#/$defs/artifact" },
+              "unavailable_reason": { "type": "null" },
+              "unavailability_observation": { "type": "null" },
+              "checks": {
+                "contains": {
+                  "properties": { "outcome": { "const": "failed" } },
+                  "required": ["outcome"]
+                }
+              }
+            }
+          }
+        },
+        {
+          "if": {
+            "properties": { "outcome": { "const": "unavailable" } },
+            "required": ["outcome"]
+          },
+          "then": {
+            "properties": {
+              "artifact": { "$ref": "#/$defs/artifact" },
+              "staging_environment": { "$ref": "#/$defs/staging_environment" },
+              "unavailable_reason": { "type": "string", "minLength": 1 },
+              "unavailability_observation": { "$ref": "#/$defs/unavailability_observation" },
+              "checks": {
+                "items": {
+                  "allOf": [
+                    { "$ref": "#/$defs/check" },
+                    { "properties": { "outcome": { "const": "not_run" } } }
+                  ]
+                }
+              }
+            }
+          }
+        },
+        {
+          "if": {
+            "properties": {
+              "outcome": { "const": "passed" },
+              "platform": { "enum": ["web", "windows", "android", "macos", "ios", "watchos"] }
+            },
+            "required": ["outcome", "platform"]
+          },
+          "then": {
+            "properties": {
+              "checks": {
+                "allOf": [
+                  { "contains": { "properties": { "id": { "const": "sign_in" }, "outcome": { "const": "passed" } }, "required": ["id", "outcome"] } },
+                  { "contains": { "properties": { "id": { "const": "rendered_chat" }, "outcome": { "const": "passed" } }, "required": ["id", "outcome"] } },
+                  { "contains": { "properties": { "id": { "const": "reconnect_resume" }, "outcome": { "const": "passed" } }, "required": ["id", "outcome"] } },
+                  { "contains": { "properties": { "id": { "const": "agent_lifecycle" }, "outcome": { "const": "passed" } }, "required": ["id", "outcome"] } },
+                  { "contains": { "properties": { "id": { "const": "accessibility_semantics" }, "outcome": { "const": "passed" } }, "required": ["id", "outcome"] } }
+                ]
+              }
+            }
+          }
+        },
+        {
+          "if": {
+            "properties": {
+              "outcome": { "const": "passed" },
+              "platform": { "enum": ["web", "windows", "android", "macos", "ios"] }
+            },
+            "required": ["outcome", "platform"]
+          },
+          "then": {
+            "properties": {
+              "checks": {
+                "contains": {
+                  "properties": {
+                    "id": { "const": "personal_agent" },
+                    "outcome": { "const": "passed" }
+                  },
+                  "required": ["id", "outcome"]
+                }
+              }
+            }
+          }
+        },
+        {
+          "if": {
+            "properties": {
+              "outcome": { "const": "passed" },
+              "platform": { "const": "watchos" }
+            },
+            "required": ["outcome", "platform"]
+          },
+          "then": {
+            "properties": {
+              "checks": {
+                "contains": {
+                  "properties": {
+                    "id": { "const": "personal_agent" },
+                    "outcome": { "const": "not_applicable" }
+                  },
+                  "required": ["id", "outcome"]
+                }
+              }
+            }
+          }
+        },
+        {
+          "if": {
+            "properties": {
+              "outcome": { "const": "passed" },
+              "platform": { "const": "windows" }
+            },
+            "required": ["outcome", "platform"]
+          },
+          "then": {
+            "properties": {
+              "checks": {
+                "allOf": [
+                  { "contains": { "properties": { "id": { "const": "windows_deployment_validation" }, "outcome": { "const": "passed" } }, "required": ["id", "outcome"] } },
+                  { "contains": { "properties": { "id": { "const": "windows_clean_profile_no_dialog" }, "outcome": { "const": "passed" } }, "required": ["id", "outcome"] } },
+                  { "contains": { "properties": { "id": { "const": "windows_frozen_worker" }, "outcome": { "const": "passed" } }, "required": ["id", "outcome"] } },
+                  { "contains": { "properties": { "id": { "const": "windows_upgrade_from_0_3_0" }, "outcome": { "const": "passed" } }, "required": ["id", "outcome"] } },
+                  { "contains": { "properties": { "id": { "const": "dependency_lock_reproducibility" }, "outcome": { "const": "passed" } }, "required": ["id", "outcome"] } }
+                ]
+              }
+            }
+          }
+        },
+        {
+          "if": {
+            "properties": {
+              "outcome": { "const": "passed" },
+              "platform": { "enum": ["macos", "ios"] }
+            },
+            "required": ["outcome", "platform"]
+          },
+          "then": {
+            "properties": {
+              "checks": {
+                "contains": {
+                  "properties": { "id": { "const": "apple_first_login_llm" }, "outcome": { "const": "passed" } },
+                  "required": ["id", "outcome"]
+                }
+              }
+            }
+          }
+        },
+        {
+          "if": {
+            "properties": {
+              "outcome": { "const": "passed" },
+              "platform": { "const": "macos" }
+            },
+            "required": ["outcome", "platform"]
+          },
+          "then": {
+            "properties": {
+              "checks": {
+                "contains": {
+                  "properties": { "id": { "const": "macos_personal_agent_host" } },
+                  "required": ["id"]
+                }
+              }
+            }
+          }
+        },
+        {
+          "if": {
+            "properties": {
+              "outcome": { "const": "passed" },
+              "platform": { "const": "android" }
+            },
+            "required": ["outcome", "platform"]
+          },
+          "then": {
+            "properties": {
+              "checks": {
+                "allOf": [
+                  { "contains": { "properties": { "id": { "const": "android_next_toolchain_readiness" }, "outcome": { "const": "passed" } }, "required": ["id", "outcome"] } }
+                ]
+              }
+            }
+          }
+        },
+        {
+          "if": {
+            "properties": {
+              "outcome": { "const": "passed" },
+              "platform": { "const": "docs" }
+            },
+            "required": ["outcome", "platform"]
+          },
+          "then": {
+            "properties": {
+              "checks": {
+                "allOf": [
+                  { "contains": { "properties": { "id": { "const": "documentation_links" }, "outcome": { "const": "passed" } }, "required": ["id", "outcome"] } },
+                  { "contains": { "properties": { "id": { "const": "apply_config_reload" }, "outcome": { "const": "passed" } }, "required": ["id", "outcome"] } }
+                ]
+              }
+            }
+          }
+        },
+        {
+          "if": {
+            "properties": {
+              "outcome": { "const": "passed" },
+              "platform": { "const": "backend" }
+            },
+            "required": ["outcome", "platform"]
+          },
+          "then": {
+            "properties": {
+              "checks": {
+                "allOf": [
+                  { "contains": { "properties": { "id": { "const": "candidate_staging" }, "outcome": { "const": "passed" } }, "required": ["id", "outcome"] } },
+                  { "contains": { "properties": { "id": { "const": "runtime_admission_stress" }, "outcome": { "const": "passed" } }, "required": ["id", "outcome"] } },
+                  { "contains": { "properties": { "id": { "const": "scheduler_exactly_once" }, "outcome": { "const": "passed" } }, "required": ["id", "outcome"] } },
+                  { "contains": { "properties": { "id": { "const": "migration_multi_instance" }, "outcome": { "const": "passed" } }, "required": ["id", "outcome"] } },
+                  { "contains": { "properties": { "id": { "const": "process_supervision_stress" }, "outcome": { "const": "passed" } }, "required": ["id", "outcome"] } }
+                ]
+              }
+            }
+          }
+        }
+      ]
+    },
+    "evidence_exception_request": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": [
+        "document_type",
+        "schema_version",
+        "exception_id",
+        "candidate_sha",
+        "release_id",
+        "platform",
+        "missing_checks",
+        "reason",
+        "requester_login",
+        "requested_at",
+        "maximum_valid_days",
+        "blocks_next_release"
+      ],
+      "properties": {
+        "document_type": { "const": "evidence_exception_request" },
+        "schema_version": { "const": 1 },
+        "exception_id": { "$ref": "#/$defs/uuid" },
+        "candidate_sha": { "$ref": "#/$defs/git_sha" },
+        "release_id": {
+          "type": "string",
+          "pattern": "^[A-Za-z0-9][A-Za-z0-9._-]{2,127}$"
+        },
+        "platform": {
+          "type": "string",
+          "enum": ["web", "windows", "android", "macos", "ios", "watchos"]
+        },
+        "missing_checks": {
+          "type": "array",
+          "minItems": 1,
+          "uniqueItems": true,
+          "items": {
+            "allOf": [
+              { "$ref": "#/$defs/check_id" },
+              {
+                "not": {
+                  "enum": ["apple_first_login_llm", "candidate_staging"]
+                }
+              }
+            ]
+          }
+        },
+        "reason": {
+          "type": "string",
+          "minLength": 10,
+          "maxLength": 1000
+        },
+        "requester_login": {
+          "type": "string",
+          "pattern": "^[A-Za-z0-9-]{1,39}$"
+        },
+        "requested_at": { "$ref": "#/$defs/timestamp" },
+        "maximum_valid_days": { "const": 7 },
+        "blocks_next_release": { "const": true }
+      },
+      "allOf": [
+        {
+          "if": {
+            "properties": { "platform": { "enum": ["macos", "ios"] } },
+            "required": ["platform"]
+          },
+          "then": {
+            "properties": {
+              "missing_checks": {
+                "not": {
+                  "contains": {
+                    "const": "apple_first_login_llm"
+                  }
+                }
+              }
+            }
+          }
+        }
+      ],
+      "$comment": "These immutable pre-review bytes contain only requester-known scope and identity. Reviewer, approval, expiry, and protected-ledger append facts exist only in the separately attested trusted_exception_approval created after review and registration. Policy rejects guessed/self-declared approval data, requires exact byte identity with that approval manifest, and treats the request as candidate/release-bound."
+    },
+    "evidence_set": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": [
+        "document_type",
+        "schema_version",
+        "policy_revision",
+        "evidence_set_id",
+        "candidate_sha",
+        "release_id",
+        "release_version",
+        "generated_at",
+        "required_targets",
+        "evidence",
+        "exception_requests",
+        "decision"
+      ],
+      "properties": {
+        "document_type": { "const": "release_evidence_set" },
+        "schema_version": { "const": 1 },
+        "policy_revision": { "const": "060-v1" },
+        "evidence_set_id": { "$ref": "#/$defs/uuid" },
+        "candidate_sha": { "$ref": "#/$defs/git_sha" },
+        "release_id": {
+          "type": "string",
+          "pattern": "^[A-Za-z0-9][A-Za-z0-9._-]{2,127}$"
+        },
+        "release_version": { "$ref": "#/$defs/semver" },
+        "generated_at": { "$ref": "#/$defs/timestamp" },
+        "required_targets": {
+          "type": "array",
+          "minItems": 1,
+          "uniqueItems": true,
+          "items": { "$ref": "#/$defs/platform" }
+        },
+        "evidence": {
+          "type": "array",
+          "minItems": 1,
+          "items": { "$ref": "#/$defs/platform_evidence" }
+        },
+        "exception_requests": {
+          "type": "array",
+          "items": { "$ref": "#/$defs/evidence_exception_request" }
+        },
+        "decision": {
+          "type": "string",
+          "enum": ["passed", "failed", "blocked"]
+        }
+      },
+      "$comment": "The aggregator, in addition to schema validation, requires exact candidate_sha/release identity agreement, one non-duplicated report per required target, no duplicate check.id within a platform report, byte-identical normalized staging identity across passing non-doc reports, no failed check for pass, only policy-enumerated not_applicable outcomes, only unavailable shipping-client checks covered by current requests whose exact bytes have a trusted approval plus protected-ledger registration receipt, no failed-product/backend/docs/staging/trust/policy or Apple first-login exception, and artifact bytes/digests from independently attestation-verified workflow provenance governed by release-trust.schema.json. It derives canonical bundle/GitHub-run-member/GitHub-release-asset/OCI references, recomputes hashes, rejects mutable/path-traversing references, binds platform artifact and runner identity to attested jobs, and compares reachability only to verified stage-deploy outputs. Feature-059 applicability comes only from the candidate capability map: false requires macos_personal_agent_host=not_applicable; true requires it passed plus a structured v2 registration and agent_host_registered acknowledgement; missing/malformed/refused is blocking. Every prior blocks_next_release debt from the exact protected ledger commit must be resolved by a current passing check."
+    },
+    "windows_draft_verification_provenance": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": [
+        "document_type",
+        "schema_version",
+        "publication_id",
+        "candidate_sha",
+        "release_id",
+        "release_version",
+        "readiness_evidence_set_id",
+        "trusted_decision",
+        "readiness_workflow",
+        "publication_workflow",
+        "protected_publisher",
+        "tested_executable",
+        "draft_executable",
+        "draft_checksum_manifest",
+        "draft_signature_bundle",
+        "draft_release",
+        "generated_at",
+        "signing"
+      ],
+      "properties": {
+        "document_type": { "const": "windows_draft_verification_provenance" },
+        "schema_version": { "const": 1 },
+        "publication_id": { "$ref": "#/$defs/uuid" },
+        "candidate_sha": { "$ref": "#/$defs/git_sha" },
+        "release_id": {
+          "type": "string",
+          "pattern": "^[A-Za-z0-9][A-Za-z0-9._-]{2,127}$"
+        },
+        "release_version": { "$ref": "#/$defs/semver" },
+        "readiness_evidence_set_id": { "$ref": "#/$defs/uuid" },
+        "trusted_decision": { "$ref": "#/$defs/trusted_decision_reference" },
+        "readiness_workflow": { "$ref": "#/$defs/workflow" },
+        "publication_workflow": { "$ref": "#/$defs/workflow" },
+        "protected_publisher": { "$ref": "#/$defs/protected_publisher" },
+        "tested_executable": {
+          "allOf": [
+            { "$ref": "#/$defs/artifact" },
+            {
+              "properties": {
+                "name": { "const": "AstralDeep.exe" },
+                "kind": { "const": "windows_exe" }
+              },
+              "required": ["name", "kind"]
+            }
+          ]
+        },
+        "draft_executable": {
+          "allOf": [
+            { "$ref": "#/$defs/artifact" },
+            {
+              "properties": {
+                "name": { "const": "AstralDeep.exe" },
+                "kind": { "const": "windows_exe" },
+                "immutable_reference": {
+                  "pattern": "^gh://[A-Za-z0-9_.-]+/[A-Za-z0-9_.-]+/releases/[1-9][0-9]*/assets/[1-9][0-9]*$"
+                }
+              },
+              "required": ["name", "kind", "immutable_reference"]
+            }
+          ]
+        },
+        "draft_checksum_manifest": {
+          "allOf": [
+            { "$ref": "#/$defs/artifact" },
+            {
+              "properties": {
+                "name": { "const": "SHA256SUMS" },
+                "kind": { "const": "checksum_manifest" },
+                "immutable_reference": {
+                  "pattern": "^gh://[A-Za-z0-9_.-]+/[A-Za-z0-9_.-]+/releases/[1-9][0-9]*/assets/[1-9][0-9]*$"
+                }
+              },
+              "required": ["name", "kind", "immutable_reference"]
+            }
+          ]
+        },
+        "draft_signature_bundle": {
+          "allOf": [
+            { "$ref": "#/$defs/artifact" },
+            {
+              "properties": {
+                "name": { "const": "cosign.bundle" },
+                "kind": { "const": "sigstore_bundle" },
+                "immutable_reference": {
+                  "pattern": "^gh://[A-Za-z0-9_.-]+/[A-Za-z0-9_.-]+/releases/[1-9][0-9]*/assets/[1-9][0-9]*$"
+                }
+              },
+              "required": ["name", "kind", "immutable_reference"]
+            }
+          ]
+        },
+        "draft_release": {
+          "type": "object",
+          "additionalProperties": false,
+          "required": [
+            "repository",
+            "tag",
+            "release_name",
+            "latest_disposition",
+            "draft_state",
+            "prerelease",
+            "asset_count",
+            "tag_preexisting",
+            "release_preexisting",
+            "assets_replaced",
+            "release_database_id",
+            "executable_asset_database_id",
+            "executable_asset_name",
+            "checksum_asset_database_id",
+            "checksum_asset_name",
+            "signature_bundle_asset_database_id",
+            "signature_bundle_asset_name",
+            "target_commit_sha",
+            "draft_verified_at"
+          ],
+          "properties": {
+            "repository": {
+              "type": "string",
+              "pattern": "^[A-Za-z0-9_.-]+/[A-Za-z0-9_.-]+$"
+            },
+            "tag": { "$ref": "#/$defs/release_tag" },
+            "release_name": { "$ref": "#/$defs/release_tag" },
+            "latest_disposition": { "const": "make_latest_on_publish" },
+            "draft_state": { "const": true },
+            "prerelease": { "const": false },
+            "asset_count": { "const": 3 },
+            "tag_preexisting": { "const": false },
+            "release_preexisting": { "const": false },
+            "assets_replaced": { "const": false },
+            "release_database_id": { "type": "integer", "minimum": 1 },
+            "executable_asset_database_id": { "type": "integer", "minimum": 1 },
+            "executable_asset_name": { "const": "AstralDeep.exe" },
+            "checksum_asset_database_id": { "type": "integer", "minimum": 1 },
+            "checksum_asset_name": { "const": "SHA256SUMS" },
+            "signature_bundle_asset_database_id": { "type": "integer", "minimum": 1 },
+            "signature_bundle_asset_name": { "const": "cosign.bundle" },
+            "target_commit_sha": { "$ref": "#/$defs/git_sha" },
+            "draft_verified_at": { "$ref": "#/$defs/timestamp" }
+          }
+        },
+        "generated_at": { "$ref": "#/$defs/timestamp" },
+        "signing": {
+          "type": "object",
+          "additionalProperties": false,
+          "required": [
+            "signature_mode",
+            "signer_identity",
+            "oidc_issuer",
+            "signature_verifier",
+            "bridge_workflow_sha256",
+            "legacy_v0_3_0_verifier_outcome",
+            "verification_outcome",
+            "executable_bytes_modified",
+            "rebuild_performed"
+          ],
+          "properties": {
+            "signature_mode": { "const": "detached_sigstore_bundle" },
+            "signer_identity": {
+              "type": "string",
+              "pattern": "^https://github\\.com/AstralDeep/AstralDeep/\\.github/workflows/release-windows\\.yml@refs/tags/v(?![\\s\\S]*\\s)(0|[1-9][0-9]*)\\.(0|[1-9][0-9]*)\\.(0|[1-9][0-9]*)(?:-(?:(?:0|[1-9][0-9]*|[0-9]*[A-Za-z-][0-9A-Za-z-]*)(?:\\.(?:0|[1-9][0-9]*|[0-9]*[A-Za-z-][0-9A-Za-z-]*))*))?(?:\\+[0-9A-Za-z-]+(?:\\.[0-9A-Za-z-]+)*)?$"
+            },
+            "oidc_issuer": { "const": "https://token.actions.githubusercontent.com" },
+            "signature_verifier": { "const": "astraldeep-v0.3.0-sigstore-identity-policy" },
+            "bridge_workflow_sha256": { "$ref": "#/$defs/sha256" },
+            "legacy_v0_3_0_verifier_outcome": { "const": "passed" },
+            "verification_outcome": { "const": "passed" },
+            "executable_bytes_modified": { "const": false },
+            "rebuild_performed": { "const": false }
+          }
+        }
+      },
+      "$comment": "Before authority or publication, policy independently verifies trusted_decision.manifest_artifact against release-trust trusted_release_decision and the required protected check, and re-queries protected publisher workflow SHA, token-broker policy, deployment payload/reviewer state, and bridge blob hash; embedded values are cross-checks only. The protected publisher refuses any existing official tag/release/assets, creates exactly v plus strict release_version at the decision SHA, sets release_name equal to that tag and latest_disposition=make_latest_on_publish for shipped-v0.3.0 updater compatibility, obtains a detached bundle only from the byte-pinned legacy bridge, and uploads exactly AstralDeep.exe, SHA256SUMS, and cosign.bundle create-only to a new draft. It re-queries draft_state=true, prerelease=false, asset_count=3, three distinct IDs and constant names; resolves/re-downloads canonical same-repository assets; requires release_name=tag=v plus release_version, the draft EXE digest to equal matrix-tested bytes, and the eventual public transition to make this release the /releases/latest result; parses SHA256SUMS; verifies the bundle with the actual v0.3.0 identity/issuer policy; requires equal build identities and target SHA; rejects any build/PyInstaller step, moved publisher, self-approved deployment, collision, substitution, or candidate verdict; and fully validates this record before public transition. Failure removes only the just-created tag/draft before publication."
+    }
+  }
+}

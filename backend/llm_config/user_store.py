@@ -39,9 +39,11 @@ import logging
 import os
 import time
 from dataclasses import dataclass
+from datetime import UTC, datetime
 from typing import Any, Dict, Optional
 
 from cryptography.fernet import Fernet, InvalidToken
+from orchestrator.work_admission import OperationState
 
 logger = logging.getLogger("LLMConfig.UserStore")
 
@@ -51,6 +53,18 @@ logger = logging.getLogger("LLMConfig.UserStore")
 _CACHE_TTL_SECONDS = 30.0
 
 _SYSTEM_CACHE_KEY = "__system__"
+
+
+class LLMConfigCommitDeadlineExceeded(TimeoutError):
+    """The credential write reached its commit fence after the attempt bound."""
+
+
+@dataclass(slots=True)
+class FencedLLMConfigCommit:
+    """Credential row and durable COMPLETED winner from one transaction."""
+
+    config: "PersistedLLMConfig"
+    operation: Any
 
 
 @dataclass(slots=True)
@@ -202,6 +216,147 @@ class UserLLMConfigStore:
         self._cache_put(user_id, cfg)
         return cfg
 
+    def set_fenced_sync(
+        self,
+        user_id: str,
+        *,
+        provider: str,
+        base_url: str,
+        model: str,
+        api_key: str,
+        coordinator: Any,
+        fence: Any,
+        deadline_at_monotonic: float,
+        deadline_at_utc: datetime,
+    ) -> FencedLLMConfigCommit:
+        """Commit a credential update only for the current live execution.
+
+        Production writes use the PostgreSQL cursor yielded by the operation
+        coordinator, so the full generation/token check and the credential
+        upsert share one transaction.  The final DML statement also checks
+        ``clock_timestamp()`` against the attempt deadline; a provider worker
+        that returns after its coroutine was cancelled therefore cannot
+        publish a late credential.  The in-memory repository keeps the same
+        ordering under its lock for deterministic contract tests.
+        """
+
+        provider = (provider or "").strip() or "custom"
+        base_url = (base_url or "").strip().rstrip("/")
+        model = (model or "").strip()
+        api_key = (api_key or "").strip()
+        if not base_url or not model:
+            raise ValueError("base_url and model must be non-empty")
+        if time.monotonic() >= deadline_at_monotonic:
+            raise LLMConfigCommitDeadlineExceeded(
+                "credential save deadline elapsed before persistence"
+            )
+        if deadline_at_utc.tzinfo is None:
+            deadline_at_utc = deadline_at_utc.replace(tzinfo=UTC)
+        deadline_at_utc = deadline_at_utc.astimezone(UTC)
+        encrypted_key = self._encrypt_key(api_key)
+
+        terminal = None
+        with coordinator.fenced_transaction(fence) as transaction:
+            if time.monotonic() >= deadline_at_monotonic:
+                raise LLMConfigCommitDeadlineExceeded(
+                    "credential save deadline elapsed before persistence"
+                )
+            if callable(getattr(transaction, "execute", None)):
+                transaction.execute(
+                    """INSERT INTO user_llm_config
+                       (user_id, provider, base_url, model, api_key_enc,
+                        created_at, updated_at)
+                       SELECT %s, %s, %s, %s, %s,
+                              CURRENT_TIMESTAMP, CURRENT_TIMESTAMP
+                       WHERE clock_timestamp() < %s
+                       ON CONFLICT (user_id)
+                       DO UPDATE SET provider = EXCLUDED.provider,
+                                     base_url = EXCLUDED.base_url,
+                                     model = EXCLUDED.model,
+                                     api_key_enc = EXCLUDED.api_key_enc,
+                                     updated_at = CURRENT_TIMESTAMP""",
+                    (
+                        user_id,
+                        provider,
+                        base_url,
+                        model,
+                        encrypted_key,
+                        deadline_at_utc,
+                    ),
+                )
+                if transaction.rowcount != 1:
+                    raise LLMConfigCommitDeadlineExceeded(
+                        "credential save deadline elapsed before persistence"
+                    )
+                # The insert can win just before the deadline. Re-read actual
+                # database wall time immediately before the completed CAS; an
+                # exception rolls the credential row back with this transaction.
+                transaction.execute(
+                    "SELECT clock_timestamp() AS current_time"
+                )
+                row = transaction.fetchone()
+                current_time = (
+                    row.get("current_time")
+                    if isinstance(row, dict)
+                    else row[0]
+                )
+                if (
+                    time.monotonic() >= deadline_at_monotonic
+                    or current_time >= deadline_at_utc
+                ):
+                    raise LLMConfigCommitDeadlineExceeded(
+                        "credential save deadline elapsed before completion"
+                    )
+                terminal = coordinator.terminalize(
+                    fence,
+                    state=OperationState.COMPLETED,
+                    terminal_code=None,
+                    safe_summary="Completed",
+                    retry_after_ms=None,
+                    transaction=transaction,
+                )
+            else:
+                # ``fenced_transaction`` already holds the in-memory
+                # repository lock and asserted the complete execution fence.
+                # Complete first while the same lock is held, then publish the
+                # FakeDB effect. This models the production transaction's
+                # indivisible winner without requiring a second test DB API.
+                if time.monotonic() >= deadline_at_monotonic:
+                    raise LLMConfigCommitDeadlineExceeded(
+                        "credential save deadline elapsed before completion"
+                    )
+                terminal = coordinator.terminalize(
+                    fence,
+                    state=OperationState.COMPLETED,
+                    terminal_code=None,
+                    safe_summary="Completed",
+                    retry_after_ms=None,
+                    transaction=transaction,
+                )
+                self.db.execute(
+                    """INSERT INTO user_llm_config
+                       (user_id, provider, base_url, model, api_key_enc,
+                        created_at, updated_at)
+                       VALUES (?, ?, ?, ?, ?, now(), now())
+                       ON CONFLICT (user_id)
+                       DO UPDATE SET provider = EXCLUDED.provider,
+                                     base_url = EXCLUDED.base_url,
+                                     model = EXCLUDED.model,
+                                     api_key_enc = EXCLUDED.api_key_enc,
+                                     updated_at = now()""",
+                    (user_id, provider, base_url, model, encrypted_key),
+                )
+
+        cfg = PersistedLLMConfig(
+            provider=provider,
+            base_url=base_url,
+            model=model,
+            api_key=api_key,
+            updated_at=time.time(),
+        )
+        self._cache_put(user_id, cfg)
+        return FencedLLMConfigCommit(config=cfg, operation=terminal)
+
     def clear_sync(self, user_id: str) -> bool:
         """Delete the user's configuration. Returns True iff a row existed."""
         row = self.db.fetch_one(
@@ -276,6 +431,32 @@ class UserLLMConfigStore:
         return await asyncio.to_thread(
             self.set_sync, user_id, provider=provider, base_url=base_url,
             model=model, api_key=api_key)
+
+    async def set_fenced(
+        self,
+        user_id: str,
+        *,
+        provider: str,
+        base_url: str,
+        model: str,
+        api_key: str,
+        coordinator: Any,
+        fence: Any,
+        deadline_at_monotonic: float,
+        deadline_at_utc: datetime,
+    ) -> FencedLLMConfigCommit:
+        return await asyncio.to_thread(
+            self.set_fenced_sync,
+            user_id,
+            provider=provider,
+            base_url=base_url,
+            model=model,
+            api_key=api_key,
+            coordinator=coordinator,
+            fence=fence,
+            deadline_at_monotonic=deadline_at_monotonic,
+            deadline_at_utc=deadline_at_utc,
+        )
 
     async def clear(self, user_id: str) -> bool:
         return await asyncio.to_thread(self.clear_sync, user_id)

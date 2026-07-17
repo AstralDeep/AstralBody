@@ -40,6 +40,16 @@
                ReferencedContainer = "container:AstralApp.xcodeproj">
             </BuildableReference>
          </TestableReference>
+         <TestableReference
+            skipped = "NO">
+            <BuildableReference
+               BuildableIdentifier = "primary"
+               BlueprintIdentifier = "AB000000000000000000000B"
+               BuildableName = "AstralAppUITests.xctest"
+               BlueprintName = "AstralAppUITests"
+               ReferencedContainer = "container:AstralApp.xcodeproj">
+            </BuildableReference>
+         </TestableReference>
       </Testables>
    </TestAction>
    <LaunchAction

@@ -1,0 +1,38 @@
+{
+  "document_type": "release_evidence_debt_resolution",
+  "schema_version": 1,
+  "resolution_id": "33333333-3333-4333-8333-333333333333",
+  "exception_id": "11111111-1111-4111-8111-111111111111",
+  "repository": "AstralDeep/AstralDeep",
+  "candidate_sha": "bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb",
+  "release_id": "060-rc-b",
+  "platform": "windows",
+  "resolved_checks": [
+    "windows_deployment_validation"
+  ],
+  "debt_entry_sha256": "81d84b87594269272f53e132a511eb06d736052c7b4c79dea75c13ca73a9b257",
+  "passing_evidence_artifact": {
+    "kind": "github_actions_artifact_member",
+    "repository": "AstralDeep/AstralDeep",
+    "run_id": "6002",
+    "run_attempt": 1,
+    "artifact_id": "7002",
+    "artifact_name": "release-evidence-windows-b",
+    "member": "windows.json",
+    "immutable_reference": "gh://AstralDeep/AstralDeep/runs/6002/attempts/1/artifacts/7002/members/windows.json",
+    "sha256": "1010101010101010101010101010101010101010101010101010101010101010"
+  },
+  "passing_provenance_manifest_artifact": {
+    "kind": "github_actions_artifact_member",
+    "repository": "AstralDeep/AstralDeep",
+    "run_id": "6002",
+    "run_attempt": 1,
+    "artifact_id": "7004",
+    "artifact_name": "trusted-provenance-windows-b",
+    "member": "windows-provenance.json",
+    "immutable_reference": "gh://AstralDeep/AstralDeep/runs/6002/attempts/1/artifacts/7004/members/windows-provenance.json",
+    "sha256": "2020202020202020202020202020202020202020202020202020202020202020"
+  },
+  "protected_policy_sha256": "3030303030303030303030303030303030303030303030303030303030303030",
+  "resolved_at": "2026-07-23T19:01:00Z"
+}
