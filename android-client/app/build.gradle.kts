@@ -29,8 +29,8 @@ android {
         applicationId = "com.personalailabs.astraldeep"
         minSdk = libs.versions.minSdk.get().toInt()
         targetSdk = libs.versions.targetSdk.get().toInt()
-        versionCode = 3
-        versionName = "1.1"
+        versionCode = 4
+        versionName = "1.2"
         testInstrumentationRunner = "androidx.test.runner.AndroidJUnitRunner"
 
         // AppAuth captures the OIDC redirect via this scheme (RedirectUriReceiverActivity).
