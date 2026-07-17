@@ -225,19 +225,26 @@ jobs:
           set -euo pipefail
           xcrun simctl list runtimes available | grep -F "iOS ${IOS_RUNTIME}"
           xcrun simctl list devicetypes | grep -F "iPhone 17 Pro"
-      # A cold simulator makes the suite's FIRST app.launch() absorb the whole
-      # device boot (observed >60 s on hosted VMs — launch timeouts, wedged
-      # relaunches). Boot it to completion before xcodebuild ever runs.
-      - name: Pre-boot the target simulator
+      # Hosted macos-26 images may ship zero, one, or several pre-created
+      # "iPhone 17 Pro" devices with stale state; a name+OS destination is
+      # ambiguous, and a cold or stale device makes the suite's FIRST
+      # app.launch() absorb a full boot (observed launch timeouts and
+      # AX-snapshot flapping across six runs). Same deterministic
+      # device-by-UDID pattern that fixed the watch lane.
+      - name: Provision a dedicated iOS simulator
         if: matrix.slug == 'ios'
+        id: ios_sim
         shell: bash
         run: |
           set -euo pipefail
-          udid=$(xcrun simctl list devices "iOS ${IOS_RUNTIME}" | \
-            awk -F '[()]' '/iPhone 17 Pro \(/{print $2; exit}')
-          [[ -n "$udid" ]] || { echo "no iPhone 17 Pro device for iOS ${IOS_RUNTIME}" >&2; exit 1; }
-          xcrun simctl boot "$udid" || true
+          runtime_id="$(xcrun simctl list runtimes available -j \
+            | python3 -c "import json,sys,os; rt=os.environ['IOS_RUNTIME']; print(next(r['identifier'] for r in json.load(sys.stdin)['runtimes'] if r.get('isAvailable') and r.get('version')==rt and 'simruntime.ios' in r.get('identifier','').lower()))")"
+          [[ -n "$runtime_id" ]] || { echo "iOS ${IOS_RUNTIME} runtime not found" >&2; exit 1; }
+          xcrun simctl delete "astral-ios-060-first-login" 2>/dev/null || true
+          udid="$(xcrun simctl create "astral-ios-060-first-login" "iPhone 17 Pro" "$runtime_id")"
+          xcrun simctl boot "$udid"
           xcrun simctl bootstatus "$udid" -b
+          echo "udid=$udid" >> "$GITHUB_OUTPUT"
       - name: Run deterministic first-login UI tests with coverage
         shell: bash
         run: |
@@ -245,23 +252,44 @@ jobs:
           mkdir -p "${COVERAGE_ROOT}"
           result="${COVERAGE_ROOT}/AstralApp-${{ matrix.slug }}-first-login.xcresult"
           report="${COVERAGE_ROOT}/apple-${{ matrix.slug }}-first-login-xccov.json"
-          rm -rf "$result"
+          dest='${{ matrix.destination }}'
+          if [[ "${{ matrix.slug }}" == "ios" ]]; then
+            dest="platform=iOS Simulator,id=${{ steps.ios_sim.outputs.udid }}"
+          fi
+          run_suite() {
+            rm -rf "$result"
+            xcodebuild \
+              -project "${APP_PROJECT}" \
+              -scheme AstralApp \
+              -destination "$dest" \
+              -configuration Debug \
+              -enableCodeCoverage YES \
+              -test-timeouts-enabled YES \
+              -default-test-execution-time-allowance 180 \
+              -maximum-test-execution-time-allowance 300 \
+              -retry-tests-on-failure \
+              -test-iterations 3 \
+              -resultBundlePath "$result" \
+              -only-testing:AstralAppUITests/LLMFirstLoginUITests \
+              test
+          }
           set +e
-          xcodebuild \
-            -project "${APP_PROJECT}" \
-            -scheme AstralApp \
-            -destination '${{ matrix.destination }}' \
-            -configuration Debug \
-            -enableCodeCoverage YES \
-            -test-timeouts-enabled YES \
-            -default-test-execution-time-allowance 180 \
-            -maximum-test-execution-time-allowance 300 \
-            -retry-tests-on-failure \
-            -test-iterations 3 \
-            -resultBundlePath "$result" \
-            -only-testing:AstralAppUITests/LLMFirstLoginUITests \
-            test
+          run_suite
           status=$?
+          # Per-test retries share one simulator session, so a wedged sim
+          # fails all of them together (observed). A second FULL invocation
+          # against an erased, freshly booted device isolates infra sickness;
+          # a real regression fails both attempts.
+          if [[ "$status" -ne 0 && "${{ matrix.slug }}" == "ios" ]]; then
+            echo "::warning::first-login suite failed (status $status); resetting the dedicated simulator for one clean retry"
+            udid="${{ steps.ios_sim.outputs.udid }}"
+            xcrun simctl shutdown "$udid" 2>/dev/null || true
+            xcrun simctl erase "$udid" || true
+            xcrun simctl boot "$udid" || true
+            xcrun simctl bootstatus "$udid" -b || true
+            run_suite
+            status=$?
+          fi
           set -e
           if [[ -d "$result" ]]; then
             xcrun xccov view --archive --json "$result" > "$report"
