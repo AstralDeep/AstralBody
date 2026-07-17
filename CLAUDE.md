@@ -62,6 +62,20 @@ ruff check .   # lint from the REPO ROOT on the HOST/CI — ruff is NOT in the i
 
 Dev posture: `.env` must have `ASTRAL_ENV=development` (unset == production fail-closed). Production: see [docs/production-deployment.md](docs/production-deployment.md) — runtime-only secrets (never baked into the image), TLS proxy with `FORWARDED_ALLOW_IPS`, `/healthz`+`/readyz` probes, boot gate refuses missing/placeholder secrets.
 
+## iOS Simulator Automation Guidelines
+
+Always prefer the installed MCP tools (`ios-simulator-skill`, `xclaude-plugin`/`mcp__xcode__*`)
+over raw `xcrun simctl` shell commands.
+
+- To check the UI layout, ask the tool to take a screenshot or read the accessibility tree.
+- To interact, use semantic element labels rather than guessing pixel coordinates.
+
+Scope: this governs DRIVING a running app on the iOS Simulator. It does not replace
+`xcodebuild` for build/test (`apple-clients/AstralApp`, schemes `AstralApp`/`AstralWatch` —
+see [specs/060-runtime-reliability-hardening](specs/060-runtime-reliability-hardening)), and it
+does not apply to the **macOS** client, which is not a simulator (drive that app directly).
+Apple sims have no dev-token path — sign-in is real PKCE by design, so a human signs in once.
+
 ## Code Style
 
 Python 3.11+ (backend); ES5 vanilla JS maintained by the orchestrator render layer (`backend/webrender/static/`, no build step): Follow standard conventions
