@@ -99,6 +99,23 @@ run.
 
 ## B. Mac tasks (Apple — you pick these up)
 
+> **2026-07-17 status — items 1–3 DONE on the Mac.** (1) The producers are
+> swift-formatted and the strict recursive lint is clean. (2) Both producers
+> compile-verify (`build-for-testing` green for AstralAppUITests on the
+> iOS 26.5 sim and AstralWatchTests on the watchOS 26.5 sim). (3) The macOS
+> first-login "status text never transitions" bug is ROOT-CAUSED AND FIXED:
+> `.accessibilityElement(children: .ignore)` mints a generic AXGroup even on a
+> Text, and macOS AXGroups drop AXValue — every phase read as an empty value.
+> The contract now lives directly on the status Text (a real AXStaticText);
+> macOS first-login is 4/4 locally. Two sibling instances of the same
+> platform-semantics class were also fixed: the continuity semantic matcher
+> now accepts label OR value (macOS puts static-text content in the VALUE),
+> unblocking the first-ever macOS deterministic relaunch result (20/20, mean
+> 1.64 s), and the system-IME composer contract is explicitly skipped on
+> macOS. Deterministic portions of items 4–5 are recorded in
+> `us3-continuity.md` / `us5-apple-first-login.md`; the live-authenticated
+> portions still need the provider-configured account below.
+
 Xcode 26.6 (build 17F113), iOS/watchOS 26.5 runtimes. From repo root:
 
 1. **swift-format the new producer files** (blocks the `swift-format` required

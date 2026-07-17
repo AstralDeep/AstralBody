@@ -441,3 +441,32 @@ Validation after the change:
 This removes the Apple local-token resurrection race. T057 remains open for
 provider-backed same-chat semantic parity and the Windows live slice described
 above.
+
+## 2026-07-17 update — macOS deterministic relaunch UNBLOCKED (20/20)
+
+Root cause of the previously unresolved macOS UI-continuity result: macOS
+exposes static-text content as the accessibility VALUE with an empty label,
+while the test's semantic matcher used `label CONTAINS[c]` (an iOS-only
+assumption — iOS exposes the content as the label). The restored conversation
+was visibly on screen in the failure-run element snapshots; every positive
+assert failed anyway, and the ~5.6 s "timing" failures were the 5 s semantic
+wait timing out on a predicate that could never match. The matcher now accepts
+label OR value; iOS semantics are unchanged (verified 20/20 after the change).
+
+Same environment as above (Xcode 26.6 `17F113`, macOS 26.5.2, iPhone 17 Pro
+iOS 26.5 simulator; MacBook Air `Mac17,3`). Deterministic fixture-driven
+process relaunch, 20 measured trials per platform, 5 s bound:
+
+| Platform | Result | Mean | p50 | p95 | Max |
+|---|---:|---:|---:|---:|---:|
+| macOS 26.5.2 (first-ever macOS trial result) | 20/20 | 1.643 s | 1.642 s | 1.689 s | 1.699 s |
+| iPhone 17 Pro / iOS 26.5 simulator (re-run) | 20/20 | 3.144 s | 3.133 s | 3.217 s | 3.269 s |
+
+The macOS Accessibility060 first-login control audit also passes; the
+system-IME composer contract is explicitly skipped on macOS (hardware
+keyboard — no Keyboard element exists in the AX tree), with iOS keeping the
+full assertion set.
+
+The authenticated live-session trials (the qualifying T057 rows above) remain
+open for the same reason as before: they need a provider-configured account
+and a committed chat, which automation must not create with a real credential.

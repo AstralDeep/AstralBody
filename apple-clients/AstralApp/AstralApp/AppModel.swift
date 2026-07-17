@@ -60,6 +60,10 @@ struct LLMFirstLoginOperation: Equatable {
         if phaseVisible && [State.submitting, .accepted].contains(state) {
             return "Waiting to check your provider credentials…"
         }
+        // Never empty while loading: the status view is a Text, and an empty
+        // Text exposes NO accessibility element — the status would vanish from
+        // the AX tree during the brief pre-first-frame window.
+        if label.isEmpty && isLoading { return "Submitting…" }
         return label
     }
 }
