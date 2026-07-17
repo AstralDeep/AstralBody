@@ -89,7 +89,7 @@ jobs:
         uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4.6.2
         with:
           name: astralcore-swiftpm-coverage
-          path: apple-clients/AstralCore/.build/**/codecov
+          path: apple-clients/AstralCore/.build/**/codecov/**
           if-no-files-found: error
           retention-days: 14
 
@@ -279,6 +279,14 @@ jobs:
           set -euo pipefail
           xcrun simctl list runtimes available | grep -F "watchOS ${WATCHOS_RUNTIME}"
           xcrun simctl list devicetypes | grep -F "Apple Watch Series 11 (46mm)"
+          # Hosted macos-26 images ship the runtime + device type but no
+          # pre-created watch simulator device; create one when absent so the
+          # xcodebuild destination below resolves.
+          if ! xcrun simctl list devices available | grep -F "Apple Watch Series 11 (46mm)"; then
+            runtime_id="$(xcrun simctl list runtimes available | sed -n "s/.*watchOS ${WATCHOS_RUNTIME}.*- \(com\.apple\.CoreSimulator\.SimRuntime\.[A-Za-z0-9.-]*\)$/\1/p" | head -n 1)"
+            [[ -n "$runtime_id" ]] || { echo "watchOS ${WATCHOS_RUNTIME} runtime identifier not found" >&2; exit 1; }
+            xcrun simctl create "Apple Watch Series 11 (46mm)" "Apple Watch Series 11 (46mm)" "$runtime_id"
+          fi
       - name: Run Watch continuity target with coverage
         shell: bash
         run: |

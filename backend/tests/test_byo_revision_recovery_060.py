@@ -38,6 +38,8 @@ from orchestrator.agent_lifecycle import (  # noqa: E402
 )
 
 
+REPO_ROOT = Path(__file__).resolve().parents[2]
+
 AGENT_ID = "ua-recovery-owner"
 OWNER_ID = "recovery-owner"
 OLD_REVISION = str(uuid.UUID(int=1))
@@ -54,6 +56,10 @@ def _source_files() -> dict[str, str]:
     }
 
 
+@pytest.mark.skipif(
+    not (REPO_ROOT / "windows-client").is_dir(),  # repo root absent inside the product image
+    reason="repo-root tooling files are not part of the product image",
+)
 def test_runtime_manifest_constants_match_reviewed_lock_fixture():
     fixture = json.loads(
         (
@@ -67,7 +73,7 @@ def test_runtime_manifest_constants_match_reviewed_lock_fixture():
     assert fixture["lock_artifact"] == BYO_RUNTIME_LOCK_ARTIFACT
     assert fixture["lock_digest"] == BYO_RUNTIME_LOCK_SHA256
     assert hashlib.sha256(
-        (Path(__file__).parents[2] / BYO_RUNTIME_LOCK_ARTIFACT).read_bytes()
+        (REPO_ROOT / BYO_RUNTIME_LOCK_ARTIFACT).read_bytes()
     ).hexdigest() == BYO_RUNTIME_LOCK_SHA256
     digest_vector = fixture["bundle_digest_vector"]
     assert fixture["bundle_digest_contract"] == "canonical-json-utf8-v1"

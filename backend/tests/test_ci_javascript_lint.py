@@ -8,6 +8,8 @@ import subprocess
 from pathlib import Path
 from typing import Any
 
+import pytest
+
 
 REPO_ROOT = Path(__file__).resolve().parents[2]
 TOOLING_ROOT = REPO_ROOT / "tooling" / "web-ci"
@@ -17,6 +19,14 @@ ESLINT_CONFIG_PATH = TOOLING_ROOT / "eslint.config.mjs"
 PLAYWRIGHT_IMAGE_PATH = TOOLING_ROOT / "playwright-image.txt"
 RELEASE_RUNNER_PATH = TOOLING_ROOT / "release-runner.mjs"
 WORKFLOW_PATH = REPO_ROOT / ".github" / "workflows" / "ci.yml"
+
+if not (
+    (REPO_ROOT / "tooling").is_dir() and (REPO_ROOT / ".github").is_dir()
+):  # repo root absent inside the product image
+    pytest.skip(
+        "repo-root tooling files are not part of the product image",
+        allow_module_level=True,
+    )
 
 PLAYWRIGHT_VERSION = "1.61.1"
 PLAYWRIGHT_IMAGE_DIGEST = (

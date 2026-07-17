@@ -7,9 +7,17 @@ import subprocess
 import sys
 from pathlib import Path
 
+import pytest
+
 
 REPO_ROOT = Path(__file__).resolve().parents[2]
 SCRIPT = REPO_ROOT / "scripts" / "check_changed_coverage.py"
+
+if not (REPO_ROOT / "scripts").is_dir():  # repo root absent inside the product image
+    pytest.skip(
+        "repo-root tooling files are not part of the product image",
+        allow_module_level=True,
+    )
 
 
 def test_changed_coverage_tool_is_stdlib_only_and_documents_public_apis() -> None:

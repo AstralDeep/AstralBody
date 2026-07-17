@@ -30,6 +30,14 @@ FIXTURE_ROOT = (
 )
 CONTRACT_ROOT = REPO_ROOT / "specs" / "060-runtime-reliability-hardening" / "contracts"
 
+if not (
+    (REPO_ROOT / "scripts").is_dir() and (REPO_ROOT / "specs").is_dir()
+):  # repo root absent inside the product image
+    pytest.skip(
+        "repo-root tooling files are not part of the product image",
+        allow_module_level=True,
+    )
+
 
 def _load_module(name: str, path: Path) -> Any:
     spec = importlib.util.spec_from_file_location(name, path)

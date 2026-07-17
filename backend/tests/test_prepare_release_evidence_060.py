@@ -17,6 +17,14 @@ REPO_ROOT = Path(__file__).resolve().parents[2]
 SCRIPT_PATH = REPO_ROOT / "scripts" / "prepare_release_evidence.py"
 CONTRACT_TEST_PATH = REPO_ROOT / "backend" / "tests" / "test_release_contract_schemas.py"
 MATRIX_TEST_PATH = REPO_ROOT / "backend" / "tests" / "test_release_evidence_validator.py"
+
+if not (
+    (REPO_ROOT / "scripts").is_dir() and (REPO_ROOT / "specs").is_dir()
+):  # repo root absent inside the product image
+    pytest.skip(
+        "repo-root tooling files are not part of the product image",
+        allow_module_level=True,
+    )
 BASE_SHA = "b" * 40  # Differs from the contract examples' GIT_SHA ("a" * 40).
 NOW = "2026-07-16T12:00:00Z"
 

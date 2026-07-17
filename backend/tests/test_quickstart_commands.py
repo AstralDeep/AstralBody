@@ -10,12 +10,22 @@ from __future__ import annotations
 import re
 from pathlib import Path
 
+import pytest
+
 
 REPO_ROOT = Path(__file__).resolve().parents[2]
 MAKEFILE_PATH = REPO_ROOT / "Makefile"
 QUICKSTART_PATH = (
     REPO_ROOT / "specs" / "060-runtime-reliability-hardening" / "quickstart.md"
 )
+
+if not (
+    MAKEFILE_PATH.is_file() and (REPO_ROOT / "specs").is_dir()
+):  # repo root absent inside the product image
+    pytest.skip(
+        "repo-root tooling files are not part of the product image",
+        allow_module_level=True,
+    )
 
 FOCUSED_060_TESTS = {
     "tests/test_release_contract_schemas.py",

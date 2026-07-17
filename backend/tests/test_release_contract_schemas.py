@@ -32,6 +32,12 @@ SCHEMA_PATHS = (
 )
 DRAFT_2020_12 = "https://json-schema.org/draft/2020-12/schema"
 
+if not (REPO_ROOT / "specs").is_dir():  # repo root absent inside the product image
+    pytest.skip(
+        "repo-root tooling files are not part of the product image",
+        allow_module_level=True,
+    )
+
 GIT_SHA = "a" * 40
 OTHER_GIT_SHA = "b" * 40
 SHA256 = "c" * 64

@@ -27,6 +27,14 @@ SCRIPT_PATH = REPO_ROOT / "scripts" / "validate_release_evidence.py"
 CONTRACT_TEST_PATH = REPO_ROOT / "backend" / "tests" / "test_release_contract_schemas.py"
 CONTRACT_ROOT = REPO_ROOT / "specs" / "060-runtime-reliability-hardening" / "contracts"
 
+if not (
+    (REPO_ROOT / "scripts").is_dir() and (REPO_ROOT / "specs").is_dir()
+):  # repo root absent inside the product image
+    pytest.skip(
+        "repo-root tooling files are not part of the product image",
+        allow_module_level=True,
+    )
+
 NOW = datetime(2026, 7, 16, 12, 30, tzinfo=UTC)
 CLIENT_PLATFORMS = ("windows", "android", "macos", "ios", "watchos")
 CLIENT_ARTIFACT_KINDS = {

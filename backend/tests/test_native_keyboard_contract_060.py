@@ -2,8 +2,18 @@
 
 from pathlib import Path
 
+import pytest
+
 
 ROOT = Path(__file__).resolve().parents[2]
+
+if not (
+    (ROOT / "apple-clients").is_dir() and (ROOT / "android-client").is_dir()
+):  # repo root absent inside the product image
+    pytest.skip(
+        "repo-root tooling files are not part of the product image",
+        allow_module_level=True,
+    )
 
 
 def test_apple_chat_uses_native_immediate_scroll_keyboard_dismissal() -> None:

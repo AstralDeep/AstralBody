@@ -202,6 +202,10 @@ def test_client_local_manifest_untouched():
     assert "native_logout" not in manifest["accept_actions"]
 
 
+@pytest.mark.skipif(
+    not (REPO_ROOT / "apple-clients").is_dir(),  # repo root absent inside the product image
+    reason="repo-root tooling files are not part of the product image",
+)
 @pytest.mark.parametrize(
     "relative_path",
     [

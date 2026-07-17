@@ -199,6 +199,10 @@ def test_semantic_decoder_keeps_every_canonical_part_visible(
     assert "role" in decoder and "alert" in decoder
 
 
+@pytest.mark.skipif(
+    not (ROOT / "tooling").is_dir(),  # repo root absent inside the product image
+    reason="repo-root tooling files are not part of the product image",
+)
 def test_playwright_contract_exercises_runtime_not_only_source_text() -> None:
     source = BROWSER_SPEC.read_text(encoding="utf-8")
     assert "FakeWebSocket" in source

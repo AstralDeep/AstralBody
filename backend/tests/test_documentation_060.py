@@ -17,6 +17,14 @@ REPO_ROOT = Path(__file__).resolve().parents[2]
 SCRIPT = REPO_ROOT / "scripts" / "check_doc_links.py"
 GUIDE = REPO_ROOT / "docs" / "byo-client-agents.md"
 
+if not (
+    (REPO_ROOT / "scripts").is_dir() and (REPO_ROOT / "docs").is_dir()
+):  # repo root absent inside the product image
+    pytest.skip(
+        "repo-root tooling files are not part of the product image",
+        allow_module_level=True,
+    )
+
 
 def _load_validator() -> ModuleType:
     spec = importlib.util.spec_from_file_location("doc_links_060", SCRIPT)

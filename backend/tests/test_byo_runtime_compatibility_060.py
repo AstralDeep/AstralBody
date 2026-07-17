@@ -29,6 +29,10 @@ _FIXTURE = json.loads(
 )
 
 
+@pytest.mark.skipif(
+    not (_ROOT / "windows-client").is_dir(),  # repo root absent inside the product image
+    reason="repo-root tooling files are not part of the product image",
+)
 def test_final_release_lock_is_the_only_backend_runtime_identity() -> None:
     assert _FIXTURE["runtime_contract_version"] == BYO_RUNTIME_CONTRACT_VERSION
     assert _FIXTURE["lock_artifact"] == BYO_RUNTIME_LOCK_ARTIFACT

@@ -15,6 +15,12 @@ import pytest
 REPO_ROOT = Path(__file__).resolve().parents[2]
 SCRIPT = REPO_ROOT / "scripts" / "check_changed_coverage.py"
 
+if not (REPO_ROOT / "scripts").is_dir():  # repo root absent inside the product image
+    pytest.skip(
+        "repo-root tooling files are not part of the product image",
+        allow_module_level=True,
+    )
+
 
 def _load_collector() -> ModuleType:
     spec = importlib.util.spec_from_file_location("changed_coverage_060", SCRIPT)
@@ -26,6 +32,18 @@ def _load_collector() -> ModuleType:
 
 
 collector = _load_collector()
+
+
+@pytest.fixture(autouse=True)
+def _no_ambient_actions_event(monkeypatch: pytest.MonkeyPatch) -> None:
+    """Keep event selection deterministic under real GitHub Actions.
+
+    ``main()`` falls back to GITHUB_EVENT_NAME/GITHUB_EVENT_PATH when no
+    explicit ``--event-name``/``--event-path`` is given, so an ambient
+    ``pull_request`` event would hijack the CLI tests' manual selections.
+    """
+    monkeypatch.delenv("GITHUB_EVENT_NAME", raising=False)
+    monkeypatch.delenv("GITHUB_EVENT_PATH", raising=False)
 
 
 def _git(repo: Path, *args: str) -> str:
