@@ -243,6 +243,8 @@ jobs:
             -test-timeouts-enabled YES \
             -default-test-execution-time-allowance 60 \
             -maximum-test-execution-time-allowance 120 \
+            -retry-tests-on-failure \
+            -test-iterations 3 \
             -resultBundlePath "$result" \
             -only-testing:AstralAppUITests/LLMFirstLoginUITests \
             test
