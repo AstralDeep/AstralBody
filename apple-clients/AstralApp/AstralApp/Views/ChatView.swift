@@ -512,8 +512,9 @@ private struct InputBar: View {
                 }
             }
             HStack(spacing: 6) {
-                GlyphButton(system: "mic.fill", enabled: !model.mutationsLocked) { focused = true }
-                    .accessibilityLabel("Dictate a message")
+                // The mic glyph is gone on iOS/macOS: it only focused the field,
+                // and dictation is the system keyboard's job. Web + watch keep
+                // their own speech affordances.
                 TextField("Message AstralDeep…", text: $input, axis: .vertical)
                     .textFieldStyle(.plain)
                     .accessibilityIdentifier("chat-composer-input")

@@ -4,6 +4,7 @@ import androidx.compose.foundation.background
 import androidx.compose.foundation.clickable
 import androidx.compose.foundation.layout.Arrangement
 import androidx.compose.foundation.layout.Box
+import androidx.compose.foundation.layout.BoxWithConstraints
 import androidx.compose.foundation.layout.Column
 import androidx.compose.foundation.layout.ExperimentalLayoutApi
 import androidx.compose.foundation.layout.FlowRow
@@ -57,10 +58,17 @@ private fun GridPrimitive(
     renderChild: @Composable (Component) -> Unit,
 ) {
     val cols = (c.int("columns") ?: 2).coerceAtLeast(1)
-    Column(verticalArrangement = Arrangement.spacedBy(8.dp)) {
-        c.children.chunked(cols).forEach { rowItems ->
-            Row(horizontalArrangement = Arrangement.spacedBy(8.dp)) {
-                rowItems.forEach { Box(Modifier.weight(1f)) { renderChild(it) } }
+    // The authored column count is a wide-screen hint: honoring it verbatim on
+    // a phone gives each cell width/N and wraps content character-by-character.
+    // Clamp to how many ~150 dp cells actually fit, so 4-up becomes 2×2.
+    BoxWithConstraints {
+        val fit = (maxWidth / 150.dp).toInt().coerceAtLeast(1)
+        val effective = cols.coerceAtMost(fit)
+        Column(verticalArrangement = Arrangement.spacedBy(8.dp)) {
+            c.children.chunked(effective).forEach { rowItems ->
+                Row(horizontalArrangement = Arrangement.spacedBy(8.dp)) {
+                    rowItems.forEach { Box(Modifier.weight(1f)) { renderChild(it) } }
+                }
             }
         }
     }

@@ -14,8 +14,32 @@ struct ComponentView: View {
     let component: AstralComponent
     @Environment(ThemeStore.self) var theme
     @Environment(AppModel.self) var model
+    /// Measured width of this component's slot, used to clamp multi-column
+    /// layouts on compact screens (0 until the first layout pass).
+    @State private var slotWidth: CGFloat = 0
 
     private var p: AstralPalette { theme.palette }
+
+    /// How many ~150 pt columns actually fit the measured slot, capped at
+    /// `authored`. Before the first measurement, fall back to 2 on the
+    /// assumption of a compact screen — never the authored maximum.
+    private func fittedColumns(authored: Int) -> Int {
+        guard slotWidth > 0 else { return min(authored, 2) }
+        return min(authored, max(1, Int(slotWidth / 150)))
+    }
+
+    /// Invisible width probe: writes the slot width into `slotWidth` without
+    /// influencing layout (fixed 0-height overlay on the container).
+    private var widthProbe: some View {
+        GeometryReader { geo in
+            Color.clear
+                .onAppear { slotWidth = geo.size.width }
+                .onChange(of: geo.size.width) { _, w in
+                    if abs(w - slotWidth) > 1 { slotWidth = w }
+                }
+        }
+        .frame(height: 0)
+    }
 
     var body: some View {
         switch component.type {
@@ -164,8 +188,19 @@ struct ComponentView: View {
     private var containerView: some View {
         let dir = component.raw["direction"]?.stringValue
         if dir == "row" {
-            HStack(alignment: .top, spacing: 8) { childViews }
-                .frame(maxWidth: .infinity, alignment: .leading)
+            // Not a fixed HStack: N children on a phone would each get
+            // screenWidth/N points and wrap character-by-character. Clamp the
+            // side-by-side count to how many ~150 pt slots the measured width
+            // fits, breaking extra children to the next line.
+            let count = fittedColumns(authored: max(1, component.children.count))
+            LazyVGrid(
+                columns: Array(
+                    repeating: GridItem(.flexible(), spacing: 8, alignment: .top),
+                    count: count),
+                alignment: .leading, spacing: 8
+            ) { childViews }
+            .frame(maxWidth: .infinity, alignment: .leading)
+            .overlay(alignment: .top) { widthProbe }
         } else {
             VStack(alignment: .leading, spacing: 8) { childViews }
                 .frame(maxWidth: .infinity, alignment: .leading)
@@ -173,17 +208,27 @@ struct ComponentView: View {
     }
 
     private var gridView: some View {
-        let columns = max(1, Int(component.raw["columns"]?.numberValue ?? 2))
+        // The authored column count is a wide-screen hint. Honoring it verbatim
+        // on a phone gives each cell screenWidth/N points and wraps content
+        // character-by-character — clamp to the columns the measured width
+        // actually fits, so a 4-up grid becomes 2×2 on compact widths.
+        let authored = max(1, Int(component.raw["columns"]?.numberValue ?? 2))
+        let count = fittedColumns(authored: authored)
         let kids = component.children
-        let cols = Array(repeating: GridItem(.flexible(), spacing: 8), count: columns)
         return VStack(alignment: .leading, spacing: 6) {
             titleLine
-            LazyVGrid(columns: cols, alignment: .leading, spacing: 8) {
+            LazyVGrid(
+                columns: Array(
+                    repeating: GridItem(.flexible(), spacing: 8, alignment: .top),
+                    count: count),
+                alignment: .leading, spacing: 8
+            ) {
                 ForEach(Array(kids.enumerated()), id: \.offset) { _, child in
                     ComponentView(component: child)
                 }
             }
         }
+        .overlay(alignment: .top) { widthProbe }
     }
 
     // MARK: metric / badge / hero

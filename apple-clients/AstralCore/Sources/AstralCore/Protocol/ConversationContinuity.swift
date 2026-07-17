@@ -413,7 +413,14 @@ private func continuityUnsignedInteger(_ value: JSONValue?) -> UInt64? {
 }
 
 private func continuityRFC3339UTC(_ value: String) -> Bool {
-    value.hasSuffix("Z") && ISO8601DateFormatter().date(from: value) != nil
+    guard value.hasSuffix("Z") else { return false }
+    if ISO8601DateFormatter().date(from: value) != nil { return true }
+    // A plain ISO8601DateFormatter rejects fractional seconds, which valid
+    // RFC 3339 producers may emit — accept them rather than dropping the
+    // message (and with it the whole committed conversation snapshot).
+    let fractional = ISO8601DateFormatter()
+    fractional.formatOptions = [.withInternetDateTime, .withFractionalSeconds]
+    return fractional.date(from: value) != nil
 }
 
 private func continuitySnakeCase(_ value: String) -> Bool {
