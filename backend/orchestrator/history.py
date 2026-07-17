@@ -174,6 +174,51 @@ def _canonical_component(component: Any, position: int) -> dict[str, Any]:
     return clean
 
 
+# Feature 045's chat-rail rule, applied to the 060 snapshot transcript: the
+# rail is WORDS ONLY. Rich components (tables/charts/metrics/heroes/…) live on
+# the canvas and re-hydrate from the workspace — a transcript message surfaces
+# only its text-like primitives. Mirrors Orchestrator._TEXT_ONLY_TYPES /
+# _is_text_only_components (web load_chat's `_transcript_html` filter), which
+# cannot be imported here without a cycle.
+_RAIL_TEXT_ONLY_TYPES = {
+    "text", "card", "container", "collapsible", "divider", "list", "alert"
+}
+
+
+def _is_rail_text_only(components: list[Any]) -> bool:
+    for comp in components:
+        if not isinstance(comp, Mapping):
+            continue
+        if str(comp.get("type", "")).strip().lower() not in _RAIL_TEXT_ONLY_TYPES:
+            return False
+        for key in ("children", "content"):
+            children = comp.get(key, [])
+            if isinstance(children, list):
+                nested = [c for c in children if isinstance(c, Mapping) and "type" in c]
+                if nested and not _is_rail_text_only(nested):
+                    return False
+    return True
+
+
+def _rail_parts(parts: list[dict[str, Any]]) -> list[dict[str, Any]]:
+    """Drop rich components from a transcript message's parts.
+
+    A ``components`` part keeps only its text-like members; a part left empty
+    is dropped, and a message whose every part drops is omitted from the
+    transcript entirely (its content is canvas state, not conversation)."""
+    kept: list[dict[str, Any]] = []
+    for part in parts:
+        if part.get("type") != "components":
+            kept.append(part)
+            continue
+        text_only = [
+            c for c in part.get("components", []) if _is_rail_text_only([c])
+        ]
+        if text_only:
+            kept.append({"type": "components", "components": text_only})
+    return kept
+
+
 def _content_parts(stored: Any) -> list[dict[str, Any]]:
     if not isinstance(stored, str):
         value = stored
@@ -1292,12 +1337,17 @@ class ConversationCommitRepository:
                 created = row.get("timestamp")
                 if created is None:
                     created = fallback_time
+                parts = _rail_parts(_content_parts(row["content"]))
+                if not parts:
+                    # Pure canvas content (per-round tool components) — the
+                    # workspace re-hydrates it; the rail shows no bubble.
+                    continue
                 transcript.append(
                     {
                         "message_id": str(row["id"]),
                         "role": str(row["role"]),
                         "created_at": _rfc3339(created),
-                        "parts": _content_parts(row["content"]),
+                        "parts": parts,
                         "attachments": self._attachments(
                             cursor, row["id"], owner_user_id
                         ),
