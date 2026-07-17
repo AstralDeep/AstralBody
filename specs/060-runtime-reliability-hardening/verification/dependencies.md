@@ -29,14 +29,13 @@ short-lived job token behind protected environments.
 The previously ad-hoc Python CI/tooling installs and the legacy Windows release
 install are resolved in the candidate tree: every CI-only Python tool now comes
 from one complete SHA-256 lock, the Docker test job mounts that lock read-only,
-and both Windows release paths consume complete hash locks. Remaining blocking
-findings are:
+and both Windows release paths consume complete hash locks. Android now carries
+Gradle dependency locking plus sha256 dependency-verification metadata (see the
+Android section). Remaining findings are:
 
-- Android has no Gradle dependency lock or dependency-verification metadata,
-  so the exact transitive graph and artifact digests for the test-tool and
-  Kover changes cannot yet be reconstructed.
 - Principle V lead-developer approval and disposition must be recorded in the
-  feature PR after the final dependency set is frozen.
+  feature PR after the final dependency set is frozen and bound to the
+  candidate SHA and native protected-CI identities.
 
 ## Workflow action ledger
 
@@ -159,10 +158,63 @@ profile, and runtime manifest; Node/Playwright tooling is absent.
 
 The feature updates AndroidX Test Ext 1.2.1 to 1.3.0, Espresso 3.6.1 to 3.7.0,
 and Kover 0.8.3 to 0.9.8, and declares Kotlin test/JUnit 2.2.10. These serve
-instrumentation, coverage, and unit-test compatibility. They are not yet
-auditable to immutable transitive artifact digests because dependency locking
-and verification metadata are absent.
+instrumentation, coverage, and unit-test compatibility. On 2026-07-16 the
+Android client gained Gradle dependency verification and dependency locking,
+so the exact transitive graph and per-artifact digests are now reconstructable
+and enforced fail-closed on every resolution.
 
+**Verification metadata** — `android-client/gradle/verification-metadata.xml`
+(`<verify-metadata>true</verify-metadata>`, sha256 only; signature
+verification not enabled). It pins 623 components with 1,083 sha256 artifact
+entries (jar/aar plus their .module/.pom metadata), covering the module
+graphs, the plugin/buildscript classpath (AGP 9.3.0, Kotlin 2.2.10, Kover
+0.9.8, ktlint plugin), execution-time tool graphs (ktlint-cli 1.0.1, Android
+Lint, Kover engine), and the settings plugin (foojay-resolver-convention
+1.0.0). The file is deterministic (no timestamps) and contains no
+`<trusted-artifacts>`/`<trust>` exemptions.
+
+**Dependency locking** — `dependencyLocking { lockAllConfigurations() }` for
+all modules plus buildscript-classpath locking in
+`android-client/build.gradle.kts` (settings classpath activation in
+`settings.gradle.kts`). Lock state, 509 distinct module coordinates total:
+
+- `android-client/app/gradle.lockfile`: 436 module entries across 39
+  dependency-bearing configurations plus 31 locked-empty configurations.
+- `android-client/core/gradle.lockfile`: 77 module entries across 19
+  dependency-bearing configurations plus 13 locked-empty configurations.
+- `android-client/buildscript-gradle.lockfile`: 129 module entries in the root
+  plugin `classpath` configuration.
+- `android-client/settings-gradle.lockfile`: records only the empty
+  `incomingCatalogForLibs0`. Gradle resolves the settings `plugins {}` request
+  outside the lockable settings classpath, so the foojay resolver cannot
+  receive lock state; it is exactly version-pinned in `settings.gradle.kts`
+  and digest-pinned in the verification metadata.
+
+Both were generated in one pass over the full android-ci build-test task graph
+plus the instrumented job's androidTest compile/packaging resolution
+(`sh ./gradlew --write-verification-metadata sha256 --write-locks ktlintCheck
+:app:lintDebug :core:test :app:testDebugUnitTest :core:koverVerify
+:app:koverXmlReport :core:koverXmlReport :app:assembleDebug
+:app:compileDebugAndroidTestKotlin :app:assembleDebugAndroidTest --no-daemon
+--no-configuration-cache`). Enforcement was proved on 2026-07-16: the same
+task set with no write flags built successfully under a fresh configuration
+(all resolution re-verified), and corrupting a single recorded checksum
+(`com.android.tools.build:gradle:9.3.0` jar) failed the build at configuration
+time with `Dependency verification failed for configuration 'classpath' — One
+artifact failed verification: gradle-9.3.0.jar` before restoring the file
+byte-identically. No repository was added or re-trusted (google(),
+mavenCentral(), gradlePluginPortal() for plugin management only — unchanged).
+
+- `android-client/gradle/verification-metadata.xml` SHA-256:
+  `e0bfcc651c0890dbe966978b3eff624784984c4ba1f7da80f9429c0aeadbb930`
+- `android-client/app/gradle.lockfile` SHA-256:
+  `5bb036a5a90dc953b7dd1bdeaec762e02625c08f6c186888b1e9d9a8bcca65d0`
+- `android-client/core/gradle.lockfile` SHA-256:
+  `aee1fb50d70d15c9c7be9def38101135e607b42ba440477c6a8e3043333cfc49`
+- `android-client/buildscript-gradle.lockfile` SHA-256:
+  `16a25d21d1173cac794ae3e68bc577df2f7814fe4ae77881b0cf195645c69878`
+- `android-client/settings-gradle.lockfile` SHA-256:
+  `5e2d075903b5cd264613e7538c7c51b1484fe2ed489d4ead3e6b4ba0cf3911c4`
 - `android-client/gradle/libs.versions.toml` SHA-256:
   `6635125f17b5c8126dcdf043f35b4994efa9ef27a13135f6a4517dbb75ffbe6b`
 - The AGP/Gradle major-10 canary remains explicitly `UNRELEASED`; no guessed
@@ -191,13 +243,15 @@ for the changed files.
 
 ## Required re-audit before T126 can close
 
+The former item 2 (Gradle dependency locking and verification metadata) was
+resolved on 2026-07-16 — the lock/verification facts and digests are recorded
+in the Android section above. Still open:
+
 1. Implement T107/T119/T120, then audit and pin every third-party action added
    to the local-evidence/readiness/native-publisher paths by full commit SHA
    with a version comment.
-2. Add Gradle dependency locking and verification metadata, then record the
-   resolved direct/transitive graph and artifact checksums.
-3. Re-run product-artifact isolation checks against the reviewed protected-CI
+2. Re-run product-artifact isolation checks against the reviewed protected-CI
    workflow bytes and exact candidate artifacts; prove no custom App/broker
    credential path exists.
-4. Record the lead-developer approval disposition in the feature PR, then bind
+3. Record the lead-developer approval disposition in the feature PR, then bind
    this audit to the candidate SHA and native protected-CI identities.
