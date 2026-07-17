@@ -58,6 +58,13 @@ import pytest
 pytestmark = pytest.mark.perf
 
 REPO_ROOT = Path(__file__).resolve().parents[3]
+if not (
+    (REPO_ROOT / "scripts").is_dir() and (REPO_ROOT / "specs").is_dir()
+):  # repo root absent inside the product image
+    pytest.skip(
+        "repo-root tooling files are not part of the product image",
+        allow_module_level=True,
+    )
 BACKEND_ROOT = REPO_ROOT / "backend"
 VALIDATOR_PATH = REPO_ROOT / "scripts" / "validate_release_evidence.py"
 EVIDENCE_SCHEMA_PATH = (

@@ -84,12 +84,26 @@ jobs:
         run: python3 apple-clients/Scripts/generate_app_icons.py --check
       - name: Run AstralCore with coverage
         run: swift test --package-path apple-clients/AstralCore --enable-code-coverage
+      - name: Stage SwiftPM coverage data
+        if: always()
+        shell: bash
+        run: |
+          set -euo pipefail
+          mkdir -p "${COVERAGE_ROOT}/astralcore-codecov"
+          # `.build/debug` is a symlink into `.build/<triple>/debug`, which
+          # upload-artifact will not traverse; resolve the real bin path and
+          # copy the codecov payload (profdata + test binary) to a flat dir.
+          bin="$(swift build --package-path apple-clients/AstralCore --show-bin-path)"
+          if [[ -d "$bin/codecov" ]]; then
+            cp -R "$bin/codecov/." "${COVERAGE_ROOT}/astralcore-codecov/"
+          fi
+          find "${COVERAGE_ROOT}/astralcore-codecov" -type f | head
       - name: Upload SwiftPM coverage data
         if: always()
         uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4.6.2
         with:
           name: astralcore-swiftpm-coverage
-          path: apple-clients/AstralCore/.build/**/codecov/**
+          path: ${{ env.COVERAGE_ROOT }}/astralcore-codecov/**
           if-no-files-found: error
           retention-days: 14
 
@@ -273,20 +287,22 @@ jobs:
           sudo xcode-select --switch "$selected/Contents/Developer"
           [[ "$(xcodebuild -version | sed -n '1p')" == "Xcode ${XCODE_VERSION}" ]]
           [[ "$(xcodebuild -version | sed -n '2p')" == "Build version ${XCODE_BUILD}" ]]
-      - name: Require the supported watchOS runtime
+      - name: Provision a dedicated watchOS simulator
+        id: watch_sim
         shell: bash
         run: |
           set -euo pipefail
           xcrun simctl list runtimes available | grep -F "watchOS ${WATCHOS_RUNTIME}"
           xcrun simctl list devicetypes | grep -F "Apple Watch Series 11 (46mm)"
-          # Hosted macos-26 images ship the runtime + device type but no
-          # pre-created watch simulator device; create one when absent so the
-          # xcodebuild destination below resolves.
-          if ! xcrun simctl list devices available | grep -F "Apple Watch Series 11 (46mm)"; then
-            runtime_id="$(xcrun simctl list runtimes available | sed -n "s/.*watchOS ${WATCHOS_RUNTIME}.*- \(com\.apple\.CoreSimulator\.SimRuntime\.[A-Za-z0-9.-]*\)$/\1/p" | head -n 1)"
-            [[ -n "$runtime_id" ]] || { echo "watchOS ${WATCHOS_RUNTIME} runtime identifier not found" >&2; exit 1; }
-            xcrun simctl create "Apple Watch Series 11 (46mm)" "Apple Watch Series 11 (46mm)" "$runtime_id"
-          fi
+          # Hosted macos-26 images may ship zero, one, or several pre-created
+          # "Apple Watch Series 11 (46mm)" devices, so a name+OS destination is
+          # ambiguous. Create one dedicated device and target it by exact UDID.
+          runtime_id="$(xcrun simctl list runtimes available -j \
+            | python3 -c "import json,sys,os; rt=os.environ['WATCHOS_RUNTIME']; print(next(r['identifier'] for r in json.load(sys.stdin)['runtimes'] if r.get('isAvailable') and r.get('version')==rt))")"
+          [[ -n "$runtime_id" ]] || { echo "watchOS ${WATCHOS_RUNTIME} runtime not found" >&2; exit 1; }
+          xcrun simctl delete "astral-watch-060" 2>/dev/null || true
+          udid="$(xcrun simctl create "astral-watch-060" "Apple Watch Series 11 (46mm)" "$runtime_id")"
+          echo "udid=$udid" >> "$GITHUB_OUTPUT"
       - name: Run Watch continuity target with coverage
         shell: bash
         run: |
@@ -299,7 +315,7 @@ jobs:
           xcodebuild \
             -project "${APP_PROJECT}" \
             -scheme AstralWatch \
-            -destination "platform=watchOS Simulator,name=Apple Watch Series 11 (46mm),OS=${WATCHOS_RUNTIME}" \
+            -destination "platform=watchOS Simulator,id=${{ steps.watch_sim.outputs.udid }}" \
             -configuration Debug \
             CODE_SIGNING_ALLOWED=NO \
             -enableCodeCoverage YES \

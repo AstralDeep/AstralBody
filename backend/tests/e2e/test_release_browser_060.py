@@ -16,6 +16,13 @@ import pytest
 
 
 REPO_ROOT = Path(__file__).resolve().parents[3]
+if not (
+    (REPO_ROOT / "tooling").is_dir() and (REPO_ROOT / "scripts").is_dir()
+):  # repo root absent inside the product image
+    pytest.skip(
+        "repo-root tooling files are not part of the product image",
+        allow_module_level=True,
+    )
 TOOL_ROOT = REPO_ROOT / "tooling" / "web-ci"
 PACKAGE = TOOL_ROOT / "package.json"
 LOCK = TOOL_ROOT / "package-lock.json"
