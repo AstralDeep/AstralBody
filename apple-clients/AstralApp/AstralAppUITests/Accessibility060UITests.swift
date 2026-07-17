@@ -46,7 +46,13 @@ final class Accessibility060UITests: XCTestCase {
         XCTAssertEqual(save.value as? String, "Submitting")
     }
 
-    func testMainComposerUsesSystemKeyboardWithoutApplicationDrawnDoneAccessory() {
+    func testMainComposerUsesSystemKeyboardWithoutApplicationDrawnDoneAccessory() throws {
+        #if os(macOS)
+            throw XCTSkip(
+                "The system-IME contract (on-screen keyboard, keyboard-anchored send, "
+                    + "interactive dismissal) has no macOS analogue — macOS input is a "
+                    + "hardware keyboard with no Keyboard element in the AX tree.")
+        #endif
         app = XCUIApplication()
         app.launchArguments = ["--astral-ui-test-first-login", "chat-composer"]
         app.launchEnvironment["ASTRAL_UI_TESTING"] = "1"
