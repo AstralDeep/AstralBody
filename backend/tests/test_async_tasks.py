@@ -29,6 +29,18 @@ from orchestrator.work_admission import (
     PurgeResult,
     WorkAdmissionCoordinator,
 )
+from shared.feature_flags import flags
+
+
+# The manager only performs the legacy compatibility write (the DB projection
+# these tests observe) when bg_continuity is enabled; the flags-off SC-009
+# byte-equivalence run correctly performs no such write, so tests that assert
+# on it skip cleanly there. Flags are read once at import, so this is stable
+# for the whole process.
+_REQUIRES_BG_CONTINUITY = pytest.mark.skipif(
+    not flags.is_enabled("bg_continuity"),
+    reason="legacy compatibility write requires FF_BG_CONTINUITY",
+)
 
 
 # ---------------------------------------------------------------------------
@@ -916,6 +928,7 @@ class TestBackgroundTaskManager:
         )
 
     @pytest.mark.asyncio
+    @_REQUIRES_BG_CONTINUITY
     async def test_completion_fan_and_legacy_record_keep_operation_fence(self):
         mgr = _manager()
         records = []
@@ -959,6 +972,7 @@ class TestBackgroundTaskManager:
         assert len(fanned) == before
 
     @pytest.mark.asyncio
+    @_REQUIRES_BG_CONTINUITY
     async def test_delayed_submit_write_cannot_regress_terminal_durable_status(self):
         mgr = _manager()
         terminal_written = asyncio.Event()
@@ -989,6 +1003,7 @@ class TestBackgroundTaskManager:
         assert row["status"] == "completed"
 
     @pytest.mark.asyncio
+    @_REQUIRES_BG_CONTINUITY
     async def test_failed_task_uses_generic_durable_and_notification_summary(self):
         mgr = _manager()
         frames = []
@@ -1812,6 +1827,7 @@ class TestBackgroundTaskShutdownAndObservability:
             await asyncio.sleep(0)
 
     @pytest.mark.asyncio
+    @_REQUIRES_BG_CONTINUITY
     async def test_service_drain_cancels_and_joins_compatibility_writes(self):
         mgr = _manager()
         write_started = asyncio.Event()
