@@ -9,13 +9,24 @@ punch list.
 
 ---
 
-## A. Staging runner (unblocks T111 / T125 / T128 qualifying runs) — needs a UKY machine
+## A. Staging matrix — DEFERRED ("won't set up" the staging host, 2026-07-17)
 
-The `release-readiness` matrix deploys the candidate into an ephemeral staging
-stack and drives every client against it. It requires a **self-hosted GitHub
-Actions runner** labeled `astral-staging` with Docker and a **non-loopback
-HTTPS** endpoint reachable from GitHub-hosted runners. To set this up on a UKY
-box, provide / do the following:
+**Decision:** the dedicated persistent staging host will not be provisioned
+(cert provider down + team opted out). The `release-readiness` matrix therefore
+stays **INACTIVE** (`RELEASE_READINESS_ACTIVE` unset) and tasks **T111 / T125 /
+T128** are deferred until an external staging host exists. A GitHub-hosted
+runner alone can't host the shared endpoint across the matrix — its runners are
+ephemeral and torn down between jobs, so the Windows/Android/Apple/web producer
+jobs (each on a fresh runner) couldn't reach a stack deployed in `stage-deploy`.
+The `stage-deploy` / `stage-cleanup` jobs now run on `ubuntu-latest` (no
+self-hosted runner) and target an external host at `ASTRAL_STAGING_ENDPOINT`.
+The local pre-push diagnostic (`scripts/prepare_release_evidence.py`) needs none
+of this and works today.
+
+To revisit later: stand up a persistent external Linux host with a public HTTPS
+name (a Cloudflare quick tunnel on that host gives a valid cert with no cert
+provider), set `ASTRAL_STAGING_ENDPOINT`, add the secrets below, and flip
+`RELEASE_READINESS_ACTIVE=true`. Retained setup detail for that day:
 
 1. **A Linux host** (Docker + Docker Compose v2, ≥4 CPU / 8 GB, outbound HTTPS to
    github.com + ghcr.io). Root or docker-group access.

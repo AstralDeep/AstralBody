@@ -96,12 +96,22 @@ jobs:
           fi
           echo "candidate_image=ghcr.io/$REPO_LC@$DIGEST" >> "$GITHUB_OUTPUT"
 
-  # ── Qualifying staging deployment on the trusted self-hosted staging host.
-  #    Env gate mirrors scripts/run_candidate_staging.py::_required_environment
-  #    exactly; the namespace is left running for the producer jobs. ──
+  # ── Qualifying staging deployment.
+  #    IMPORTANT: this job requires an EXTERNAL, persistent staging host that
+  #    stays reachable at ASTRAL_STAGING_ENDPOINT for the WHOLE matrix — the
+  #    Windows/Android/Apple/web producers each run on their own fresh runner
+  #    and must reach the same deployment. A GitHub-hosted runner's local stack
+  #    is torn down when this job ends, so it cannot host the shared endpoint by
+  #    itself. The originally intended host was a dedicated persistent staging
+  #    runner; the project has decided NOT to provision one ("won't set up"), so
+  #    this qualifying matrix stays INACTIVE (vars.RELEASE_READINESS_ACTIVE is
+  #    not 'true') and tasks T111/T125/T128 are deferred until an external
+  #    staging host + ASTRAL_STAGING_ENDPOINT exist. The local pre-push
+  #    diagnostic (scripts/prepare_release_evidence.py) needs none of this.
+  #    Env gate mirrors scripts/run_candidate_staging.py::_required_environment.
   stage-deploy:
     needs: publish-candidate
-    runs-on: [self-hosted, astral-staging]
+    runs-on: ubuntu-latest
     timeout-minutes: 45
     env:
       ASTRAL_STAGING_RUNNER_TRUSTED: "true"
@@ -1297,7 +1307,9 @@ jobs:
       - docs-producer
       - trusted-builder
       - protected-decision
-    runs-on: [self-hosted, astral-staging]
+    # Runs against the same external staging host as stage-deploy (see the
+    # note there); a dedicated persistent staging runner is not provisioned.
+    runs-on: ubuntu-latest
     timeout-minutes: 20
     env:
       ASTRAL_STAGING_RUNNER_TRUSTED: "true"

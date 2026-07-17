@@ -197,7 +197,12 @@ def test_release_readiness_jobs_form_the_stage_producer_decision_pipeline() -> N
         assert job_id in job_ids, f"release-readiness.yml lacks job {job_id}"
 
     stage = _workflow_job(workflow, "stage-deploy")
-    assert "self-hosted" in stage and "astral-staging" in stage
+    # The self-hosted staging runner was retired ("won't set up"); the job runs
+    # on a hosted runner and targets an external persistent staging host at
+    # ASTRAL_STAGING_ENDPOINT (documented inactive until that host exists).
+    assert "ubuntu-latest" in stage
+    assert "self-hosted" not in stage and "astral-staging" not in stage
+    assert "ASTRAL_STAGING_ENDPOINT" in stage
     assert "persist-credentials: false" in stage
     assert "--leave-running" in stage
     assert "--trusted-manifest" in stage
@@ -247,7 +252,8 @@ def test_release_readiness_jobs_form_the_stage_producer_decision_pipeline() -> N
 
     cleanup = _workflow_job(workflow, "stage-cleanup")
     assert "if: always()" in cleanup
-    assert "self-hosted" in cleanup and "astral-staging" in cleanup
+    assert "ubuntu-latest" in cleanup
+    assert "self-hosted" not in cleanup and "astral-staging" not in cleanup
     assert "cleanup" in cleanup
 
 

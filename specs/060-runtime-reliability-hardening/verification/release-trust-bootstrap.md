@@ -88,10 +88,16 @@ the vars-guarded `release-readiness` caller job in `ci.yml`), add the
 ruleset, and add `release-readiness` to `ci.yml` `publish.needs` (tracked
 comment marks the line).
 
-**Staging prerequisites (block qualifying readiness runs until provisioned):**
+**Staging prerequisites — DEFERRED ("won't set up", 2026-07-17):** the dedicated
+persistent staging host will not be provisioned, so the qualifying readiness
+matrix stays inactive and T111/T125/T128 are deferred. `stage-deploy` /
+`stage-cleanup` were moved off the self-hosted runner to `ubuntu-latest`; they
+target an external host at `ASTRAL_STAGING_ENDPOINT` that does not yet exist. To
+activate later, provision that external host and supply:
 
-- A trusted self-hosted runner labeled `astral-staging` with Docker and a
-  non-loopback TLS ingress (zero self-hosted runners are registered today)
+- A persistent host with Docker and a non-loopback TLS ingress reachable from
+  GitHub-hosted runners (a Cloudflare quick tunnel on that host provides the
+  cert). A self-hosted runner is no longer required.
 - Repository secrets for the staging gate
   (`ASTRAL_STAGING_ENDPOINT`, `ASTRAL_STAGING_PROBE_TOKEN`, digest-pinned
   `STAGING_POSTGRES_IMAGE`/`STAGING_KEYCLOAK_IMAGE`/
