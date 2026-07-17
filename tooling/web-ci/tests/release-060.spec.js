@@ -4,9 +4,14 @@ import { basename, dirname, resolve } from "node:path";
 
 import { expect, test } from "@playwright/test";
 
+import { convertPlaywrightV8Coverage } from "../coverage-conversion.mjs";
+
 
 const PROMPT = "Roll exactly six six-sided dice and show the normalized results.";
 const REQUIRED_LIFECYCLE_STATES = new Set(["starting", "online", "updating", "failed", "offline"]);
+// Quickstart §5 / SC-006: a reload must restore the committed conversation
+// within five seconds; the reconnect_resume rate below is measured against it.
+const RESUME_CONTRACT_MS = 5_000;
 
 
 function requiredEnvironment(name) {
@@ -21,13 +26,39 @@ function canonicalSha256(bytes) {
 }
 
 
-async function atomicJson(path, value) {
-  const bytes = Buffer.from(`${JSON.stringify(value, null, 2)}\n`, "utf8");
+async function atomicBytes(path, bytes) {
   await mkdir(dirname(path), { recursive: true });
   const temporary = `${path}.${process.pid}.${randomUUID()}.tmp`;
   await writeFile(temporary, bytes, { flag: "wx", mode: 0o600 });
   await rename(temporary, path);
   return canonicalSha256(bytes);
+}
+
+
+async function atomicJson(path, value) {
+  return atomicBytes(path, Buffer.from(`${JSON.stringify(value, null, 2)}\n`, "utf8"));
+}
+
+
+/** Build one schema-shaped quantitative measurement, failing a missed floor. */
+function measurement(metric, aggregation, value, unit, sampleCount, comparator, threshold) {
+  const satisfied = {
+    eq: value === threshold,
+    gt: value > threshold,
+    gte: value >= threshold,
+    lt: value < threshold,
+    lte: value <= threshold,
+  }[comparator];
+  if (
+    !Number.isFinite(value) || value < 0
+    || !Number.isInteger(sampleCount) || sampleCount < 1
+    || satisfied !== true
+  ) {
+    throw new Error(
+      `quantitative release floor missed: ${metric}=${value} must satisfy ${comparator} ${threshold}`,
+    );
+  }
+  return { metric, aggregation, value, unit, sample_count: sampleCount, comparator, threshold };
 }
 
 
@@ -104,7 +135,7 @@ function workflowIdentity() {
 }
 
 
-function passedCheck(id, durationMs, evidenceArtifact, measurements = []) {
+function passedCheck(id, durationMs, evidenceArtifacts, measurements = []) {
   return {
     id,
     outcome: "passed",
@@ -112,8 +143,65 @@ function passedCheck(id, durationMs, evidenceArtifact, measurements = []) {
     detail_code: null,
     applicability_reason: null,
     measurements,
-    evidence_artifacts: [evidenceArtifact],
+    evidence_artifacts: evidenceArtifacts,
   };
+}
+
+
+/** Map one Playwright coverage entry to its maintained candidate source path. */
+function maintainedSourcePath(entry, appOrigin) {
+  if (typeof entry?.url !== "string") return null;
+  let parsed;
+  try {
+    parsed = new URL(entry.url);
+  } catch {
+    return null;
+  }
+  if (parsed.origin !== appOrigin || !parsed.pathname.startsWith("/static/")) return null;
+  const sourcePath = `backend/webrender${parsed.pathname}`;
+  if (
+    sourcePath.includes("/static/vendor/")
+    || sourcePath.endsWith(".min.js")
+    || !/\.(?:js|mjs)$/u.test(sourcePath)
+  ) {
+    return null;
+  }
+  return sourcePath;
+}
+
+
+/** Merge per-navigation V8 entries additively, like the coverage:node producer. */
+function mergedMaintainedEntries(rawCoverage, appOrigin) {
+  const merged = new Map();
+  for (const entry of rawCoverage) {
+    const sourcePath = maintainedSourcePath(entry, appOrigin);
+    if (sourcePath === null) continue;
+    if (typeof entry.source !== "string") {
+      throw new Error(`maintained coverage entry lacks source text: ${sourcePath}`);
+    }
+    const record = merged.get(sourcePath) ?? { source: entry.source, ranges: new Map() };
+    if (record.source !== entry.source) {
+      throw new Error(`candidate source changed between navigations: ${sourcePath}`);
+    }
+    for (const functionCoverage of entry.functions ?? []) {
+      for (const { startOffset, endOffset, count } of functionCoverage.ranges ?? []) {
+        const key = `${startOffset}:${endOffset}`;
+        const mergedCount = (record.ranges.get(key)?.count ?? 0) + count;
+        if (!Number.isSafeInteger(mergedCount)) {
+          throw new Error(`coverage count overflow: ${sourcePath}`);
+        }
+        record.ranges.set(key, { startOffset, endOffset, count: mergedCount });
+      }
+    }
+    merged.set(sourcePath, record);
+  }
+  return [...merged.entries()]
+    .sort(([left], [right]) => left.localeCompare(right))
+    .map(([sourcePath, record]) => ({
+      sourcePath,
+      source: record.source,
+      functions: [{ ranges: [...record.ranges.values()] }],
+    }));
 }
 
 
@@ -246,7 +334,7 @@ async function signInThroughKeycloak(page, baseUrl, username, password) {
   const leakedStorage = await page.evaluate(() => [...Object.keys(localStorage), ...Object.keys(sessionStorage)]
     .filter((key) => /(?:access|refresh)[_-]?token|password|secret/iu.test(key)));
   expect(leakedStorage).toEqual([]);
-  return performance.now() - started;
+  return { durationMs: performance.now() - started, leakedStorageKeys: leakedStorage.length };
 }
 
 
@@ -325,9 +413,17 @@ async function runPersonalAgentAuthoring(page, wire) {
   await page.getByRole("button", { name: "Run Analyze", exact: true }).click();
   await expect(page.locator("#astral-modal")).toContainText("Analyze passed", { timeout: 60_000 });
   const statuses = wire.operationStatuses.filter((item) => item.action?.startsWith("chrome_author_"));
-  expect(statuses.some((item) => item.terminal === true && item.state === "completed")).toBe(true);
-  expect(statuses.some((item) => item.terminal === true && item.state === "failed")).toBe(false);
-  return { durationMs: performance.now() - started, name };
+  const completedCount = statuses.filter((item) => item.terminal === true && item.state === "completed").length;
+  const failedCount = statuses.filter((item) => item.terminal === true && item.state === "failed").length;
+  expect(completedCount).toBeGreaterThan(0);
+  expect(failedCount).toBe(0);
+  return {
+    completedCount,
+    durationMs: performance.now() - started,
+    failedCount,
+    name,
+    statusCount: statuses.length,
+  };
 }
 
 
@@ -370,7 +466,11 @@ async function verifyAccessibility(page) {
   expect(inaccessible).toEqual([]);
   await page.locator("body").press("Tab");
   await expect.poll(() => page.evaluate(() => document.activeElement !== document.body)).toBe(true);
-  return { durationMs: performance.now() - started, inspectedControls: await page.locator("button, input, textarea, select, a[href]").count() };
+  return {
+    durationMs: performance.now() - started,
+    inspectedControls: await page.locator("button, input, textarea, select, a[href]").count(),
+    unnamedControls: inaccessible.length,
+  };
 }
 
 
@@ -380,6 +480,7 @@ test("real Keycloak candidate browser release flow", async ({ context, page }) =
   const candidateSha = requiredEnvironment("ASTRAL_RELEASE_CANDIDATE_SHA");
   const output = resolve(requiredEnvironment("ASTRAL_RELEASE_OUTPUT"));
   const coverageOutput = resolve(requiredEnvironment("ASTRAL_RELEASE_COVERAGE_OUTPUT"));
+  const istanbulOutput = resolve(requiredEnvironment("ASTRAL_RELEASE_COVERAGE_ISTANBUL_OUTPUT"));
   const stage = JSON.parse(await readFile(requiredEnvironment("ASTRAL_RELEASE_STAGING_FILE"), "utf8"));
   const staging = stagingEnvironment(stage, baseUrl);
   const imageRef = requiredEnvironment("ASTRAL_PLAYWRIGHT_IMAGE");
@@ -395,6 +496,7 @@ test("real Keycloak candidate browser release flow", async ({ context, page }) =
   const startedAt = new Date().toISOString();
   const rawRoot = resolve(dirname(output), "web-raw");
   const rawArtifacts = new Map();
+  const screenshotArtifacts = new Map();
   const writeRaw = async (name, value) => {
     const path = resolve(rawRoot, `${name}.json`);
     const sha256 = await atomicJson(path, value);
@@ -407,8 +509,20 @@ test("real Keycloak candidate browser release flow", async ({ context, page }) =
     rawArtifacts.set(name, artifact);
     return artifact;
   };
+  const writeScreenshot = async (name) => {
+    const path = resolve(rawRoot, `${name}.png`);
+    const sha256 = await atomicBytes(path, await page.screenshot());
+    const artifact = {
+      name: `web_${name}_screenshot`,
+      kind: "screenshot",
+      immutable_reference: `bundle://web-raw/${basename(path)}`,
+      sha256,
+    };
+    screenshotArtifacts.set(name, artifact);
+    return artifact;
+  };
 
-  const signInDuration = await signInThroughKeycloak(
+  const signIn = await signInThroughKeycloak(
     page,
     baseUrl,
     requiredEnvironment("ASTRAL_RELEASE_USERNAME"),
@@ -417,49 +531,74 @@ test("real Keycloak candidate browser release flow", async ({ context, page }) =
   await verifyCurrentSessionOwnsWebSocket(page, wire, stalePriorPrincipalToken);
   const signInArtifact = await writeRaw("sign_in", {
     authenticatedOrigin: new URL(page.url()).origin,
-    durationMs: Math.round(signInDuration),
+    durationMs: Math.round(signIn.durationMs),
     freshContext: true,
+    leakedStorageKeys: signIn.leakedStorageKeys,
     method: "keycloak_ui_authorization_code_pkce",
     sharedTabStaleTokenRejected: true,
     websocketPrincipalMatchesCookieSession: true,
   });
+  const signInScreenshot = await writeScreenshot("sign_in");
 
   const chat = await runRenderedChat(page);
   const chatArtifact = await writeRaw("rendered_chat", {
     durationMs: Math.round(chat.durationMs),
     normalizedDiceContractObserved: true,
     promptSha256: canonicalSha256(Buffer.from(PROMPT, "utf8")),
+    transcriptCharacters: chat.transcript.length,
   });
+  const chatScreenshot = await writeScreenshot("rendered_chat");
 
   const resumeStarted = performance.now();
   const resumeLatencies = await runResumeTrials(page, chat.transcript, chat.canvas);
   const resumeDuration = performance.now() - resumeStarted;
+  const resumeWithinContract = resumeLatencies.filter((value) => value <= RESUME_CONTRACT_MS).length;
+  const resumeSuccessRate = (resumeWithinContract / resumeLatencies.length) * 100;
+  const resumeMaxLatencyMs = Math.round(Math.max(...resumeLatencies));
   const resumeArtifact = await writeRaw("reconnect_resume", {
+    contractMs: RESUME_CONTRACT_MS,
     latenciesMs: resumeLatencies.map(Math.round),
-    maxLatencyMs: Math.round(Math.max(...resumeLatencies)),
-    successfulTrials: resumeLatencies.length,
+    maxLatencyMs: resumeMaxLatencyMs,
+    successfulTrials: resumeWithinContract,
     trialCount: 20,
   });
+  const resumeScreenshot = await writeScreenshot("reconnect_resume");
 
   const authoring = await runPersonalAgentAuthoring(page, wire);
   const authoringArtifact = await writeRaw("personal_agent", {
     analyzePassed: true,
+    completedOperations: authoring.completedCount,
     durationMs: Math.round(authoring.durationMs),
+    failedOperations: authoring.failedCount,
     generatedTestIdentitySha256: canonicalSha256(Buffer.from(authoring.name, "utf8")),
   });
+  const authoringScreenshot = await writeScreenshot("personal_agent");
 
   const lifecycle = await verifyLifecycle(wire, lifecycleAgent, lifecycleStates);
+  const distinctLifecycleStates = new Set(lifecycle.events.map((event) => event.state)).size;
   const lifecycleArtifact = await writeRaw("agent_lifecycle", {
     agentIdSha256: canonicalSha256(Buffer.from(lifecycleAgent, "utf8")),
+    distinctStates: distinctLifecycleStates,
     durationMs: Math.round(lifecycle.durationMs),
     events: lifecycle.events.map(({ generation, revision, state }) => ({ generation, revision, state })),
     requiredStates: lifecycleStates,
   });
+  const lifecycleScreenshot = await writeScreenshot("agent_lifecycle");
 
   const accessibility = await verifyAccessibility(page);
   const accessibilityArtifact = await writeRaw("accessibility_semantics", accessibility);
+  const accessibilityScreenshot = await writeScreenshot("accessibility_semantics");
+
   const coverage = await page.coverage.stopJSCoverage();
   await atomicJson(coverageOutput, coverage);
+  // The lock-pinned producer converts and executable-syntax-filters the raw V8
+  // ranges into the exact Istanbul statement envelope the coverage gate parses.
+  const istanbul = await convertPlaywrightV8Coverage(
+    mergedMaintainedEntries(coverage, new URL(baseUrl).origin),
+    (entry) => entry.sourcePath,
+  );
+  expect(Object.keys(istanbul.coverage)).toContain("backend/webrender/static/client.js");
+  await atomicJson(istanbulOutput, istanbul);
   const completedAt = new Date().toISOString();
   const report = {
     document_type: "platform_evidence",
@@ -486,33 +625,34 @@ test("real Keycloak candidate browser release flow", async ({ context, page }) =
     unavailable_reason: null,
     unavailability_observation: null,
     checks: [
-      passedCheck("sign_in", signInDuration, signInArtifact),
-      passedCheck("rendered_chat", chat.durationMs, chatArtifact),
-      passedCheck("reconnect_resume", resumeDuration, resumeArtifact, [
-        {
-          metric: "trial_count",
-          aggregation: "total",
-          value: 20,
-          unit: "count",
-          sample_count: 20,
-          comparator: "gte",
-          threshold: 20,
-        },
-        {
-          metric: "resume_success_rate",
-          aggregation: "rate",
-          value: 100,
-          unit: "percent",
-          sample_count: 20,
-          comparator: "gte",
-          threshold: 100,
-        },
+      passedCheck("sign_in", signIn.durationMs, [signInArtifact, signInScreenshot], [
+        measurement("sign_in_duration_ms", "maximum", Math.round(signIn.durationMs), "milliseconds", 1, "lte", 180_000),
+        measurement("credential_storage_leaks", "total", signIn.leakedStorageKeys, "count", 1, "eq", 0),
       ]),
-      passedCheck("agent_lifecycle", lifecycle.durationMs, lifecycleArtifact),
-      passedCheck("personal_agent", authoring.durationMs, authoringArtifact),
-      passedCheck("accessibility_semantics", accessibility.durationMs, accessibilityArtifact),
+      passedCheck("rendered_chat", chat.durationMs, [chatArtifact, chatScreenshot], [
+        measurement("rendered_chat_duration_ms", "maximum", Math.round(chat.durationMs), "milliseconds", 1, "lte", 900_000),
+        measurement("transcript_characters", "total", chat.transcript.length, "count", 1, "gte", 1),
+      ]),
+      passedCheck("reconnect_resume", resumeDuration, [resumeArtifact, resumeScreenshot], [
+        measurement("trial_count", "total", resumeLatencies.length, "count", 20, "gte", 20),
+        measurement("resume_success_rate", "rate", resumeSuccessRate, "percent", 20, "gte", 100),
+        measurement("resume_latency_max_ms", "maximum", resumeMaxLatencyMs, "milliseconds", 20, "lte", RESUME_CONTRACT_MS),
+      ]),
+      passedCheck("agent_lifecycle", lifecycle.durationMs, [lifecycleArtifact, lifecycleScreenshot], [
+        measurement("distinct_lifecycle_states", "total", distinctLifecycleStates, "count", lifecycle.events.length, "gte", lifecycleStates.length),
+        measurement("lifecycle_events_observed", "total", lifecycle.events.length, "count", lifecycle.events.length, "gte", 1),
+      ]),
+      passedCheck("personal_agent", authoring.durationMs, [authoringArtifact, authoringScreenshot], [
+        measurement("authoring_operations_completed", "total", authoring.completedCount, "count", authoring.statusCount, "gte", 1),
+        measurement("authoring_operations_failed", "total", authoring.failedCount, "count", authoring.statusCount, "eq", 0),
+      ]),
+      passedCheck("accessibility_semantics", accessibility.durationMs, [accessibilityArtifact, accessibilityScreenshot], [
+        measurement("unnamed_visible_controls", "total", accessibility.unnamedControls, "count", accessibility.inspectedControls, "eq", 0),
+        measurement("inspected_controls", "total", accessibility.inspectedControls, "count", accessibility.inspectedControls, "gte", 1),
+      ]),
     ],
   };
   await atomicJson(output, report);
   expect(rawArtifacts.size).toBe(6);
+  expect(screenshotArtifacts.size).toBe(6);
 });

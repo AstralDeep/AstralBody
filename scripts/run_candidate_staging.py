@@ -6,6 +6,7 @@ from __future__ import annotations
 import argparse
 import hashlib
 import http.client
+import importlib.util
 import json
 import os
 import re
@@ -14,6 +15,7 @@ import subprocess
 import sys
 import tempfile
 import time
+import uuid
 from datetime import UTC, datetime
 from pathlib import Path
 from typing import Any, Mapping, Sequence
@@ -22,6 +24,15 @@ from urllib.parse import urlsplit
 
 REPO_ROOT = Path(__file__).resolve().parents[1]
 COMPOSE_PATH = REPO_ROOT / "docker-compose.staging.yml"
+TRUST_SCHEMA_PATH = (
+    REPO_ROOT
+    / "specs/060-runtime-reliability-hardening/contracts/release-trust.schema.json"
+)
+WORKFLOW_PATH_RE = re.compile(
+    r"^[A-Za-z0-9_.-]+/[A-Za-z0-9_.-]+/\.github/workflows/[A-Za-z0-9_.-]+$"
+)
+REPOSITORY_RE = re.compile(r"^[A-Za-z0-9_.-]+/[A-Za-z0-9_.-]+$")
+ARTIFACT_ID_RE = re.compile(r"^[1-9][0-9]*$")
 GIT_SHA_RE = re.compile(r"^[0-9a-f]{40}$")
 SHA256_RE = re.compile(r"^[0-9a-f]{64}$")
 IMAGE_RE = re.compile(
@@ -370,10 +381,165 @@ def _atomic_json(path: Path, value: Mapping[str, Any]) -> None:
         os.replace(temporary, path)
 
 
+def _load_evidence_validator() -> Any:
+    """Import scripts/validate_release_evidence.py for trust-schema validation."""
+
+    path = Path(__file__).resolve().parent / "validate_release_evidence.py"
+    spec = importlib.util.spec_from_file_location(
+        "candidate_staging_release_validator", path
+    )
+    if spec is None or spec.loader is None:
+        raise StagingError(f"cannot import release-evidence validator at {path}")
+    module = importlib.util.module_from_spec(spec)
+    sys.modules[spec.name] = module
+    spec.loader.exec_module(module)
+    return module
+
+
+def _trusted_manifest_identity(protected: Mapping[str, str]) -> dict[str, Any]:
+    """Collect fail-closed GitHub identity for the trusted stage-deploy manifest."""
+
+    if protected["GITHUB_JOB"] != "stage-deploy":
+        raise StagingError("--trusted-manifest requires the stage-deploy GitHub job")
+    repository = os.environ.get("GITHUB_REPOSITORY", "")
+    if not REPOSITORY_RE.fullmatch(repository):
+        raise StagingError("trusted manifest requires GITHUB_REPOSITORY as owner/repo")
+    workflow_name = os.environ.get("GITHUB_WORKFLOW", "")
+    if not workflow_name:
+        raise StagingError("trusted manifest requires GITHUB_WORKFLOW")
+    workflow_path = os.environ.get("GITHUB_WORKFLOW_REF", "").partition("@")[0]
+    workflow_sha = os.environ.get("GITHUB_WORKFLOW_SHA", "")
+    if not WORKFLOW_PATH_RE.fullmatch(workflow_path) or not GIT_SHA_RE.fullmatch(
+        workflow_sha
+    ):
+        raise StagingError(
+            "trusted manifest requires GITHUB_WORKFLOW_REF and a 40-hex GITHUB_WORKFLOW_SHA"
+        )
+    builder_sha = os.environ.get("RELEASE_TRUSTED_BUILDER_SHA", "")
+    builder_identity = os.environ.get("RELEASE_TRUSTED_BUILDER_IDENTITY", "")
+    if not GIT_SHA_RE.fullmatch(builder_sha) or not builder_identity:
+        raise StagingError(
+            "trusted manifest requires RELEASE_TRUSTED_BUILDER_SHA and "
+            "RELEASE_TRUSTED_BUILDER_IDENTITY"
+        )
+    try:
+        run_attempt = int(protected["GITHUB_RUN_ATTEMPT"])
+    except ValueError as exc:
+        raise StagingError("GITHUB_RUN_ATTEMPT must be an integer") from exc
+    artifact_id = os.environ.get("ASTRAL_STAGE_OUTPUTS_ARTIFACT_ID", "1")
+    if not ARTIFACT_ID_RE.fullmatch(artifact_id):
+        raise StagingError("ASTRAL_STAGE_OUTPUTS_ARTIFACT_ID must be a positive integer")
+    return {
+        "repository": repository,
+        "workflow_name": workflow_name,
+        "workflow_ref": f"{workflow_path}@{workflow_sha}",
+        "builder_sha": builder_sha,
+        "builder_identity": builder_identity,
+        "run_attempt": run_attempt,
+        "artifact_id": artifact_id,
+    }
+
+
+def _write_trusted_manifest(
+    *,
+    path: Path,
+    identity: Mapping[str, Any],
+    protected: Mapping[str, str],
+    candidate_sha: str,
+    environment_id: str,
+    output: Mapping[str, Any],
+    outputs_path: Path,
+) -> None:
+    """Emit one schema-valid trusted_stage_deploy manifest beside ``--outputs``.
+
+    The self-declared artifact/builder values are never a trust root: the
+    protected trusted-builder workflow reconstructs run/job/artifact identity
+    from the GitHub API for the current run and ignores producer-uploaded
+    bytes as authority (release-trust.schema.json $comment).
+    """
+
+    repository = str(identity["repository"])
+    run_id = protected["GITHUB_RUN_ID"]
+    member = outputs_path.name
+    artifact_name = os.environ.get(
+        "ASTRAL_STAGE_OUTPUTS_ARTIFACT_NAME", f"stage-outputs-{run_id}"
+    )
+    # The trust deployment identity is the deploy output minus the two
+    # evidence-only fields (deployed_at, macos_personal_agent_host).
+    deployment = {
+        key: value
+        for key, value in output.items()
+        if key not in {"deployed_at", "macos_personal_agent_host"}
+    }
+    manifest = {
+        "document_type": "trusted_stage_deploy",
+        "schema_version": 1,
+        "manifest_id": str(
+            uuid.uuid5(
+                uuid.NAMESPACE_URL,
+                "astraldeep:060:trusted-stage-deploy:"
+                f"{repository}:{run_id}:{identity['run_attempt']}:{environment_id}",
+            )
+        ),
+        "repository": repository,
+        "candidate_sha": candidate_sha,
+        "workflow": {
+            "name": identity["workflow_name"],
+            "run_id": run_id,
+            "run_attempt": identity["run_attempt"],
+            "job_id": protected["GITHUB_JOB"],
+        },
+        "workflow_ref": identity["workflow_ref"],
+        "runner": {
+            "os": os.environ.get("ASTRAL_RUNNER_OS", "linux"),
+            "architecture": os.environ.get("ASTRAL_RUNNER_ARCH", "x86_64"),
+            "runner_image": os.environ.get("ImageOS", "self-hosted-staging"),
+            "runner_name": protected["RUNNER_NAME"],
+            "runner_environment": os.environ.get(
+                "ASTRAL_RUNNER_ENVIRONMENT", "self_hosted"
+            ),
+        },
+        "trusted_builder": {
+            "repository": repository,
+            "workflow_path": ".github/workflows/release-trusted-builder.yml",
+            "signer_digest": identity["builder_sha"],
+            "certificate_identity": identity["builder_identity"],
+        },
+        "generated_at": output["deployed_at"],
+        "stage_outputs_artifact": {
+            "kind": "github_actions_artifact_member",
+            "repository": repository,
+            "run_id": run_id,
+            "run_attempt": identity["run_attempt"],
+            "artifact_id": identity["artifact_id"],
+            "artifact_name": artifact_name,
+            "member": member,
+            "immutable_reference": (
+                f"gh://{repository}/runs/{run_id}/attempts/"
+                f"{identity['run_attempt']}/artifacts/{identity['artifact_id']}/"
+                f"members/{member}"
+            ),
+            "sha256": _sha256(outputs_path),
+        },
+        "deployment": deployment,
+    }
+    validator = _load_evidence_validator()
+    trust_schema = validator.load_json_document(TRUST_SCHEMA_PATH)
+    try:
+        validator.validate_document(manifest, trust_schema)
+    except validator.ReleaseEvidenceError as exc:
+        raise StagingError(
+            f"trusted stage-deploy manifest is schema-invalid: {exc}"
+        ) from exc
+    _atomic_json(path, manifest)
+
+
 def _deploy(args: argparse.Namespace) -> int:
     protected = _required_environment()
     if not args.leave_running:
         raise StagingError("qualifying deploy must use --leave-running until matrix cleanup")
+    trusted_manifest = getattr(args, "trusted_manifest", None)
+    identity = _trusted_manifest_identity(protected) if trusted_manifest else None
     candidate_image = validate_image_reference(args.candidate_image)
     _git_identity(args.candidate_sha)
     fixtures = validate_fixtures(args.fixture_manifest)
@@ -498,6 +664,16 @@ def _deploy(args: argparse.Namespace) -> int:
         "service_identity_sha256": hashlib.sha256(ps_bytes).hexdigest(),
     }
     _atomic_json(Path(args.outputs), output)
+    if trusted_manifest and identity is not None:
+        _write_trusted_manifest(
+            path=Path(trusted_manifest),
+            identity=identity,
+            protected=protected,
+            candidate_sha=args.candidate_sha,
+            environment_id=args.environment_id,
+            output=output,
+            outputs_path=Path(args.outputs),
+        )
     print(
         json.dumps(
             {
@@ -547,6 +723,7 @@ def _parser() -> argparse.ArgumentParser:
     deploy.add_argument("--environment-id", required=True)
     deploy.add_argument("--outputs", required=True)
     deploy.add_argument("--leave-running", action="store_true")
+    deploy.add_argument("--trusted-manifest")
     cleanup = commands.add_parser("cleanup")
     cleanup.add_argument("--environment-id", required=True)
     return parser

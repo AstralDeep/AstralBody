@@ -140,6 +140,7 @@ def test_release_tooling_job_covers_every_maintained_script_non_vacuously() -> N
     expected_scripts = {
         "check_changed_coverage.py",
         "check_doc_links.py",
+        "prepare_release_evidence.py",
         "run_android_next_major_canary.py",
         "run_candidate_staging.py",
         "validate_release_evidence.py",

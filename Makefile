@@ -7,7 +7,8 @@ HOST_PWD := $(shell cygpath -m "$(CURDIR)" 2>/dev/null || pwd -W 2>/dev/null || 
 
 .PHONY: help up down restart apply-config build ps logs logs-db shell psql \
         sync sync-backend \
-        test test-backend check-060-selection test-060 lint lint-backend
+        test test-backend check-060-selection test-060 lint lint-backend \
+        prepare-release-evidence
 
 FEATURE_060_FOCUSED_TESTS := \
 	tests/test_release_contract_schemas.py \
@@ -88,6 +89,14 @@ test-060: check-060-selection ## Run the focused 060 setup/contract suite
 	$(FEATURE_060_TEST_CONTAINER) python -m pytest -p no:cacheprovider -q $(FEATURE_060_FOCUSED_TESTS)
 
 test: test-backend ## Run all tests
+
+## ---------- Release evidence (feature 060) ----------
+
+# Deterministic local pre-push evidence command (T107). Diagnostic only: the
+# emitted JSON always states protected_release_authorization: false and only
+# the protected-decision GitHub job can produce a trusted release decision.
+prepare-release-evidence: ## Collect, normalize, and parse local release evidence (diagnostic, BASE_SHA required)
+	python3 scripts/prepare_release_evidence.py --base-sha "$${BASE_SHA}" --candidate-sha "$$(git rev-parse HEAD)"
 
 ## ---------- Lint ----------
 

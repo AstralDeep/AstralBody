@@ -544,7 +544,12 @@ The driver creates unique Compose project/volumes, restores `representative-057.
 non-secret PKCE realm while injecting runtime users only from secrets, boots normal `_init_db()` to
 060.004, starts real Keycloak and product background/scheduler paths, and emits a non-loopback HTTPS
 endpoint plus request, deployment-run, image/service, dataset/realm/manifest, schema, worker, and
-candidate-capability identities. `stage-deploy` exits while the namespace remains alive. Every
+candidate-capability identities. The optional `--trusted-manifest` flag additionally emits a
+schema-valid `trusted_stage_deploy` manifest (`contracts/release-trust.schema.json`) derived from the
+same deploy outputs plus the job's `GITHUB_*` identity; it refuses any job whose `GITHUB_JOB` is not
+`stage-deploy`, and its self-declared artifact/builder fields are never a trust root — the protected
+trusted builder reconstructs run/job/artifact identity from the GitHub API before attesting.
+`stage-deploy` exits while the namespace remains alive. Every
 backend/browser/Windows/Android/Apple job declares `needs: stage-deploy`, consumes those exact
 trusted outputs, proves that endpoint's reachability itself, and repeats the normalized identity in
 its report. Repository rules require `.github/workflows/release-trusted-builder.yml` at a protected
@@ -584,11 +589,23 @@ missing/unavailable platform reports, under-threshold quantitative measurements,
 outcomes, and raw-evidence references whose trusted bundled/GitHub/OCI bytes cannot be resolved and
 re-hashed.
 
-T107 owns the future normative `make prepare-release-evidence` wrapper; it is not executable until
-that open task lands. Until then, use the tracked direct validator invocation above for local
-diagnostics. The eventual wrapper collects, normalizes, and parses canonical evidence and digests
-locally. A green local
-result remains diagnostic and must state `protected_release_authorization: false`. Protected CI then
+The normative local pre-push wrapper is `make prepare-release-evidence` (T107):
+
+```bash
+BASE_SHA="$(git rev-parse origin/main)" make prepare-release-evidence
+# equivalent direct invocation
+python3 scripts/prepare_release_evidence.py --base-sha "$(git rev-parse origin/main)" --candidate-sha "$(git rev-parse HEAD)"
+```
+
+The wrapper collects, normalizes, and parses canonical evidence and digests locally: it inventories
+`build/060/release-evidence`, canonicalizes and SHA-256-digests every recognized document, assembles
+one deterministic `release_evidence_set` (content-derived UUIDv5 identity) when the directory holds
+only platform reports, and delegates schema plus same-candidate policy validation to
+`scripts/validate_release_evidence.py`. It writes
+`build/060/release-evidence/local-diagnostic.json`, exits `2` with
+`release evidence rejected: ...` on any rejection, and stays diagnostic. A green local
+result remains diagnostic and must state `protected_release_authorization: false`; the wrapper has
+no decision-output mode and cannot emit a trusted decision. Protected CI then
 downloads the exact run/artifact identities, independently schema-validates and re-hashes the
 canonical evidence and executes pinned policy/coverage. An affected platform must pass unless the
 existing bounded exception policy is independently satisfied by protected CI; local output cannot

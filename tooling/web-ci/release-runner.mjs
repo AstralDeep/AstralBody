@@ -2,7 +2,7 @@
 /** Launch the feature-060 browser proof only inside the pinned Playwright image. */
 
 import { existsSync, readFileSync } from "node:fs";
-import { isAbsolute, resolve } from "node:path";
+import { dirname, isAbsolute, join, resolve } from "node:path";
 import { spawnSync } from "node:child_process";
 
 
@@ -26,6 +26,7 @@ function parseArguments(argv) {
   const allowed = new Set([
     "base-url",
     "candidate-sha",
+    "coverage-istanbul-output",
     "coverage-output",
     "image-ref",
     "output",
@@ -125,6 +126,14 @@ const coverageOutput = validateOutputPath(
   required(args["coverage-output"], "coverage-output"),
   "coverage-output",
 );
+// The lock-pinned V8→Istanbul conversion output rides beside the raw V8 file
+// unless the producer names it explicitly.
+const coverageIstanbulOutput = validateOutputPath(
+  args["coverage-istanbul-output"]
+    ?? process.env.ASTRAL_RELEASE_COVERAGE_ISTANBUL_OUTPUT
+    ?? join(dirname(coverageOutput), "web-istanbul.json"),
+  "coverage-istanbul-output",
+);
 for (const secretName of ["ASTRAL_RELEASE_USERNAME", "ASTRAL_RELEASE_PASSWORD"]) {
   required(process.env[secretName], secretName);
 }
@@ -146,6 +155,7 @@ const environment = {
   ASTRAL_PLAYWRIGHT_IMAGE: pinnedImage,
   ASTRAL_RELEASE_BASE_URL: baseUrl,
   ASTRAL_RELEASE_CANDIDATE_SHA: candidateSha,
+  ASTRAL_RELEASE_COVERAGE_ISTANBUL_OUTPUT: coverageIstanbulOutput,
   ASTRAL_RELEASE_COVERAGE_OUTPUT: coverageOutput,
   ASTRAL_RELEASE_ID: releaseId,
   ASTRAL_RELEASE_OUTPUT: output,

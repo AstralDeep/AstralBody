@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import copy
+import hashlib
 import importlib.util
 import json
 import os
@@ -490,3 +491,227 @@ def test_fixture_manifest_revision_and_version_are_closed_contracts(
     )
     with pytest.raises(driver.StagingError, match="057.001"):
         driver.validate_fixtures(manifest)
+
+
+def _load_release_validator() -> Any:
+    validator_path = REPO_ROOT / "scripts" / "validate_release_evidence.py"
+    spec = importlib.util.spec_from_file_location(
+        "candidate_staging_test_release_validator", validator_path
+    )
+    assert spec is not None and spec.loader is not None
+    module = importlib.util.module_from_spec(spec)
+    sys.modules[spec.name] = module
+    spec.loader.exec_module(module)
+    return module
+
+
+def _stage_deploy_github_identity(monkeypatch: pytest.MonkeyPatch) -> None:
+    monkeypatch.setenv("GITHUB_REPOSITORY", "AstralDeep/AstralDeep")
+    monkeypatch.setenv("GITHUB_WORKFLOW", "release-readiness")
+    monkeypatch.setenv(
+        "GITHUB_WORKFLOW_REF",
+        "AstralDeep/AstralDeep/.github/workflows/release-readiness.yml"
+        "@refs/heads/060-runtime-reliability-hardening",
+    )
+    monkeypatch.setenv("GITHUB_WORKFLOW_SHA", "d" * 40)
+    monkeypatch.setenv("RELEASE_TRUSTED_BUILDER_SHA", "e" * 40)
+    monkeypatch.setenv(
+        "RELEASE_TRUSTED_BUILDER_IDENTITY",
+        "https://github.com/AstralDeep/AstralDeep/.github/workflows/"
+        "release-trusted-builder.yml@refs/heads/main",
+    )
+
+
+def _fake_docker_deploy(
+    driver: Any, monkeypatch: pytest.MonkeyPatch, tmp_path: Path
+) -> None:
+    runtime_env = tmp_path / "runtime.env"
+    runtime_env.write_text("ASTRAL_ENV=staging\n", encoding="utf-8")
+    runtime_env.chmod(0o600)
+    protected = _protected_environment(runtime_env)
+    monkeypatch.setattr(driver, "_required_environment", lambda: protected)
+    monkeypatch.setattr(driver, "_git_identity", lambda _candidate: None)
+    capability = {"supported": False, "runtime_contract_versions": [], "source_feature": None}
+    monkeypatch.setattr(driver, "_probe", lambda _endpoint, _token: capability)
+
+    def run(
+        arguments: list[str],
+        *,
+        environment: dict[str, str],
+        input_bytes: bytes | None = None,
+    ) -> subprocess.CompletedProcess[bytes]:
+        del environment, input_bytes
+        if "SELECT value FROM schema_meta" in arguments[-1]:
+            output = b"060.004\n"
+        elif "ps" in arguments and "--format" in arguments:
+            output = b'[{"Service":"astraldeep"}]\n'
+        else:
+            output = b""
+        return subprocess.CompletedProcess(arguments, 0, output, b"")
+
+    monkeypatch.setattr(driver, "_run", run)
+
+
+def test_deploy_help_lists_the_optional_trusted_manifest_flag() -> None:
+    completed = subprocess.run(
+        [sys.executable, str(SCRIPT), "deploy", "--help"],
+        check=True,
+        text=True,
+        stdout=subprocess.PIPE,
+        stderr=subprocess.PIPE,
+        env={**os.environ, "PYTHONDONTWRITEBYTECODE": "1"},
+    )
+    assert "--trusted-manifest" in completed.stdout
+
+
+def test_trusted_manifest_is_schema_valid_and_binds_the_deploy_outputs(
+    driver: Any,
+    monkeypatch: pytest.MonkeyPatch,
+    tmp_path: Path,
+    capsys: pytest.CaptureFixture[str],
+) -> None:
+    _fake_docker_deploy(driver, monkeypatch, tmp_path)
+    _stage_deploy_github_identity(monkeypatch)
+    output_path = tmp_path / "outputs" / "staging-outputs.json"
+    manifest_path = tmp_path / "outputs" / "trusted-stage-deploy.json"
+    args = SimpleNamespace(
+        leave_running=True,
+        candidate_image="ghcr.io/astraldeep/astraldeep@sha256:" + "c" * 64,
+        candidate_sha="b" * 40,
+        fixture_manifest=str(MANIFEST),
+        environment_id="request-060-1",
+        outputs=str(output_path),
+        trusted_manifest=str(manifest_path),
+    )
+    assert driver._deploy(args) == 0
+    capsys.readouterr()
+
+    output = json.loads(output_path.read_text(encoding="utf-8"))
+    manifest = json.loads(manifest_path.read_text(encoding="utf-8"))
+    assert manifest["document_type"] == "trusted_stage_deploy"
+    assert manifest["candidate_sha"] == "b" * 40
+    assert manifest["workflow"] == {
+        "name": "release-readiness",
+        "run_id": "6001",
+        "run_attempt": 1,
+        "job_id": "stage-deploy",
+    }
+    assert manifest["workflow_ref"] == (
+        "AstralDeep/AstralDeep/.github/workflows/release-readiness.yml@" + "d" * 40
+    )
+    assert manifest["trusted_builder"]["signer_digest"] == "e" * 40
+    assert manifest["generated_at"] == output["deployed_at"]
+    assert manifest["deployment"] == {
+        key: value
+        for key, value in output.items()
+        if key not in {"deployed_at", "macos_personal_agent_host"}
+    }
+    artifact = manifest["stage_outputs_artifact"]
+    assert artifact["member"] == "staging-outputs.json"
+    assert artifact["sha256"] == hashlib.sha256(output_path.read_bytes()).hexdigest()
+    assert artifact["immutable_reference"].startswith(
+        "gh://AstralDeep/AstralDeep/runs/6001/attempts/1/artifacts/"
+    )
+
+    validator = _load_release_validator()
+    trust_schema = validator.load_json_document(
+        REPO_ROOT
+        / "specs/060-runtime-reliability-hardening/contracts/release-trust.schema.json"
+    )
+    validator.validate_document(manifest, trust_schema)
+
+
+def test_trusted_manifest_requires_stage_deploy_job_and_github_identity(
+    driver: Any, monkeypatch: pytest.MonkeyPatch, tmp_path: Path
+) -> None:
+    runtime_env = tmp_path / "runtime.env"
+    runtime_env.write_text("ASTRAL_ENV=staging\n", encoding="utf-8")
+    runtime_env.chmod(0o600)
+    protected = _protected_environment(runtime_env)
+    protected["GITHUB_JOB"] = "producer"
+    monkeypatch.setattr(driver, "_required_environment", lambda: protected)
+    _stage_deploy_github_identity(monkeypatch)
+    manifest_path = tmp_path / "trusted-stage-deploy.json"
+    args = SimpleNamespace(
+        leave_running=True,
+        candidate_image="ghcr.io/astraldeep/astraldeep@sha256:" + "c" * 64,
+        candidate_sha="b" * 40,
+        fixture_manifest=str(MANIFEST),
+        environment_id="request-060-1",
+        outputs=str(tmp_path / "out.json"),
+        trusted_manifest=str(manifest_path),
+    )
+    with pytest.raises(driver.StagingError, match="stage-deploy"):
+        driver._deploy(args)
+    assert not manifest_path.exists()
+
+    protected["GITHUB_JOB"] = "stage-deploy"
+    monkeypatch.delenv("GITHUB_REPOSITORY", raising=False)
+    with pytest.raises(driver.StagingError, match="GITHUB_REPOSITORY"):
+        driver._deploy(args)
+    monkeypatch.setenv("GITHUB_REPOSITORY", "AstralDeep/AstralDeep")
+    monkeypatch.delenv("GITHUB_WORKFLOW_SHA", raising=False)
+    with pytest.raises(driver.StagingError, match="GITHUB_WORKFLOW_SHA"):
+        driver._deploy(args)
+    monkeypatch.setenv("GITHUB_WORKFLOW_SHA", "d" * 40)
+    monkeypatch.delenv("RELEASE_TRUSTED_BUILDER_SHA", raising=False)
+    with pytest.raises(driver.StagingError, match="RELEASE_TRUSTED_BUILDER_SHA"):
+        driver._deploy(args)
+    monkeypatch.setenv("RELEASE_TRUSTED_BUILDER_SHA", "e" * 40)
+    protected["GITHUB_RUN_ATTEMPT"] = "not-a-number"
+    with pytest.raises(driver.StagingError, match="GITHUB_RUN_ATTEMPT"):
+        driver._deploy(args)
+    protected["GITHUB_RUN_ATTEMPT"] = "1"
+    monkeypatch.setenv("ASTRAL_STAGE_OUTPUTS_ARTIFACT_ID", "0")
+    with pytest.raises(driver.StagingError, match="ASTRAL_STAGE_OUTPUTS_ARTIFACT_ID"):
+        driver._deploy(args)
+    assert not manifest_path.exists()
+
+
+def test_schema_invalid_trusted_manifest_is_refused_before_writing(
+    driver: Any,
+    monkeypatch: pytest.MonkeyPatch,
+    tmp_path: Path,
+    capsys: pytest.CaptureFixture[str],
+) -> None:
+    _fake_docker_deploy(driver, monkeypatch, tmp_path)
+    _stage_deploy_github_identity(monkeypatch)
+    # A run identity that survives the driver's own checks but violates the
+    # trust schema's run_id grammar must be rejected by schema validation.
+    driver._required_environment()["GITHUB_RUN_ID"] = "0"
+    manifest_path = tmp_path / "trusted-stage-deploy.json"
+    args = SimpleNamespace(
+        leave_running=True,
+        candidate_image="ghcr.io/astraldeep/astraldeep@sha256:" + "c" * 64,
+        candidate_sha="b" * 40,
+        fixture_manifest=str(MANIFEST),
+        environment_id="request-060-1",
+        outputs=str(tmp_path / "staging-outputs.json"),
+        trusted_manifest=str(manifest_path),
+    )
+    with pytest.raises(driver.StagingError, match="schema-invalid"):
+        driver._deploy(args)
+    capsys.readouterr()
+    assert not manifest_path.exists()
+
+
+def test_deploy_without_the_flag_writes_no_trusted_manifest(
+    driver: Any,
+    monkeypatch: pytest.MonkeyPatch,
+    tmp_path: Path,
+    capsys: pytest.CaptureFixture[str],
+) -> None:
+    _fake_docker_deploy(driver, monkeypatch, tmp_path)
+    output_path = tmp_path / "outputs" / "staging-outputs.json"
+    args = SimpleNamespace(
+        leave_running=True,
+        candidate_image="ghcr.io/astraldeep/astraldeep@sha256:" + "c" * 64,
+        candidate_sha="b" * 40,
+        fixture_manifest=str(MANIFEST),
+        environment_id="request-060-1",
+        outputs=str(output_path),
+        trusted_manifest=None,
+    )
+    assert driver._deploy(args) == 0
+    capsys.readouterr()
+    assert [path.name for path in output_path.parent.iterdir()] == [output_path.name]
