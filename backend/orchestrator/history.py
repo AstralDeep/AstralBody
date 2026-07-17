@@ -58,7 +58,13 @@ def _rfc3339(value: Any) -> str:
         raise ConversationSnapshotInvalid("snapshot timestamp is unavailable")
     if moment.tzinfo is None:
         moment = moment.replace(tzinfo=UTC)
-    return moment.astimezone(UTC).isoformat().replace("+00:00", "Z")
+    # Second precision: the native continuity validators parse RFC 3339 with
+    # a plain ISO8601DateFormatter, which rejects fractional seconds — a
+    # microsecond-bearing timestamp makes every Apple client silently drop
+    # the committed conversation snapshot.
+    return (
+        moment.astimezone(UTC).replace(microsecond=0).isoformat().replace("+00:00", "Z")
+    )
 
 
 def _contains_reserved_presentation(value: Any) -> bool:

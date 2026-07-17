@@ -118,7 +118,12 @@ private func unsignedInteger(_ value: JSONValue?) -> UInt64? {
 
 private func isRFC3339UTC(_ value: String) -> Bool {
     guard value.hasSuffix("Z") else { return false }
-    return ISO8601DateFormatter().date(from: value) != nil
+    if ISO8601DateFormatter().date(from: value) != nil { return true }
+    // A plain ISO8601DateFormatter rejects fractional seconds, which valid
+    // RFC 3339 producers may emit — accept them rather than dropping the frame.
+    let fractional = ISO8601DateFormatter()
+    fractional.formatOptions = [.withInternetDateTime, .withFractionalSeconds]
+    return fractional.date(from: value) != nil
 }
 
 private func isSnakeCase(_ value: String) -> Bool {
