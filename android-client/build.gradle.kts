@@ -21,9 +21,7 @@ buildscript {
 }
 
 // Lock every lockable configuration in every module (gradle.lockfile per
-// project). Verification metadata (gradle/verification-metadata.xml, sha256)
-// independently pins artifact digests for everything resolved, plugins
-// included.
+// project) so resolution is reproducible and fails closed on version drift.
 allprojects {
     dependencyLocking {
         lockAllConfigurations()
