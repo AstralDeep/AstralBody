@@ -338,8 +338,16 @@ jobs:
       # NOTE: diff-cover exits 0 when the diff vs origin/main contains no
       # measurable Python lines — that vacuous pass is intentional (FR-034:
       # the gate measures CHANGED code; docs/CSS/YAML-only diffs pass).
+      # Test modules are excluded: they are exercised by running them, several
+      # 060 release-tooling test files run only in the host-side
+      # release-tooling-tests lane (they skip inside the product image), and
+      # the spec's multi-lane authority is check_changed_coverage.py. This gate
+      # measures CHANGED PRODUCT code.
       - name: Enforce 90% on changed Python lines
-        run: diff-cover backend/coverage.xml --compare-branch origin/main --fail-under 90
+        run: >
+          diff-cover backend/coverage.xml --compare-branch origin/main
+          --fail-under 90
+          --exclude '*/tests/*' 'backend/tests/*' 'backend/conftest.py' '*/conftest.py'
 
   # ── FR-036: boot-smoke the built image. (1) dev posture answers /healthz +
   #    /readyz with a real DB; (2) production posture with placeholder/missing
