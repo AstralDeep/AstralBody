@@ -13,14 +13,18 @@ authorization.
 
 ## Decision
 
-T126 cannot close. The current workflow tree contains 56 third-party `uses:`
-occurrences and all 56 are now immutable commit-SHA references with adjacent
-version comments. The local evidence wrapper, protected native-CI readiness
-workflow, and hardened build-once Windows publisher required by revised
-T107/T119/T120 do not exist yet, so their dependency closure and reviewed
-workflow identities cannot be audited. The 2026-07-16 owner decision retains
-bounded exception/debt behavior in native protected CI but removes the proposed
-repository-scoped GitHub Apps, installation tokens, and custom token broker.
+T126 cannot close yet. Every third-party `uses:` occurrence in the workflow
+tree — including the T107/T119 additions audited below — is an immutable
+commit-SHA reference with an adjacent version comment. The local evidence
+wrapper (`scripts/prepare_release_evidence.py`), protected native-CI readiness
+workflow set, and hardened build-once Windows bridge/publisher now exist and
+their action pins are recorded below; what still blocks closure is the Android
+Gradle lock/verification metadata, the lead-developer approval disposition,
+and binding this audit to the final candidate SHA. The 2026-07-16 owner
+decision retains bounded exception/debt behavior in native protected CI but
+removes the proposed repository-scoped GitHub Apps, installation tokens, and
+custom token broker; the implemented workflows use only the built-in
+short-lived job token behind protected environments.
 
 The previously ad-hoc Python CI/tooling installs and the legacy Windows release
 install are resolved in the candidate tree: every CI-only Python tool now comes
@@ -58,6 +62,24 @@ version comments.
 | `gradle/actions/setup-gradle@v4` | 2 | `v4.4.3` | `ed408507eac070d1f99cc633dbcf757c94c7933a` |
 | `reactivecircus/android-emulator-runner@v2` | 1 | `v2.38.0` | `a421e43855164a8197daf9d8d40fe71c6996bb0d` |
 | `softprops/action-gh-release@v2` | 1 | `v2.6.2` | `3bb12739c298aeb8a4eeaf626c5b8d85266b0e65` |
+
+Added by the T107/T119 protected-trust implementation on 2026-07-16 (both
+resolved live against their official upstreams before pinning):
+
+| Action | Occurrences | Pinned version | Pinned commit | Purpose |
+|---|---:|---|---|---|
+| `actions/attest-build-provenance` | 2 | `v4.1.1` | `0f67c3f4856b2e3261c31976d6725780e5e4c373` | Trusted-builder + exception-registrar manifest attestation |
+| `sigstore/gh-action-sigstore-python` | 1 | `v3.4.0` | `5b79a39c381910c090341a2c9b0bf022c8b387e1` | Bridge keyless detached signing + in-action self-verify |
+
+The six workflows named by the 2026-07-16 owner decision now exist
+(`release-readiness.yml`, `release-trusted-builder.yml`,
+`release-evidence-exception.yml`, the rewritten `release-windows.yml` bridge,
+`release-windows-publisher-controller.yml`, `release-windows-publisher.yml`);
+every third-party `uses:` in them is commit-SHA pinned with a version comment
+and `backend/tests/test_release_workflows_060.py` enforces the pin format plus
+the absence of any app-token action. The bridge contains no package install;
+the publisher installs only the complete hashed Windows release lock to run the
+shipped v0.3.0 verifier.
 
 Already immutable before this remediation:
 
