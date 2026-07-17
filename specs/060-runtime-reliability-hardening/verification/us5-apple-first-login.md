@@ -151,3 +151,49 @@ platform. Automation will not enter a user/provider API key or bypass the
 mandatory provider gate. Once the owner configures the dedicated account, the
 remaining valid/invalid/slow/unavailable matrix can run without exposing the
 credential in evidence.
+
+## 2026-07-17 update — macOS UNBLOCKED; 30-repetition matrices on BOTH platforms
+
+**macOS root cause found and fixed.** The "status text never transitions"
+symptom was accessibility plumbing, not app logic:
+`.accessibilityElement(children: .ignore)` mints a generic AXGroup even when
+attached to a `Text`, and macOS AXGroups drop AXValue — every terminal phase
+read as an empty value on macOS while rendering correctly on screen. The
+save-status contract now lives directly on the status `Text` (a real
+AXStaticText, which is also what VoiceOver reads), and `presentedLabel` can
+never be empty while loading (an empty `Text` would drop the element from the
+AX tree entirely). macOS first-login went 1/4 → 4/4 with no assertion change.
+
+**Hosted-CI instrument latency separated from product bounds.** The iOS lane's
+recurring CI failures all reduced to measurement artifacts on degraded VMs:
+`.any`-descendant queries costing more than the 250 ms window, the
+background/foreground round-trip charged against the watchdog ceiling, typing
+focus dropped by the VM, mid-flight probes racing the fixture's own legitimate
+completion (~1.7 s) and post-dismissal queries reading as not-found, and cold
+simulators timing out `app.launch()` itself. Fixes: narrow prewarmed
+staticText queries, measured scene-overhead deduction, focus-retry typing,
+form-present guards on mid-flight probes, lane-level retries
+(`-retry-tests-on-failure -test-iterations 3`), a raised per-test hang
+allowance (180 s — a hang guard, not a product bound), and simulator pre-boot.
+The product bounds are UNCHANGED and unconditional: 250 ms acknowledgement,
+active-phase-or-dismissed at one second, five-second navigate-once, 10 s
+watchdog + 1.5 s margin.
+
+**Deterministic 30-repetition matrices (strict, no retries), Xcode 26.6 /
+macOS 26.5.2 / iPhone 17 Pro iOS 26.5 simulator, idle host:**
+
+| Scenario (30 repetitions each) | iOS | macOS |
+|---|---:|---:|
+| slow-success (ack/phases/navigate-once) | 30/30, mean 10.43 s | 30/30, mean 10.00 s |
+| invalid-credentials (corrective terminal, editable retry) | 30/30, mean 8.00 s | 30/30, mean 7.73 s |
+| provider-unavailable (retryable terminal) | 30/30, mean 6.00 s | 30/30, mean 5.60 s |
+| client-watchdog (10 s bound, no invented terminal) | 30/30, mean 16.00 s | 30/30, mean 15.87 s |
+| **Total** | **120/120** | **120/120** |
+
+Durations are full XCUITest case wall times (launch, waits, typing, teardown),
+as in the earlier iOS record; result bundles `t078-ios-30.xcresult` /
+`t078-macos-30.xcresult` (session scratch; per-scenario stats above extracted
+via xcresulttool). These are the deterministic fixture matrices for both
+platforms — 30 repetitions per scenario, exceeding the earlier 8-repetition
+format. The LIVE provider trials (real credential, real backend) remain open
+for the same reason recorded above: automation must not enter a real API key.
